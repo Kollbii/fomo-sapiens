@@ -1,0 +1,254 @@
+{% extends "base.html" %}
+
+{% block content %}
+<!-- Row 1: Header & Masthead Bar -->
+<header class="topbar" aria-label="Application Header">
+  <div class="brand-group">
+    <h1 class="masthead-title">{{ app_name }}</h1>
+    <span class="masthead-edition">READ-ONLY GATEWAY &bull; PORT {{ ibkr_port }}</span>
+  </div>
+
+  <div class="status-cluster">
+    <span id="gateway-badge" class="badge badge--offline">
+      <span class="badge-dot" aria-hidden="true"></span>
+      <span>CHECKING GATEWAY...</span>
+    </span>
+    <span id="md-type-badge" class="badge badge--info">TYPE 3 DELAYED</span>
+    <span id="greeks-source-badge" class="badge badge--info">GREEKS: &mdash;</span>
+    <button id="theme-toggle" class="btn" type="button" aria-label="Toggle color theme">
+      TERMINAL THEME
+    </button>
+  </div>
+</header>
+
+<!-- Row 2: Reserved Top-Level Editorial Banner Container -->
+<section
+  id="editorial-banner-slot"
+  class="editorial-banner-slot"
+  data-slot="editorial-banner"
+  aria-label="Editorial Headline Slot"
+>
+  <span class="editorial-banner-kicker">OPTIONS INTELLIGENCE DISPATCH</span>
+  <span class="editorial-banner-copy">
+    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Multi-DTE Structure (30&ndash;60D)
+  </span>
+</section>
+
+<!-- Row 3: Control Bar -->
+<section class="control-bar" aria-label="Chain Controls and Filters">
+  <div class="control-group">
+    <div id="watchlist-pills" class="watchlist-pills" role="group" aria-label="Watchlist Tickers">
+      {% for sym in watchlist %}
+      <button
+        type="button"
+        class="pill-btn{% if sym == default_ticker %} active{% endif %}"
+        data-ticker="{{ sym }}"
+      >
+        {{ sym }}
+      </button>
+      {% endfor %}
+    </div>
+
+    <form id="custom-ticker-form" class="field-group" autocomplete="off">
+      <label for="custom-ticker-input" class="field-label">Ticker</label>
+      <input
+        id="custom-ticker-input"
+        class="input-control"
+        type="text"
+        maxlength="5"
+        pattern="[A-Za-z]{1,5}"
+        placeholder="e.g. AAPL"
+        aria-label="Custom US Stock Ticker"
+      />
+      <button id="custom-ticker-submit" class="btn" type="submit">LOAD</button>
+    </form>
+  </div>
+
+  <div class="control-group">
+    <label class="field-group">
+      <span class="field-label">Range</span>
+      <select id="range-pct-select" class="select-control" aria-label="Moneyness range">
+        {% for rp in allowed_range_pcts %}
+        <option value="{{ rp }}"{% if rp == default_range_pct %} selected{% endif %}>
+          &plusmn;{{ (rp * 100) | int }}%
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="field-group">
+      <span class="field-label">Step</span>
+      <select id="strike-step-select" class="select-control" aria-label="Strike stride">
+        <option value="auto">Auto</option>
+        {% for step in allowed_strike_steps %}
+        <option value="{{ step }}"{% if step == default_strike_step %} selected{% endif %}>
+          ${{ step | int if step == (step | int) else step }}
+        </option>
+        {% endfor %}
+      </select>
+    </label>
+
+    <label class="field-group">
+      <span class="field-label">Snapshot</span>
+      <select id="snapshot-select" class="select-control" aria-label="Historical Snapshot Archive">
+        <option value="">Latest Archive</option>
+      </select>
+    </label>
+
+    <button id="refresh-btn" class="btn btn-primary" type="button">
+      REFRESH FROM IBKR
+    </button>
+    <a id="export-csv-btn" class="btn" href="/api/csv/{{ default_ticker }}" download>
+      EXPORT CSV
+    </a>
+  </div>
+</section>
+
+<!-- Status / Alert Banner -->
+<div id="alert-banner" class="alert-banner alert-banner--info" role="status" hidden></div>
+
+<!-- Row 4: Headline KPI Strip -->
+<section class="kpi-strip" aria-label="Headline Analytics Summary">
+  <article id="kpi-spot" class="kpi-card">
+    <span class="kpi-label">Underlying Spot</span>
+    <strong class="kpi-value">&mdash;</strong>
+    <span class="kpi-sub">Select ticker or refresh</span>
+  </article>
+
+  <article id="kpi-call-wall" class="kpi-card kpi-card--call">
+    <span class="kpi-label">Primary Call Wall</span>
+    <strong class="kpi-value">&mdash;</strong>
+    <span class="kpi-sub">&mdash;</span>
+  </article>
+
+  <article id="kpi-put-wall" class="kpi-card kpi-card--put">
+    <span class="kpi-label">Primary Put Wall</span>
+    <strong class="kpi-value">&mdash;</strong>
+    <span class="kpi-sub">&mdash;</span>
+  </article>
+
+  <article id="kpi-anomalies" class="kpi-card kpi-card--anomaly">
+    <span class="kpi-label">Unusual Activity</span>
+    <strong class="kpi-value">&mdash;</strong>
+    <span class="kpi-sub">&mdash;</span>
+  </article>
+</section>
+
+<!-- Row 5: Interactive Multi-DTE Plotly Charts (2x2) -->
+<section class="chart-grid" aria-label="Multi-DTE Quantitative Charts">
+  <article class="panel-card">
+    <header class="panel-header">
+      <h2 class="panel-title">Call &amp; Put Walls by Strike</h2>
+      <span id="walls-basis-label" class="panel-meta">OPEN INTEREST / VOLUME</span>
+    </header>
+    <div id="chart-walls" class="chart-canvas" aria-label="Call and Put Walls Chart"></div>
+  </article>
+
+  <article class="panel-card">
+    <header class="panel-header">
+      <h2 class="panel-title">Multi-DTE Implied Volatility Smile</h2>
+      <span class="panel-meta">BUCKETS 30 / 35 / 40 / 45 / 60</span>
+    </header>
+    <div id="chart-iv-smile" class="chart-canvas" aria-label="Multi-DTE IV Smile Chart"></div>
+  </article>
+
+  <article class="panel-card">
+    <header class="panel-header">
+      <h2 class="panel-title">Unusual Activity &amp; Volume/OI Scan</h2>
+      <span class="panel-meta">VOL &gt; OI &bull; VOLUME Z-SCORE</span>
+    </header>
+    <div id="chart-anomalies" class="chart-canvas" aria-label="Unusual Activity Chart"></div>
+  </article>
+
+  <article class="panel-card">
+    <header class="panel-header">
+      <h2 class="panel-title">Multi-DTE Greek Structure</h2>
+      <label class="field-group">
+        <span class="field-label">Metric</span>
+        <select id="greeks-metric-select" class="select-control" aria-label="Greek Metric">
+          <option value="gamma" selected>Gamma</option>
+          <option value="delta">Delta</option>
+          <option value="vega">Vega</option>
+          <option value="theta">Theta</option>
+        </select>
+      </label>
+    </header>
+    <div id="chart-greeks" class="chart-canvas" aria-label="Multi-DTE Greeks Chart"></div>
+  </article>
+</section>
+
+<!-- Row 6: High-Density Option Chain Table -->
+<section class="chain-panel" aria-label="Option Chain Data Table">
+  <header class="table-toolbar">
+    <div>
+      <h2 class="panel-title">Option Chain Detail</h2>
+      <span id="table-row-count" class="panel-meta">0 CONTRACTS</span>
+    </div>
+    <div class="control-group">
+      <label class="field-group">
+        <span class="field-label">DTE Bucket</span>
+        <select id="filter-dte" class="select-control" aria-label="Filter by DTE Bucket">
+          <option value="ALL">All DTEs</option>
+        </select>
+      </label>
+      <label class="field-group">
+        <span class="field-label">Right</span>
+        <select id="filter-right" class="select-control" aria-label="Filter by Option Right">
+          <option value="ALL">Calls &amp; Puts</option>
+          <option value="C">Calls Only</option>
+          <option value="P">Puts Only</option>
+        </select>
+      </label>
+      <label class="field-group">
+        <input id="filter-unusual" type="checkbox" />
+        <span class="field-label">Unusual Only</span>
+      </label>
+    </div>
+  </header>
+
+  <div class="table-scroll">
+    <table id="chain-table">
+      <thead>
+        <tr>
+          <th class="text-left">Expiry</th>
+          <th>DTE (Bucket)</th>
+          <th class="text-left">Right</th>
+          <th>Strike</th>
+          <th>Moneyness %</th>
+          <th>Bid</th>
+          <th>Ask</th>
+          <th>Mark</th>
+          <th>Volume</th>
+          <th>Open Int</th>
+          <th>Vol/OI</th>
+          <th>IV %</th>
+          <th>Delta</th>
+          <th>Gamma</th>
+          <th>Theta</th>
+          <th>Vega</th>
+          <th class="text-left">Source</th>
+        </tr>
+      </thead>
+      <tbody id="chain-table-body">
+        <tr>
+          <td colspan="17" class="text-left">Loading cached snapshot...</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<script id="app-bootstrap" type="application/json">
+{{ {
+  "defaultTicker": default_ticker,
+  "defaultTheme": default_theme,
+  "watchlist": watchlist,
+  "defaultRangePct": default_range_pct,
+  "defaultStrikeStep": default_strike_step
+} | tojson }}
+</script>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/dashboard.js" defer></script>
+{% endblock %}

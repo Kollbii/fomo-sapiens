@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="{{ default_theme | default('print') }}">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>{% block title %}{{ app_name | default("IBKR Options Analyzer") }}{% endblock %}</title>
+  <script>
+    (function () {
+      try {
+        var saved = window.localStorage.getItem("ibkr_options_theme");
+        if (saved === "print" || saved === "terminal") {
+          document.documentElement.setAttribute("data-theme", saved);
+        }
+      } catch (_err) {
+        /* ignore storage restrictions */
+      }
+    })();
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Newsreader:ital,opsz,wght@0,6..72,600;0,6..72,700;1,6..72,400&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="/static/css/tokens.css" />
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <main class="dashboard-shell">
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>

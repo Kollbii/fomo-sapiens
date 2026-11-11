@@ -1,0 +1,690 @@
+/* ==========================================================================
+   IBKR Options Analyzer — Dual-Theme Design Tokens & Layout System
+   Themes:
+     - html[data-theme="print"]    : NYT Print Edition (Editorial Light)
+     - html[data-theme="terminal"] : Obsidian Financial Terminal (Dark)
+   ========================================================================== */
+
+:root {
+  --font-editorial: 'Newsreader', 'Georgia', 'Times New Roman', serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+}
+
+html[data-theme="print"] {
+  --bg-canvas: #FBF9F5;
+  --bg-surface: #F3EFE6;
+  --bg-elevated: #FFFFFF;
+  --bg-table-stripe: #F7F4EC;
+  --bg-hover: #ECE7DA;
+  --text-primary: #111111;
+  --text-secondary: #4A4A4A;
+  --text-muted: #727272;
+  --border-subtle: #DFDCD2;
+  --border-strong: #111111;
+  --border-editorial: 3px double #111111;
+  --accent-primary: #1A1A1A;
+  --accent-call: #0F6E4F;
+  --accent-put: #A82020;
+  --accent-warn: #B45309;
+  --accent-anomaly: #C2410C;
+  --accent-call-bg: rgba(15, 110, 79, 0.11);
+  --accent-put-bg: rgba(168, 32, 32, 0.11);
+  --accent-warn-bg: rgba(180, 83, 9, 0.12);
+  --accent-anomaly-bg: rgba(194, 65, 12, 0.13);
+  --accent-atm-bg: rgba(17, 17, 17, 0.06);
+  --plotly-bg: #FFFFFF;
+  --plotly-grid: #E8E4DA;
+  --plotly-ink: #111111;
+  --shadow-card: none;
+}
+
+html[data-theme="terminal"] {
+  --bg-canvas: #0A0D12;
+  --bg-surface: #11161F;
+  --bg-elevated: #171D29;
+  --bg-table-stripe: #0F141C;
+  --bg-hover: #1E2636;
+  --text-primary: #EAECEF;
+  --text-secondary: #A0AAB8;
+  --text-muted: #6C7687;
+  --border-subtle: #252E3E;
+  --border-strong: #3B475C;
+  --border-editorial: 1px solid #3B475C;
+  --accent-primary: #F59E0B;
+  --accent-call: #10B981;
+  --accent-put: #EF4444;
+  --accent-warn: #F59E0B;
+  --accent-anomaly: #FB923C;
+  --accent-call-bg: rgba(16, 185, 129, 0.14);
+  --accent-put-bg: rgba(239, 68, 68, 0.14);
+  --accent-warn-bg: rgba(245, 158, 11, 0.14);
+  --accent-anomaly-bg: rgba(251, 146, 60, 0.16);
+  --accent-atm-bg: rgba(245, 158, 11, 0.10);
+  --plotly-bg: #11161F;
+  --plotly-grid: #1E2636;
+  --plotly-ink: #EAECEF;
+  --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular,
+.mono,
+td.num,
+th.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+/* --------------------------------------------------------------------------
+   12-Column Responsive Dashboard Shell
+   -------------------------------------------------------------------------- */
+.dashboard-shell {
+  max-width: 1680px;
+  margin: 0 auto;
+  padding: 12px 18px 36px;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.col-12 {
+  grid-column: 1 / -1;
+}
+
+/* --------------------------------------------------------------------------
+   Row 1: Header & Masthead Bar
+   -------------------------------------------------------------------------- */
+.topbar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.brand-group {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.masthead-title {
+  margin: 0;
+  font-family: var(--font-editorial);
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+  color: var(--text-primary);
+}
+
+.masthead-edition {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.status-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.badge-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+
+.badge--online {
+  border-color: var(--accent-call);
+  background: var(--accent-call-bg);
+  color: var(--accent-call);
+}
+
+.badge--online .badge-dot {
+  background: var(--accent-call);
+}
+
+.badge--offline {
+  border-color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.badge--offline .badge-dot {
+  background: var(--accent-warn);
+}
+
+.badge--info {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--bg-canvas);
+}
+
+.btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  background: var(--accent-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Row 2: Reserved Top-Level Editorial Banner Container
+   -------------------------------------------------------------------------- */
+.editorial-banner-slot {
+  grid-column: 1 / -1;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--bg-surface);
+  border-top: var(--border-editorial);
+  border-bottom: var(--border-editorial);
+}
+
+.editorial-banner-kicker {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.editorial-banner-copy {
+  font-family: var(--font-editorial);
+  font-size: 15px;
+  font-style: italic;
+  color: var(--text-secondary);
+}
+
+/* --------------------------------------------------------------------------
+   Row 3: Control Bar (Watchlist Pills, Ticker Input, Filters, Actions)
+   -------------------------------------------------------------------------- */
+.control-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+}
+
+.control-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.watchlist-pills {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.pill-btn {
+  padding: 5px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.pill-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.pill-btn.active {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: var(--bg-canvas);
+}
+
+.field-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.field-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.input-control,
+.select-control {
+  height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.input-control {
+  width: 96px;
+  text-transform: uppercase;
+}
+
+.input-control:focus,
+.select-control:focus {
+  outline: none;
+  border-color: var(--accent-primary);
+}
+
+/* --------------------------------------------------------------------------
+   Alert Banner (Errors, Offline Notices, Empty States)
+   -------------------------------------------------------------------------- */
+.alert-banner {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.alert-banner[hidden] {
+  display: none;
+}
+
+.alert-banner--info {
+  background: var(--bg-surface);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.alert-banner--warn {
+  background: var(--accent-warn-bg);
+  border-color: var(--accent-warn);
+  color: var(--accent-warn);
+}
+
+.alert-banner--error {
+  background: var(--accent-put-bg);
+  border-color: var(--accent-put);
+  color: var(--accent-put);
+}
+
+/* --------------------------------------------------------------------------
+   Row 4: Headline KPI Strip (4 Cards)
+   -------------------------------------------------------------------------- */
+.kpi-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpi-card {
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-top: 2px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kpi-card--call {
+  border-top-color: var(--accent-call);
+}
+
+.kpi-card--put {
+  border-top-color: var(--accent-put);
+}
+
+.kpi-card--anomaly {
+  border-top-color: var(--accent-anomaly);
+}
+
+.kpi-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   Row 5: Multi-DTE Plotly Chart Grid (2x2)
+   -------------------------------------------------------------------------- */
+.chart-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.panel-card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-title {
+  margin: 0;
+  font-family: var(--font-editorial);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.panel-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 320px;
+}
+
+/* --------------------------------------------------------------------------
+   Row 6: High-Density Option Chain Table
+   -------------------------------------------------------------------------- */
+.chain-panel {
+  grid-column: 1 / -1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.table-scroll {
+  width: 100%;
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+}
+
+#chain-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#chain-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  border-bottom: 2px solid var(--border-strong);
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: right;
+  white-space: nowrap;
+}
+
+#chain-table thead th.text-left {
+  text-align: left;
+}
+
+#chain-table tbody td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+#chain-table tbody td.text-left {
+  text-align: left;
+}
+
+#chain-table tbody tr:nth-child(even) {
+  background: var(--bg-table-stripe);
+}
+
+#chain-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+#chain-table tbody tr.row-atm {
+  background: var(--accent-atm-bg);
+}
+
+#chain-table tbody tr.row-anomaly {
+  box-shadow: inset 3px 0 0 var(--accent-anomaly);
+}
+
+.right-pill {
+  display: inline-block;
+  min-width: 24px;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  text-align: center;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.right-pill--C {
+  color: var(--accent-call);
+  background: var(--accent-call-bg);
+}
+
+.right-pill--P {
+  color: var(--accent-put);
+  background: var(--accent-put-bg);
+}
+
+.anomaly-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-anomaly-bg);
+  color: var(--accent-anomaly);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.vol-oi-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.vol-oi-bar {
+  width: 42px;
+  height: 5px;
+  background: var(--border-subtle);
+  border-radius: 1px;
+  overflow: hidden;
+  display: inline-block;
+}
+
+.vol-oi-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-anomaly);
+}
+
+.source-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive Breakpoints
+   -------------------------------------------------------------------------- */
+@media (max-width: 1120px) {
+  .kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 680px) {
+  .dashboard-shell {
+    padding: 10px 10px 24px;
+  }
+  .kpi-strip {
+    grid-template-columns: 1fr;
+  }
+}
