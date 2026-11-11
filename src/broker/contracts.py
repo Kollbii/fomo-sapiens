@@ -5,13 +5,13 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterable, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Protocol
+from typing import Any, Protocol, TypeVar
 from zoneinfo import ZoneInfo
 
-from ib_async import Stock
+from ib_async import Option, Stock
 
 from src.broker.client import IBKRBrokerClient, SleepFn, poll_until
 from src.core.config import Settings
@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 US_EASTERN = ZoneInfo("America/New_York")
 _EPS = 1e-9
 _CANONICAL_STEPS: tuple[float, ...] = (0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0)
+EXACT_PREFETCH_MAX_CONCURRENCY = 3
+_T = TypeVar("_T")
 
 
 class OptionChainLike(Protocol):
@@ -73,6 +75,8 @@ class ExpirationSpec:
     strikes: tuple[float, ...]
     effective_step: float
     exchange_window_count: int
+    qualified_contracts: dict[tuple[float, str], Any] = field(default_factory=dict)
+    exact_strikes_verified: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,7 +99,18 @@ class ChainPlan:
     @property
     def total_contracts(self) -> int:
         if self.expiration_specs:
-            return sum(len(spec.strikes) * 2 for spec in self.expiration_specs)
+            total = 0
+            for spec in self.expiration_specs:
+                if spec.exact_strikes_verified:
+                    total += sum(
+                        1
+                        for s in spec.strikes
+                        for r in ("C", "P")
+                        if (round(s, 6), r) in spec.qualified_contracts
+                    )
+                else:
+                    total += len(spec.strikes) * 2
+            return total
         return len(self.expirations) * len(self.strikes.strikes) * 2
 
 
@@ -120,7 +135,7 @@ def match_expirations(
     dte_min: int,
     dte_max: int,
 ) -> list[ExpirationMatch]:
-    """Select one weekly expiration per ISO week inside `[dte_min, dte_max)` (inclusive lower).
+    """Select one weekly expiration per ISO week inside `[dte_min, dte_max]` (inclusive).
 
     When multiple expirations share an ISO calendar week (for instance Mon/Wed/Fri ETF
     listings), standard Friday expirations (`weekday == 4`) take precedence; otherwise the
@@ -136,7 +151,7 @@ def match_expirations(
         if ib_exp in seen_dates:
             continue
         dte = (parsed - market_date).days
-        if dte_min <= dte < dte_max:
+        if dte_min <= dte <= dte_max:
             seen_dates.add(ib_exp)
             iso = parsed.isocalendar()
             by_week.setdefault((iso.year, iso.week), []).append((ib_exp, parsed, dte))
@@ -391,6 +406,55 @@ def extract_spot(ticker: Any) -> float | None:
     return sanitize_price(getattr(ticker, "close", None))
 
 
+def _has_running_event_loop() -> bool:
+    """Return True when executing inside a live asyncio event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+async def _await_with_optional_timeout(awaitable: Awaitable[_T], timeout_sec: float) -> _T:
+    """Apply `asyncio.wait_for` when an event loop is running; step directly otherwise."""
+    if not _has_running_event_loop():
+        return await awaitable
+    return await asyncio.wait_for(awaitable, timeout=timeout_sec)
+
+
+def _clock_utc(clock: Callable[[], datetime]) -> datetime:
+    dt = clock()
+    return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+def _parse_exact_contracts(
+    details: Iterable[Any],
+    exp: ExpirationMatch,
+    exp_chain: OptionChainLike,
+) -> dict[tuple[float, str], Any]:
+    """Filter `reqContractDetailsAsync` payloads to valid `OPT` contracts for one expiration."""
+    expected_tc = str(getattr(exp_chain, "tradingClass", "") or "")
+    expected_mult = str(getattr(exp_chain, "multiplier", "") or "")
+    by_key: dict[tuple[float, str], Any] = {}
+    for item in details:
+        c = item.contract if hasattr(item, "contract") else item
+        if c is None or int(getattr(c, "conId", 0) or 0) <= 0:
+            continue
+        if str(getattr(c, "secType", "OPT")) != "OPT":
+            continue
+        if str(getattr(c, "lastTradeDateOrContractMonth", ""))[:8] != exp.ib_expiry:
+            continue
+        if expected_tc and str(getattr(c, "tradingClass", "")) != expected_tc:
+            continue
+        if expected_mult and str(getattr(c, "multiplier", "")) != expected_mult:
+            continue
+        right = str(getattr(c, "right", "")).upper()
+        strike = float(getattr(c, "strike", 0.0) or 0.0)
+        if right in ("C", "P") and strike > 0:
+            by_key.setdefault((round(strike, 6), right), c)
+    return by_key
+
+
 # --------------------------------------------------------------------- service
 class ContractDiscoveryService:
     def __init__(
@@ -404,6 +468,9 @@ class ContractDiscoveryService:
         self.settings = settings or client.settings
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep
+        self._exact_contracts_cache: dict[
+            tuple[str, str, str, str], tuple[datetime, dict[tuple[float, str], Any]]
+        ] = {}
 
     @property
     def max_total_contracts(self) -> int:
@@ -412,7 +479,10 @@ class ContractDiscoveryService:
 
     async def qualify_underlying(self, ticker: str) -> Any:
         symbol = TickerValidator.validate(ticker)
-        results = await self.client.ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD"))
+        results = await self.client.run_stage(
+            f"underlying qualification ({symbol})",
+            self.client.ib.qualifyContractsAsync(Stock(symbol, "SMART", "USD")),
+        )
         valid = [
             c
             for c in results
@@ -425,17 +495,29 @@ class ContractDiscoveryService:
     async def _snapshot_spot(self, contract: Any) -> float | None:
         oc = self.settings.options_chain
         ib = self.client.ib
-        ticker = ib.reqMktData(contract, "", False, False)
+        stage = f"spot lookup ({getattr(contract, 'symbol', '?')})"
+        ticker: Any = None
+        subscribed = False
         try:
+            ticker = ib.reqMktData(contract, "", False, False)
+            subscribed = True
             await poll_until(
                 lambda: extract_spot(ticker) is not None,
                 oc.page_collect_timeout_sec,
                 oc.page_poll_interval_sec,
                 self.sleep,
             )
+            self.client.ensure_still_connected(stage=stage)
             return extract_spot(ticker)
+        except Exception as exc:
+            self.client.handle_stage_error(exc, stage=stage)
+            raise
         finally:
-            ib.cancelMktData(contract)
+            if subscribed:
+                try:
+                    ib.cancelMktData(contract)
+                except Exception:  # pragma: no cover - defensive
+                    logger.exception("cancelMktData failed during %s", stage)
 
     async def resolve_spot(self, contract: Any) -> float:
         spot = await self._snapshot_spot(contract)
@@ -449,22 +531,155 @@ class ContractDiscoveryService:
         return spot
 
     async def fetch_chains(self, contract: Any) -> list[OptionChainLike]:
-        chains = await self.client.ib.reqSecDefOptParamsAsync(
-            contract.symbol, "", contract.secType, contract.conId
+        chains = await self.client.run_stage(
+            f"secdef lookup ({contract.symbol})",
+            self.client.ib.reqSecDefOptParamsAsync(
+                contract.symbol, "", contract.secType, contract.conId
+            ),
         )
         return select_smart_chains(list(chains or []), contract.symbol)
 
     async def fetch_chain(self, contract: Any) -> OptionChainLike:
         return select_chain(await self.fetch_chains(contract), contract.symbol)
 
+    def _cache_lookup(self, key: tuple[str, str, str, str]) -> dict[tuple[float, str], Any] | None:
+        ttl = self.settings.options_chain.contract_details_cache_ttl_sec
+        if ttl <= 0:
+            return None
+        entry = self._exact_contracts_cache.get(key)
+        if entry is None:
+            return None
+        cached_at, payload = entry
+        if (_clock_utc(self.clock) - cached_at).total_seconds() > ttl:
+            self._exact_contracts_cache.pop(key, None)
+            return None
+        return payload
+
+    def _cache_store(
+        self, key: tuple[str, str, str, str], payload: dict[tuple[float, str], Any]
+    ) -> None:
+        if payload and self.settings.options_chain.contract_details_cache_ttl_sec > 0:
+            self._exact_contracts_cache[key] = (_clock_utc(self.clock), payload)
+
+    async def _query_exact_for_expiration(
+        self,
+        symbol: str,
+        exp: ExpirationMatch,
+        exp_chain: OptionChainLike,
+    ) -> dict[tuple[float, str], Any]:
+        oc = self.settings.options_chain
+        req_fn = getattr(self.client.ib, "reqContractDetailsAsync", None)
+        if req_fn is None or not oc.prefetch_exact_strikes:
+            return {}
+        probe = Option(
+            symbol=symbol,
+            lastTradeDateOrContractMonth=exp.ib_expiry,
+            strike=0.0,
+            right="",
+            exchange="SMART",
+            multiplier=exp_chain.multiplier,
+            currency="USD",
+            tradingClass=exp_chain.tradingClass,
+        )
+        stage = f"exact contract prefetch ({symbol} {exp.ib_expiry})"
+        try:
+            details = await _await_with_optional_timeout(
+                req_fn(probe),
+                oc.contract_details_timeout_sec,
+            )
+            self.client.ensure_still_connected(stage=stage)
+        except TimeoutError as exc:
+            if self.client.was_connected and not self.client.is_connected:
+                self.client.raise_transport_error(exc, stage=stage)
+            logger.warning(
+                "Exact strike prefetch timeout fallback for %s %s: %s",
+                symbol,
+                exp.ib_expiry,
+                exc,
+            )
+            return {}
+        except (OSError, ConnectionError) as exc:
+            self.client.raise_transport_error(exc, stage=stage)
+        except Exception as exc:
+            if self.client.was_connected and not self.client.is_connected:
+                self.client.raise_transport_error(exc, stage=stage)
+            logger.warning(
+                "Exact strike prefetch fallback for %s %s: %s",
+                symbol,
+                exp.ib_expiry,
+                exc,
+            )
+            return {}
+        return _parse_exact_contracts(details or (), exp, exp_chain)
+
+    async def _prefetch_exact_contracts_by_exp(
+        self,
+        symbol: str,
+        expirations: Sequence[ExpirationMatch],
+        smart_chains: Sequence[OptionChainLike],
+    ) -> dict[str, tuple[OptionChainLike, dict[tuple[float, str], Any]]]:
+        """Resolve exact `ContractDetails` per target expiration with bounded concurrency."""
+        oc = self.settings.options_chain
+        resolved: dict[str, tuple[OptionChainLike, dict[tuple[float, str], Any]]] = {}
+        pending: list[tuple[ExpirationMatch, OptionChainLike, tuple[str, str, str, str]]] = []
+        for exp in expirations:
+            exp_chain = select_chain_for_expiration(smart_chains, exp.ib_expiry, symbol)
+            if not oc.prefetch_exact_strikes:
+                resolved[exp.ib_expiry] = (exp_chain, {})
+                continue
+            cache_key = (symbol, exp_chain.tradingClass, exp_chain.multiplier, exp.ib_expiry)
+            cached = self._cache_lookup(cache_key)
+            if cached is not None:
+                resolved[exp.ib_expiry] = (exp_chain, cached)
+                continue
+            pending.append((exp, exp_chain, cache_key))
+
+        if pending:
+            if _has_running_event_loop():
+                sem = asyncio.Semaphore(EXACT_PREFETCH_MAX_CONCURRENCY)
+
+                async def _fetch_one(
+                    slot_idx: int,
+                    exp: ExpirationMatch,
+                    exp_chain: OptionChainLike,
+                    cache_key: tuple[str, str, str, str],
+                ) -> None:
+                    async with sem:
+                        if slot_idx > 0 and oc.contract_details_cooldown_sec > 0:
+                            await self.sleep(oc.contract_details_cooldown_sec)
+                        exact_map = await self._query_exact_for_expiration(symbol, exp, exp_chain)
+                        self._cache_store(cache_key, exact_map)
+                        resolved[exp.ib_expiry] = (exp_chain, exact_map)
+
+                await asyncio.gather(
+                    *(_fetch_one(idx, exp, ec, ck) for idx, (exp, ec, ck) in enumerate(pending))
+                )
+            else:
+                for idx, (exp, exp_chain, cache_key) in enumerate(pending):
+                    if idx > 0 and oc.contract_details_cooldown_sec > 0:
+                        await self.sleep(oc.contract_details_cooldown_sec)
+                    exact_map = await self._query_exact_for_expiration(symbol, exp, exp_chain)
+                    self._cache_store(cache_key, exact_map)
+                    resolved[exp.ib_expiry] = (exp_chain, exact_map)
+
+        return {exp.ib_expiry: resolved[exp.ib_expiry] for exp in expirations}
+
     async def build_plan(
         self,
         ticker: str,
         range_pct: float | None = None,
         strike_step: float | None = None,
+        dte_min: int | None = None,
+        dte_max: int | None = None,
     ) -> ChainPlan:
         oc = self.settings.options_chain
         rp = oc.default_range_pct if range_pct is None else range_pct
+        eff_dte_min = oc.dte_min if dte_min is None else int(dte_min)
+        eff_dte_max = oc.dte_max if dte_max is None else int(dte_max)
+        if eff_dte_min > eff_dte_max:
+            raise OptionChainFetchError(
+                f"Invalid DTE bounds: {eff_dte_min} > {eff_dte_max} for {ticker}"
+            )
 
         contract = await self.qualify_underlying(ticker)
         spot = await self.resolve_spot(contract)
@@ -476,18 +691,30 @@ class ContractDiscoveryService:
         expirations = match_expirations(
             raw_expirations,
             market_date,
-            oc.dte_min,
-            oc.dte_max,
+            eff_dte_min,
+            eff_dte_max,
         )
         if not expirations:
             raise OptionChainFetchError(
-                f"No weekly expirations in [{oc.dte_min}, {oc.dte_max}) DTE for {contract.symbol}"
+                f"No weekly expirations in [{eff_dte_min}, {eff_dte_max}] DTE for {contract.symbol}"
             )
 
-        max_strikes = self.max_total_contracts // (2 * len(expirations))
+        exact_by_exp = await self._prefetch_exact_contracts_by_exp(
+            contract.symbol, expirations, smart_chains
+        )
+        per_exp_strikes: dict[str, list[float]] = {}
+        for exp in expirations:
+            exp_chain, exact_map = exact_by_exp[exp.ib_expiry]
+            per_exp_strikes[exp.ib_expiry] = (
+                sorted({strike_key for strike_key, _ in exact_map})
+                if exact_map
+                else sorted({float(s) for s in exp_chain.strikes if s > 0})
+            )
+
+        max_strikes = max(1, self.max_total_contracts // (2 * len(expirations)))
         notices: list[str] = []
         all_exchange_strikes = sorted(
-            {float(s) for ch in smart_chains for s in ch.strikes if s > 0}
+            {s for strikes_list in per_exp_strikes.values() for s in strikes_list}
         )
         if strike_step is None:
             step = choose_auto_strike_step(all_exchange_strikes, spot, rp, max_strikes=max_strikes)
@@ -500,11 +727,10 @@ class ContractDiscoveryService:
         lo, hi = spot * (1 - rp) - _EPS, spot * (1 + rp) + _EPS
         specs: list[ExpirationSpec] = []
         for exp in expirations:
-            exp_chain = select_chain_for_expiration(smart_chains, exp.ib_expiry, contract.symbol)
-            exp_sel = select_strikes(exp_chain.strikes, spot, rp, step, max_strikes)
-            exp_window_count = sum(
-                1 for s in {float(v) for v in exp_chain.strikes} if lo <= s <= hi
-            )
+            exp_chain, exact_map = exact_by_exp[exp.ib_expiry]
+            avail_for_exp = per_exp_strikes[exp.ib_expiry]
+            exp_sel = select_strikes(avail_for_exp, spot, rp, step, max_strikes)
+            exp_window_count = sum(1 for s in avail_for_exp if lo <= s <= hi)
             specs.append(
                 ExpirationSpec(
                     match=exp,
@@ -513,6 +739,8 @@ class ContractDiscoveryService:
                     strikes=exp_sel.strikes,
                     effective_step=exp_sel.effective_step,
                     exchange_window_count=exp_window_count,
+                    qualified_contracts=exact_map,
+                    exact_strikes_verified=bool(exact_map),
                 )
             )
 
@@ -556,10 +784,23 @@ class ContractDiscoveryService:
                 oc.allowed_range_pcts,
             )
         )
-        notices.append(
-            f"Exchange-native verified {len(union_strikes)} strikes across "
-            f"{len(specs)} expiration(s) via reqSecDefOptParams."
-        )
+        exact_count = sum(1 for spec in specs if spec.exact_strikes_verified)
+        if exact_count == len(specs):
+            notices.append(
+                f"Exchange exact-verified {len(union_strikes)} strikes across "
+                f"{len(specs)} expiration(s) via reqContractDetails."
+            )
+        elif exact_count > 0:
+            notices.append(
+                f"Exchange verified {len(union_strikes)} strikes across {len(specs)} "
+                f"expiration(s) ({exact_count}/{len(specs)} exact via reqContractDetails, "
+                "remainder via reqSecDefOptParams)."
+            )
+        else:
+            notices.append(
+                f"Exchange-native verified {len(union_strikes)} strikes across "
+                f"{len(specs)} expiration(s) via reqSecDefOptParams."
+            )
 
         return ChainPlan(
             underlying=UnderlyingInfo(contract.symbol, int(contract.conId), contract, spot),

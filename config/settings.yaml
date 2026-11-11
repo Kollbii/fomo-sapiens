@@ -32,7 +32,7 @@ watchlist:
 
 options_chain:
   dte_min: 30
-  dte_max: 60            # Weekly expiration window: dte_min <= DTE < dte_max (30..59d)
+  dte_max: 120           # Inclusive expiration window: dte_min <= DTE <= dte_max (30..120d)
   default_range_pct: 0.20 # +-20% around underlying spot price
   allowed_range_pcts:
     - 0.10
@@ -41,7 +41,7 @@ options_chain:
     - 0.25
     - 0.35
     - 0.50
-  default_strike_step: 5.0 # $5.00 default strike jump
+  default_strike_step: null # Default strike stride: null = Auto exchange-native selection
   allowed_strike_steps:
     - 1.0
     - 2.5
@@ -53,11 +53,23 @@ options_chain:
   page_collect_timeout_sec: 2.25
   page_poll_interval_sec: 0.25
   inter_page_cooldown_sec: 0.35
+  prefetch_exact_strikes: true
+  contract_details_timeout_sec: 5.0
+  contract_details_cooldown_sec: 0.10
+  contract_details_cache_ttl_sec: 900.0
 
 analytics:
   risk_free_rate: 0.0425   # 4.25% static default for BSM Greeks fallback
   unusual_volume_zscore_threshold: 2.0
   top_walls_count: 3
+
+corridor:
+  default_window_strikes: 5      # +-5 strikes around Primary Put & Call Walls
+  default_max_contracts: 56      # Reserve headroom inside 60-contract hard ceiling
+  hard_max_contracts: 60         # Strictly <= 60 concurrent subscriptions (< 100 IBKR ceiling)
+  stream_poll_interval_sec: 0.75 # Throttled SSE emission / tick check cadence
+  oneshot_collect_timeout_sec: 2.0
+  heartbeat_interval_sec: 5.0
 
 storage:
   mode: "ARCHIVE_MODE_1"

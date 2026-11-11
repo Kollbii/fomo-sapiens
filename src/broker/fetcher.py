@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections import Counter
@@ -32,6 +33,8 @@ DELAYED_GENERIC_TICKS = "100,101,106"
 LIVE_OPRA_GENERIC_TICKS = "100,101,104,106"
 EMPTY_QUOTE_FALLBACK_THRESHOLD = 0.80
 PACING_COOLDOWN_SEC = 1.0
+PAGE_PACING_CHUNK_SIZE = 20
+PAGE_PACING_YIELD_SEC = 0.01
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,12 @@ def empty_quote_ratio(tickers: Sequence[Any]) -> float:
     return empty / len(tickers)
 
 
+def _is_qualified_contract(item: Any) -> bool:
+    return (
+        item is not None and not isinstance(item, list) and int(getattr(item, "conId", 0) or 0) > 0
+    )
+
+
 class PagedOptionChainFetcher:
     """Downloads option chain market data in bounded pages (`<= 80` contracts/page)."""
 
@@ -111,6 +120,11 @@ class PagedOptionChainFetcher:
             for spec in plan.expiration_specs:
                 for strike in spec.strikes:
                     for right in ("C", "P"):
+                        if spec.exact_strikes_verified:
+                            prequalified = spec.qualified_contracts.get((round(strike, 6), right))
+                            if prequalified is not None:
+                                candidates.append(prequalified)
+                            continue
                         candidates.append(
                             Option(
                                 symbol=plan.underlying.symbol,
@@ -151,22 +165,43 @@ class PagedOptionChainFetcher:
         )
 
     async def qualify_option_contracts(self, candidates: Sequence[Any]) -> list[Any]:
-        """Qualify candidate `Option` contracts in micro-batches (`<= 80` per call)."""
+        """Qualify any un-qualified `Option` contracts in micro-batches (`<= 80` per call)."""
         if not candidates:
             raise OptionChainFetchError("No candidate option contracts to qualify")
-        pages = paginate_contracts(
-            candidates, max_per_page=self.max_contracts_per_page, max_pages=None
-        )
-        qualified: list[Any] = []
-        for batch in pages:
-            res = await self.client.ib.qualifyContractsAsync(*batch)
-            for item in res or []:
-                if (
-                    item is not None
-                    and not isinstance(item, list)
-                    and getattr(item, "conId", 0) > 0
-                ):
-                    qualified.append(item)
+
+        qualified_by_idx: dict[int, Any] = {}
+        unqualified_items: list[tuple[int, Any]] = []
+        for idx, candidate in enumerate(candidates):
+            if int(getattr(candidate, "conId", 0) or 0) > 0:
+                qualified_by_idx[idx] = candidate
+            else:
+                unqualified_items.append((idx, candidate))
+
+        extra_qualified: list[Any] = []
+        if unqualified_items:
+            pages = paginate_contracts(
+                unqualified_items, max_per_page=self.max_contracts_per_page, max_pages=None
+            )
+            for batch in pages:
+                raw_batch = [contract for _, contract in batch]
+                res = list(
+                    await self.client.run_stage(
+                        f"contract qualification ({len(raw_batch)} contracts)",
+                        self.client.ib.qualifyContractsAsync(*raw_batch),
+                    )
+                    or []
+                )
+                if len(res) == len(batch):
+                    for (orig_idx, _), item in zip(batch, res, strict=True):
+                        if _is_qualified_contract(item):
+                            qualified_by_idx[orig_idx] = item
+                else:
+                    extra_qualified.extend(item for item in res if _is_qualified_contract(item))
+
+        qualified = [
+            qualified_by_idx[idx] for idx in range(len(candidates)) if idx in qualified_by_idx
+        ]
+        qualified.extend(extra_qualified)
         if not qualified:
             raise OptionChainFetchError("IBKR failed to qualify any option contracts in chain")
         dropped = len(candidates) - len(qualified)
@@ -194,10 +229,11 @@ class PagedOptionChainFetcher:
             )
         oc = self.settings.options_chain
         ib = self.client.ib
+        stage = f"market-data collection ({len(page_contracts)} contracts)"
         subscribed: list[Any] = []
         tickers: list[Any] = []
         try:
-            for contract in page_contracts:
+            for idx, contract in enumerate(page_contracts):
                 ticker = ib.reqMktData(
                     contract,
                     genericTickList=generic_tick_list,
@@ -206,6 +242,8 @@ class PagedOptionChainFetcher:
                 )
                 subscribed.append(contract)
                 tickers.append(ticker)
+                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(page_contracts):
+                    await self.sleep(PAGE_PACING_YIELD_SEC)
 
             await poll_until(
                 lambda: all(ready_predicate(t) for t in tickers),
@@ -213,13 +251,20 @@ class PagedOptionChainFetcher:
                 oc.page_poll_interval_sec,
                 self.sleep,
             )
+            self.client.ensure_still_connected(stage=stage)
             return tickers
+        except Exception as exc:
+            self.client.handle_stage_error(exc, stage=stage)
+            raise
         finally:
-            for contract in subscribed:
+            for idx, contract in enumerate(subscribed):
                 try:
                     ib.cancelMktData(contract)
                 except Exception:  # pragma: no cover - defensive
                     logger.exception("cancelMktData failed for %s", contract)
+                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(subscribed):
+                    with contextlib.suppress(Exception):
+                        await self.sleep(PAGE_PACING_YIELD_SEC)
 
     async def _fetch_page_delayed(
         self,
@@ -345,6 +390,8 @@ class PagedOptionChainFetcher:
         ticker: str,
         range_pct: float | None = None,
         strike_step: float | None = None,
+        dte_min: int | None = None,
+        dte_max: int | None = None,
     ) -> FetchResult:
         """Execute the full 5-stage pipeline and return validated `OptionContractRow` rows."""
         t0 = time.perf_counter()
@@ -352,7 +399,13 @@ class PagedOptionChainFetcher:
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
 
-        plan = await self.discovery.build_plan(ticker, range_pct=range_pct, strike_step=strike_step)
+        plan = await self.discovery.build_plan(
+            ticker,
+            range_pct=range_pct,
+            strike_step=strike_step,
+            dte_min=dte_min,
+            dte_max=dte_max,
+        )
         candidates = self.build_candidate_contracts(plan)
         qualified = await self.qualify_option_contracts(candidates)
         tickers, pages_fetched = await self.fetch_pages(qualified)

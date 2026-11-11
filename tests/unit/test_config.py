@@ -43,7 +43,15 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.watchlist.hardcoded_tickers == ("NVDA", "AVGO", "CRDO", "PLTR")
     assert s.options_chain.max_contracts_per_page == 80
     assert s.options_chain.dte_min == 30
-    assert s.options_chain.dte_max == 60
+    assert s.options_chain.dte_max == 120
+    assert s.options_chain.default_strike_step is None
+    assert s.options_chain.prefetch_exact_strikes is True
+    assert s.options_chain.contract_details_timeout_sec == 5.0
+    assert s.options_chain.contract_details_cooldown_sec == 0.10
+    assert s.options_chain.contract_details_cache_ttl_sec == 900.0
+    assert s.corridor.default_window_strikes == 5
+    assert s.corridor.default_max_contracts == 56
+    assert s.corridor.hard_max_contracts == 60
     assert s.analytics.risk_free_rate == 0.0425
 
 

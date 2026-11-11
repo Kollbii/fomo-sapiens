@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import asyncio
+import collections
+import heapq
+import inspect
 import math
 from collections.abc import Coroutine
 from datetime import UTC, date, datetime, timedelta
@@ -11,6 +15,7 @@ from ib_async import Option, OptionComputation, Stock
 
 from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import (
+    EXACT_PREFETCH_MAX_CONCURRENCY,
     ContractDiscoveryService,
     choose_auto_strike_step,
     detect_available_range_pcts,
@@ -25,12 +30,14 @@ from src.broker.fetcher import (
     DELAYED_GENERIC_TICKS,
     LIVE_OPRA_GENERIC_TICKS,
     PACING_COOLDOWN_SEC,
+    PAGE_PACING_CHUNK_SIZE,
+    PAGE_PACING_YIELD_SEC,
     PagedOptionChainFetcher,
     empty_quote_ratio,
     paginate_contracts,
 )
 from src.broker.parser import SnapshotContext, TickerParser
-from src.core.config import IBKRSettings, Settings
+from src.core.config import IBKRSettings, OptionsChainSettings, Settings
 from src.core.exceptions import (
     GatewayConnectionError,
     InvalidTickerError,
@@ -70,6 +77,7 @@ class FakeIB:
         self.subscribed: list[tuple[Any, str, bool, bool]] = []
         self.cancelled: list[Any] = []
         self.qualify_handler: Any = None
+        self.contract_details_handler: Any = None
         self.chains_result: list[Any] = []
         self.ticker_factory: Any = None
 
@@ -103,6 +111,15 @@ class FakeIB:
         self, symbol: str, fut_fop_exchange: str, sec_type: str, con_id: int
     ) -> list[Any]:
         return self.chains_result
+
+    async def reqContractDetailsAsync(self, contract: Any) -> list[Any]:  # noqa: N802
+        if self.contract_details_handler is None:
+            return []
+        res = self.contract_details_handler(contract)
+        if inspect.isawaitable(res):
+            out: list[Any] = await res
+            return out
+        return list(res)
 
     def reqMktData(  # noqa: N802
         self,
@@ -141,6 +158,110 @@ def _run(coro: Coroutine[Any, Any, T]) -> T:
     except StopIteration as stop:
         val: T = stop.value
         return val
+
+
+class _VirtualEventLoop:
+    """Minimal socketless virtual-clock event loop safe inside restricted sandboxes."""
+
+    def __init__(self) -> None:
+        self._now = 0.0
+        self._ready: collections.deque[asyncio.Handle] = collections.deque()
+        self._scheduled: list[tuple[float, int, asyncio.TimerHandle]] = []
+        self._seq = 0
+        self._closed = False
+
+    def get_debug(self) -> bool:
+        return False
+
+    def is_running(self) -> bool:
+        running: Any = asyncio.events._get_running_loop()
+        return running is self
+
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        self._closed = True
+
+    def time(self) -> float:
+        return self._now
+
+    def create_future(self) -> asyncio.Future[Any]:
+        return asyncio.Future(loop=self)  # type: ignore[arg-type]
+
+    def create_task(
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        name: str | None = None,
+        context: Any = None,
+    ) -> asyncio.Task[T]:
+        return asyncio.Task(coro, loop=self, name=name, context=context)  # type: ignore[arg-type]
+
+    def _timer_handle_cancelled(self, handle: asyncio.TimerHandle) -> None:
+        return None
+
+    def call_exception_handler(self, context: dict[str, Any]) -> None:
+        return None
+
+    def call_soon(self, callback: Any, *args: Any, context: Any = None) -> asyncio.Handle:
+        handle = asyncio.Handle(callback, args, self, context)  # type: ignore[arg-type]
+        self._ready.append(handle)
+        return handle
+
+    def call_soon_threadsafe(
+        self, callback: Any, *args: Any, context: Any = None
+    ) -> asyncio.Handle:
+        return self.call_soon(callback, *args, context=context)
+
+    def call_later(
+        self, delay: float, callback: Any, *args: Any, context: Any = None
+    ) -> asyncio.TimerHandle:
+        return self.call_at(self._now + max(0.0, delay), callback, *args, context=context)
+
+    def call_at(
+        self, when: float, callback: Any, *args: Any, context: Any = None
+    ) -> asyncio.TimerHandle:
+        self._seq += 1
+        timer = asyncio.TimerHandle(when, callback, args, self, context)  # type: ignore[arg-type]
+        heapq.heappush(self._scheduled, (when, self._seq, timer))
+        return timer
+
+    def run_until_complete(self, future: Any) -> Any:
+        task = future if isinstance(future, asyncio.Task) else self.create_task(future)
+        prev = asyncio.events._get_running_loop()
+        asyncio.events._set_running_loop(self)  # type: ignore[arg-type]
+        try:
+            while not task.done():
+                while self._ready:
+                    handle = self._ready.popleft()
+                    if not handle.cancelled():
+                        handle._run()
+                if task.done():
+                    break
+                while self._scheduled and self._scheduled[0][2].cancelled():
+                    heapq.heappop(self._scheduled)
+                if not self._scheduled:
+                    if not self._ready:
+                        raise RuntimeError("Virtual event loop stalled")
+                    continue
+                when, _, timer = heapq.heappop(self._scheduled)
+                self._now = max(self._now, when)
+                if not timer.cancelled():
+                    timer._run()
+            return task.result()
+        finally:
+            asyncio.events._set_running_loop(prev)
+
+
+def _run_virtual_loop(coro: Coroutine[Any, Any, T]) -> T:
+    """Execute an async coroutine with a live `asyncio.get_running_loop()` without sockets."""
+    loop = _VirtualEventLoop()
+    try:
+        res: T = loop.run_until_complete(coro)
+        return res
+    finally:
+        loop.close()
 
 
 async def _noop_sleep(_seconds: float) -> None:
@@ -225,23 +346,22 @@ def test_client_error_event_absorbs_10089_354_and_flags_pacing() -> None:
 # ------------------------------------------------------------------ DTE & strike math
 def test_dte_strict_weekly_matching_and_iso_week_dedup() -> None:
     # 2026-11-11 is Wednesday.
-    # Candidates inside (30, 60): 35 (Wed Dec 16), 37 (Fri Dec 18), 43 (Thu Dec 24),
-    # 50 (Thu Dec 31), 56 (Wed Jan 6), 58 (Fri Jan 8).
-    # Boundaries 15, 30, 60, 90 must be excluded by dte_min <= dte < dte_max (30 is included).
+    # Candidates inside [30, 120] inclusive: 30, 35/37, 43, 50, 56/58/60, 90/93, 120.
+    # Boundaries 15, 121, 150 must be excluded by dte_min <= dte <= dte_max (30 and 120 included).
     market_date = date(2026, 11, 11)
-    dtes = [15, 30, 35, 37, 43, 50, 56, 58, 60, 90]
+    dtes = [15, 30, 35, 37, 43, 50, 56, 58, 60, 90, 93, 120, 121, 150]
     expirations = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in dtes]
 
     matches = match_expirations(
         expirations,
         market_date=market_date,
         dte_min=30,
-        dte_max=60,
+        dte_max=120,
     )
-    # Within each ISO week, Friday overrides mid-week (37 beats 35, 58 beats 56).
-    assert [m.dte for m in matches] == [30, 37, 43, 50, 58]
-    assert all(30 <= m.dte < 60 for m in matches)  # 30 DTE retained
-    assert len({m.ib_expiry for m in matches}) == 5
+    # Within each ISO week, Friday overrides mid-week (37 beats 35, 58 beats 56/60, 93 beats 90).
+    assert [m.dte for m in matches] == [30, 37, 43, 50, 58, 93, 120]
+    assert all(30 <= m.dte <= 120 for m in matches)
+    assert len({m.ib_expiry for m in matches}) == 7
 
 
 def test_select_strikes_moneyness_atm_anchor_and_auto_widening() -> None:
@@ -580,11 +700,12 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
     fake_ib = FakeIB()
     now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
     market_date = date(2026, 11, 11)
-    # 30 DTE is retained, 60 and mid-week 35 drop: 5 weekly expiries (30, 37, 43, 50, 58)
+    # 30 and 120 DTE are retained, 125 drops, 60 shares ISO week with Fri 58 -> 7 weekly expiries
     expirations = [
-        (market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 37, 43, 50, 58, 60)
+        (market_date + timedelta(days=d)).strftime("%Y%m%d")
+        for d in (30, 35, 37, 43, 50, 58, 60, 93, 120, 125)
     ]
-    strikes = [float(s) for s in range(110, 175, 5)]  # 11 in +-20% -> 5 * 11 * 2 = 110 contracts
+    strikes = [float(s) for s in range(110, 175, 5)]  # 11 in +-20% -> 7 * 11 * 2 = 154 contracts
     fake_ib.chains_result = [
         SimpleNamespace(
             exchange="SMART",
@@ -616,9 +737,9 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
 
     result = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert result.snapshot_id == "NVDA_20261111_153000"
-    assert [m.dte for m in result.plan.expirations] == [30, 37, 43, 50, 58]
-    assert result.pages_fetched == 2  # 110 contracts -> 80 + 30
-    assert len(result.rows) == 110
+    assert [m.dte for m in result.plan.expirations] == [30, 37, 43, 50, 58, 93, 120]
+    assert result.pages_fetched == 2  # 154 contracts -> 80 + 74
+    assert len(result.rows) == 154
     assert len(fake_ib.subscribed) == len(fake_ib.cancelled)
     assert all(r.greeks_source == "NONE" for r in result.rows)
     assert all(r.mark_price == pytest.approx(5.2) for r in result.rows)
@@ -773,3 +894,330 @@ def test_qualify_option_contracts_emits_notice_on_partial_reject() -> None:
     res = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert len(res.rows) == 5  # 6 candidates minus 1 rejected
     assert any("filtered out 1 unqualified" in n.lower() for n in res.notices)
+
+
+def _make_cd_list(
+    symbol: str,
+    ib_expiry: str,
+    strikes: list[float],
+    *,
+    conid_start: int,
+    trading_class: str = "NVDA",
+    asymmetric_call_only_strike: float | None = None,
+) -> list[Any]:
+    details: list[Any] = []
+    cid = conid_start
+    for strike in strikes:
+        rights = ("C",) if strike == asymmetric_call_only_strike else ("C", "P")
+        for right in rights:
+            cid += 1
+            opt = Option(
+                symbol=symbol,
+                lastTradeDateOrContractMonth=ib_expiry,
+                strike=strike,
+                right=right,
+                exchange="SMART",
+                multiplier="100",
+                currency="USD",
+                tradingClass=trading_class,
+                conId=cid,
+                localSymbol=f"{symbol} {ib_expiry}{right}{int(strike * 1000):08d}",
+            )
+            details.append(SimpleNamespace(contract=opt))
+    return details
+
+
+def test_prefetch_exact_per_expiration_strikes_eliminates_phantom_strikes_and_qualify_calls() -> (
+    None
+):
+    """Single-tradingClass pooled SMART chain is narrowed per expiry via reqContractDetailsAsync."""
+    fake_ib = FakeIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    exp_weekly = (market_date + timedelta(days=30)).strftime("%Y%m%d")  # Friday weekly ($2.5)
+    exp_monthly = "20261218"  # Monthly OPEX (37 DTE): $5 strikes only + 1 asymmetric outer call
+
+    weekly_strikes = [165.0 + 2.5 * i for i in range(13)]  # 165.0..195.0 including .5
+    monthly_strikes = [165.0, 170.0, 175.0, 180.0, 185.0, 190.0, 195.0, 200.0]
+    pooled_strikes = sorted(set(weekly_strikes) | set(monthly_strikes))
+
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp_weekly, exp_monthly],
+            strikes=pooled_strikes,
+        )
+    ]
+
+    details_queries: list[str] = []
+
+    def _cd_handler(contract: Any) -> list[Any]:
+        exp = str(contract.lastTradeDateOrContractMonth)
+        details_queries.append(exp)
+        assert contract.strike == 0.0
+        assert contract.right == ""
+        if exp == exp_weekly:
+            return _make_cd_list("NVDA", exp, weekly_strikes, conid_start=50_000)
+        return _make_cd_list(
+            "NVDA",
+            exp,
+            monthly_strikes,
+            conid_start=60_000,
+            asymmetric_call_only_strike=200.0,
+        )
+
+    fake_ib.contract_details_handler = _cd_handler
+
+    qualify_batches: list[int] = []
+
+    def _track_qualify(*contracts: Any) -> list[Any]:
+        qualify_batches.append(len(contracts))
+        for idx, c in enumerate(contracts, start=1):
+            c.conId = getattr(c, "conId", 0) or (4800 + idx)
+        return list(contracts)
+
+    fake_ib.qualify_handler = _track_qualify
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=179.9, ask=180.1, last=180.0, close=179.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=6.0,
+            ask=6.4,
+            last=6.2,
+            close=6.1,
+            volume=40,
+            callOpenInterest=200,
+            putOpenInterest=200,
+            modelGreeks=None,
+        )
+    )
+
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=_rec_sleep)
+
+    res = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=None))
+
+    assert details_queries == [exp_weekly, exp_monthly]
+    # Cooldown slept strictly between the 2 sequential lookups (not on 1st or after 2nd)
+    assert 0.10 in sleeps
+    # Only the underlying Stock was sent to qualifyContractsAsync (zero Option batches!)
+    assert qualify_batches == [1]
+
+    spec_by_exp = {spec.match.ib_expiry: spec for spec in res.plan.expiration_specs}
+    assert spec_by_exp[exp_weekly].exact_strikes_verified is True
+    assert spec_by_exp[exp_monthly].exact_strikes_verified is True
+    assert spec_by_exp[exp_weekly].effective_step == pytest.approx(2.5)
+    assert spec_by_exp[exp_monthly].effective_step == pytest.approx(5.0)
+    assert 172.5 in spec_by_exp[exp_weekly].strikes
+    for half in (172.5, 177.5, 182.5, 187.5):
+        assert half not in spec_by_exp[exp_monthly].strikes
+
+    monthly_rows = [r for r in res.rows if r.expiry == "2026-12-18"]
+    # Strike 200.0 only has Call in exact ContractDetails, so Put was never requested
+    rights_at_200 = {r.right for r in monthly_rows if r.strike == 200.0}
+    assert rights_at_200 == {"C"}
+    assert any("reqcontractdetails" in n.lower() for n in res.notices)
+
+
+def test_exact_strike_prefetch_ttl_cache_and_expiration() -> None:
+    fake_ib = FakeIB()
+    clock_state = [datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)]
+    exp = (clock_state[0].date() + timedelta(days=37)).strftime("%Y%m%d")
+    strikes = [135.0, 140.0, 145.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp],
+            strikes=strikes,
+        )
+    ]
+    calls: list[str] = []
+
+    def _cd_handler(c: Any) -> list[Any]:
+        calls.append(str(c.lastTradeDateOrContractMonth))
+        return _make_cd_list("NVDA", exp, strikes, conid_start=70_000)
+
+    fake_ib.contract_details_handler = _cd_handler
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+
+    settings = Settings(
+        options_chain=OptionsChainSettings(
+            contract_details_cache_ttl_sec=300.0,
+            contract_details_cooldown_sec=0.05,
+        )
+    )
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(
+        client, settings, clock=lambda: clock_state[0], sleep=_noop_sleep
+    )
+
+    _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert len(calls) == 1
+
+    # Inside TTL: changing range_pct reuses exact contracts cache without hitting IBKR again
+    clock_state[0] = clock_state[0] + timedelta(seconds=120)
+    _run(svc.build_plan("NVDA", range_pct=0.10, strike_step=5.0))
+    assert len(calls) == 1
+
+    # Past TTL (301s > 300s): forces a fresh reqContractDetailsAsync query
+    clock_state[0] = clock_state[0] + timedelta(seconds=301)
+    _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert len(calls) == 2
+
+
+def test_exact_strike_prefetch_falls_back_on_timeout_and_disabled_flag() -> None:
+    fake_ib = FakeIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    exp = (now.date() + timedelta(days=37)).strftime("%Y%m%d")
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp],
+            strikes=[135.0, 140.0, 145.0],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+
+    # Case 1: TimeoutError from reqContractDetailsAsync falls back cleanly to reqSecDefOptParams
+    async def _timeout_handler(_c: Any) -> list[Any]:
+        raise TimeoutError("reqContractDetails timed out")
+
+    fake_ib.contract_details_handler = _timeout_handler
+    timeout_settings = Settings(
+        options_chain=OptionsChainSettings(
+            prefetch_exact_strikes=True,
+            contract_details_timeout_sec=0.02,
+        )
+    )
+    client = IBKRBrokerClient(timeout_settings, ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, timeout_settings, clock=lambda: now, sleep=_noop_sleep)
+    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert plan.expiration_specs[0].exact_strikes_verified is False
+    assert plan.strikes.strikes == (135.0, 140.0, 145.0)
+    assert any("reqsecdefoptparams" in n.lower() for n in plan.notices)
+
+    # Case 2: disabled flag never invokes reqContractDetailsAsync
+    called = [False]
+
+    def _disabled_handler(_c: Any) -> list[Any]:
+        called[0] = True
+        return []
+
+    fake_ib.contract_details_handler = _disabled_handler
+    disabled_settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
+    client2 = IBKRBrokerClient(disabled_settings, ib_factory=lambda: fake_ib)
+    svc2 = ContractDiscoveryService(
+        client2, disabled_settings, clock=lambda: now, sleep=_noop_sleep
+    )
+    plan2 = _run(svc2.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert called[0] is False
+    assert plan2.expiration_specs[0].exact_strikes_verified is False
+
+
+def test_prefetch_exact_contracts_runs_bounded_concurrency_in_event_loop() -> None:
+    fake_ib = FakeIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    dtes = [30, 37, 44, 51, 58, 65]
+    exps = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in dtes]
+    strikes = [135.0, 140.0, 145.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+
+    active = 0
+    max_active = 0
+
+    async def _cd_handler(contract: Any) -> list[Any]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await asyncio.sleep(0.015)
+            return _make_cd_list(
+                "NVDA", str(contract.lastTradeDateOrContractMonth), strikes, conid_start=80_000
+            )
+        finally:
+            active -= 1
+
+    fake_ib.contract_details_handler = _cd_handler
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+    settings = Settings(
+        options_chain=OptionsChainSettings(
+            prefetch_exact_strikes=True,
+            contract_details_cooldown_sec=0.0,
+        )
+    )
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, settings, clock=lambda: now)
+
+    plan = _run_virtual_loop(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert 2 <= max_active <= EXACT_PREFETCH_MAX_CONCURRENCY
+    assert [spec.match.ib_expiry for spec in plan.expiration_specs] == exps
+    assert all(spec.exact_strikes_verified for spec in plan.expiration_specs)
+
+
+def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_error() -> None:
+    fake_ib = FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    _run(client.ensure_connected())
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    fetcher = PagedOptionChainFetcher(client, sleep=_rec_sleep)
+    contracts = [
+        Option("NVDA", "20261211", float(100 + i), "C", "SMART", conId=i + 1)
+        for i in range(PAGE_PACING_CHUNK_SIZE * 2 + 5)
+    ]
+    tickers, pages = _run(fetcher.fetch_pages(contracts))
+    assert pages == 1
+    assert len(tickers) == len(contracts)
+    # 2 chunks during subscribe + 2 chunks during cancel = 4 pacing yields
+    assert sleeps.count(PAGE_PACING_YIELD_SEC) == 4
+    assert len(fake_ib.cancelled) == len(contracts)
+
+    # Now simulate a mid-batch socket drop inside reqMktData / poll loop -> GatewayConnectionError
+    fake_ib2 = FakeIB()
+    client2 = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib2)
+    _run(client2.ensure_connected())
+    fake_ib2.errorEvent.emit(-1, 1100, "Connectivity between IB and Trader Workstation lost", None)
+
+    def _drop_factory(contract: Any, _ticks: str) -> Any:
+        if contract.conId == 3:
+            fake_ib2._connected = False
+            raise ConnectionResetError("connection lost mid-page")
+        return SimpleNamespace(contract=contract, bid=5.0, ask=5.2, last=5.1, close=5.0)
+
+    fake_ib2.ticker_factory = _drop_factory
+    fetcher2 = PagedOptionChainFetcher(client2, sleep=_noop_sleep)
+    with pytest.raises(GatewayConnectionError, match="market-data collection.*IBKR 1100"):
+        _run(fetcher2._fetch_page_delayed(contracts[:5]))
+    assert not client2.is_connected
+    # Already-subscribed contracts prior to socket failure are still cancelled cleanly
+    assert fake_ib2.cancelled == contracts[:2]

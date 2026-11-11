@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn, TypeVar
 
 from ib_async import IB
 
@@ -17,6 +17,7 @@ from src.core.security import ReadOnlyIBGuard
 logger = logging.getLogger(__name__)
 
 SleepFn = Callable[[float], Awaitable[None]]
+_T = TypeVar("_T")
 
 #: Connection / data-farm status notices: purely informational.
 INFO_CODES: frozenset[int] = frozenset({2104, 2106, 2107, 2108, 2158})
@@ -24,6 +25,8 @@ INFO_CODES: frozenset[int] = frozenset({2104, 2106, 2107, 2108, 2158})
 SUBSCRIPTION_CODES: frozenset[int] = frozenset({10089, 354})
 #: Pacing warnings: the fetcher widens the inter-page cooldown.
 PACING_CODES: frozenset[int] = frozenset({100, 162})
+#: Gateway/TWS connectivity drop warnings recorded for transport diagnostics.
+DISCONNECT_CODES: frozenset[int] = frozenset({502, 504, 1100, 1300, 2110})
 
 DELAYED_TYPES: frozenset[int] = frozenset({3, 4})
 LIVE_PRIMARY_TYPE = 1
@@ -78,12 +81,18 @@ class IBKRBrokerClient:
         self.subscription_warning_count = 0
         self.live_subscription_missing = False
         self._pacing_warning = False
+        self._was_connected = False
+        self._last_disconnect_notice: str | None = None
         self._connect_lock = asyncio.Lock()
 
     # ------------------------------------------------------------ connection
     @property
     def is_connected(self) -> bool:
         return bool(self.ib.isConnected())
+
+    @property
+    def was_connected(self) -> bool:
+        return self._was_connected
 
     async def ensure_connected(self) -> None:
         """Connect (once) to `IBKR_HOST:IBKR_PORT` and apply the primary market data type.
@@ -94,7 +103,9 @@ class IBKRBrokerClient:
         """
         async with self._connect_lock:
             if self.is_connected:
+                self._was_connected = True
                 return
+            self._last_disconnect_notice = None
             cfg = self.settings.ibkr
             self.ib.wrapper.clientId = cfg.client_id
             try:
@@ -109,14 +120,48 @@ class IBKRBrokerClient:
             if not self.is_connected:
                 self._safe_disconnect()
                 raise GatewayConnectionError(f"IBKR API handshake failed at {cfg.host}:{cfg.port}")
+            self._was_connected = True
             logger.info("connected to IBKR %s:%s clientId=%s", cfg.host, cfg.port, cfg.client_id)
             self.reset_market_data_type()
+
+    def ensure_still_connected(self, *, stage: str) -> None:
+        """Raise `GatewayConnectionError` if an active Gateway socket dropped mid-batch."""
+        if self._was_connected and not self.is_connected:
+            detail = f" ({self._last_disconnect_notice})" if self._last_disconnect_notice else ""
+            self._safe_disconnect()
+            raise GatewayConnectionError(f"IBKR Gateway socket disconnected during {stage}{detail}")
+
+    def raise_transport_error(self, exc: BaseException, *, stage: str) -> NoReturn:
+        """Close a broken Gateway session cleanly and raise a structured domain error."""
+        detail = f" ({self._last_disconnect_notice})" if self._last_disconnect_notice else ""
+        self._safe_disconnect()
+        raise GatewayConnectionError(
+            f"IBKR Gateway connection interrupted during {stage}{detail}: {exc!r}"
+        ) from exc
+
+    def handle_stage_error(self, exc: BaseException, *, stage: str) -> None:
+        """Translate socket/timeout errors (or lost active links) into `GatewayConnectionError`."""
+        if isinstance(exc, (OSError, ConnectionError, TimeoutError)) or (
+            self._was_connected and not self.is_connected
+        ):
+            self.raise_transport_error(exc, stage=stage)
+
+    async def run_stage(self, stage: str, coro: Awaitable[_T]) -> _T:
+        """Await a broker I/O coroutine and translate transport interruptions cleanly."""
+        try:
+            res = await coro
+        except Exception as exc:
+            self.handle_stage_error(exc, stage=stage)
+            raise
+        self.ensure_still_connected(stage=stage)
+        return res
 
     def disconnect(self) -> None:
         """Gracefully close the socket; never raises."""
         self._safe_disconnect()
 
     def _safe_disconnect(self) -> None:
+        self._was_connected = False
         try:
             self.ib.disconnect()
         except Exception:  # pragma: no cover - defensive
@@ -176,6 +221,9 @@ class IBKRBrokerClient:
             elif code in PACING_CODES:
                 self._pacing_warning = True
                 logger.warning("IBKR pacing warning %s: %s", code, message)
+            elif code in DISCONNECT_CODES:
+                self._last_disconnect_notice = f"IBKR {code}: {message}"
+                logger.warning("IBKR connection notice %s (reqId=%s): %s", code, req_id, message)
             else:
                 logger.warning("IBKR error %s (reqId=%s): %s", code, req_id, message)
         except Exception:  # pragma: no cover - defensive
