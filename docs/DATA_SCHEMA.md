@@ -1,0 +1,110 @@
+# Data Persistence & CSV Schema Specification (`DATA_SCHEMA.md`)
+
+## 1. Storage Architecture & Mode 1 Archival Strategy
+All option chain snapshots are persisted locally as structured UTF-8 CSV files managed by `Polars` and validated by `Pydantic`. This satisfies two requirements simultaneously:
+1. **Mode 1 Historical Archive:** Every manual refresh creates a permanent, immutable timestamped CSV file so historical snapshots can be browsed or compared later.
+2. **Offline Cache:** The UI boots and renders immediately from local CSVs even when IBKR Gateway is closed.
+
+### 1.1 Directory Hierarchy
+
+    data/
+    ├── snapshots/
+    │   ├── NVDA/
+    │   │   ├── NVDA_20261111_143512.csv
+    │   │   └── NVDA_20261111_155004.csv
+    │   ├── AVGO/
+    │   │   └── AVGO_20261111_160219.csv
+    │   ├── CRDO/
+    │   └── PLTR/
+    ├── latest/
+    │   ├── NVDA_latest.csv
+    │   ├── AVGO_latest.csv
+    │   ├── CRDO_latest.csv
+    │   └── PLTR_latest.csv
+    └── metadata/
+        └── snapshot_index.json
+
+### 1.2 File Naming & Atomic Write Protocol
+- **Archive Filename Pattern:** `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv` (UTC timestamp).
+- **Latest Cache Filename Pattern:** `data/latest/{TICKER}_latest.csv` (full file copy rather than OS symlink to ensure 100% compatibility across Windows, macOS, and Docker bind mounts).
+- **Atomic Write Sequence (`CSVRepository.save_snapshot`):**
+  1. Validate rows via `Pydantic` and build a strict `polars.DataFrame`.
+  2. Write to temporary hidden file `data/snapshots/{TICKER}/.{TICKER}_{YYYYMMDD_HHMMSS}.csv.tmp`.
+  3. Call `os.replace()` to atomically move the temporary file to `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`.
+  4. Write to `data/latest/.{TICKER}_latest.csv.tmp` and `os.replace()` to `data/latest/{TICKER}_latest.csv`.
+  5. Update `data/metadata/snapshot_index.json` atomically via `.tmp` + `os.replace()`.
+
+---
+
+## 2. Canonical Option Chain CSV Schema (`28 Columns`)
+To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes **one unified 28-column CSV** containing normalized contract quotes and Greeks. Derived analytics (Put/Call Walls, Unusual Activity, Multi-DTE curves) are computed in memory by `Polars` in `<5ms` when loading the CSV.
+
+| # | Column Name | Polars Dtype | Nullable | Description & Domain Rules |
+| :- | :--- | :--- | :--- | :--- |
+| 1 | `snapshot_id` | `Utf8` | No | Unique snapshot identifier: `{TICKER}_{YYYYMMDD_HHMMSS}`. |
+| 2 | `snapshot_ts_utc` | `Utf8` | No | ISO-8601 UTC timestamp (`2026-11-11T15:30:00Z`). |
+| 3 | `market_date` | `Utf8` | No | US Eastern market session date (`YYYY-MM-DD`). |
+| 4 | `market_data_type` | `Int64` | No | IBKR market data code used: `3` (Delayed 15m), `4` (Delayed-Frozen), `1` (Live), `2` (Frozen). |
+| 5 | `underlying` | `Utf8` | No | Validated stock symbol (`NVDA`, `AVGO`, `CRDO`, `PLTR`, etc.). |
+| 6 | `underlying_conid` | `Int64` | No | IBKR `conId` of the underlying stock. |
+| 7 | `underlying_price` | `Float64` | No | Underlying spot/reference price (`> 0.0`) at snapshot time. |
+| 8 | `option_conid` | `Int64` | No | IBKR unique `conId` for this specific option contract. |
+| 9 | `expiry` | `Utf8` | No | Option expiration date normalized to `YYYY-MM-DD`. |
+| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`30 <= dte < 60`). |
+| 11 | `target_dte_bucket` | `Int64` | No | Matched target bucket (`30`, `35`, `40`, `45`, or `60`). |
+| 12 | `strike` | `Float64` | No | Option strike price (`> 0.0`). |
+| 13 | `moneyness_pct` | `Float64` | No | Signed percentage from spot: `((strike - underlying_price) / underlying_price) * 100.0`. |
+| 14 | `right` | `Utf8` | No | Option type: strictly `"C"` (Call) or `"P"` (Put). |
+| 15 | `bid` | `Float64` | Yes | Best bid price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
+| 16 | `ask` | `Float64` | Yes | Best ask price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
+| 17 | `mid` | `Float64` | Yes | `(bid + ask) / 2.0` when both `bid > 0` and `ask > 0`, else `null`. |
+| 18 | `last` | `Float64` | Yes | Last traded price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
+| 19 | `close` | `Float64` | Yes | Closing price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
+| 20 | `mark_price` | `Float64` | Yes | Canonical option price: `mid` -> fallback `last` -> fallback `close`. |
+| 21 | `volume` | `Int64` | Yes | Session contract volume (`>= 0`; `null` if unpopulated). |
+| 22 | `open_interest` | `Int64` | Yes | Contract Open Interest from tick `101` (`null` if omitted by Type 3 delayed feed). |
+| 23 | `iv` | `Float64` | Yes | Implied Volatility as decimal (`0.4520` = `45.20%`). |
+| 24 | `delta` | `Float64` | Yes | Option Delta (`-1.0` to `1.0`). |
+| 25 | `gamma` | `Float64` | Yes | Option Gamma (`>= 0.0`). |
+| 26 | `theta` | `Float64` | Yes | Option daily Theta. |
+| 27 | `vega` | `Float64` | Yes | Option Vega. |
+| 28 | `greeks_source` | `Utf8` | No | `"IBKR_MODEL"`, `"BSM_FALLBACK"`, or `"NONE"`. |
+
+---
+
+## 3. Boundary Sanitization Rules (`src/broker/parser.py`)
+IBKR uses sentinel numbers (`-1.0`, `float('nan')`, `2147483647`) for missing values on Type 3/4 delayed ticks. Before constructing `OptionContractRow`:
+1. **Prices (`bid`, `ask`, `last`, `close`):** Any value `<= 0.0`, `NaN`, or `>= 1e9` MUST be converted to `None` (`null` in CSV).
+2. **Integers (`volume`, `open_interest`):** Any value `< 0`, `NaN`, or `>= 2147483647` MUST be converted to `None`.
+3. **Greeks (`iv`, `delta`, `gamma`, `theta`, `vega`):** If IBKR `modelGreeks` is `None` or contains out-of-range values (`iv <= 0` or `iv > 10.0`, `abs(delta) > 1.001`), set native Greeks to `None` and invoke `bsm_fallback.compute_missing_greeks()` using `mark_price`, `underlying_price`, `strike`, `dte`, and `risk_free_rate = 0.0425`.
+
+---
+
+## 4. Snapshot Metadata Index (`data/metadata/snapshot_index.json`)
+Maintained automatically by `CSVRepository` for instant UI history dropdown rendering:
+
+    {
+      "updated_at_utc": "2026-11-11T15:50:04Z",
+      "tickers": {
+        "NVDA": {
+          "latest_snapshot_id": "NVDA_20261111_155004",
+          "latest_file": "data/latest/NVDA_latest.csv",
+          "snapshots": [
+            {
+              "snapshot_id": "NVDA_20261111_155004",
+              "file_path": "data/snapshots/NVDA/NVDA_20261111_155004.csv",
+              "snapshot_ts_utc": "2026-11-11T15:50:04Z",
+              "market_date": "2026-11-11",
+              "market_data_type": 3,
+              "underlying_price": 142.65,
+              "contract_count": 120,
+              "expirations": ["2026-12-11", "2026-12-18", "2026-12-24", "2027-01-08"],
+              "range_pct": 0.20,
+              "strike_step": 5.0
+            }
+          ]
+        }
+      }
+    }
+
+If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically.

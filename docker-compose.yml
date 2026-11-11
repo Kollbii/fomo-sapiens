@@ -1,0 +1,24 @@
+services:
+  options-analyzer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ibkr-options-analyzer
+    # Bind strictly to localhost on the host machine (Windows / macOS / Linux)
+    ports:
+      - "127.0.0.1:8000:8000"
+    # Allow container to reach IBKR Gateway on host port 4001 across Windows/macOS/Linux
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - IBKR_HOST=host.docker.internal
+      - IBKR_PORT=${IBKR_PORT:-4001}
+      - IBKR_CLIENT_ID=${IBKR_CLIENT_ID:-77}
+      - MARKET_DATA_MODE=${MARKET_DATA_MODE:-DELAYED}
+      - DEFAULT_MARKET_DATA_TYPE=${DEFAULT_MARKET_DATA_TYPE:-3}
+      - RISK_FREE_RATE=${RISK_FREE_RATE:-0.0425}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config:ro
+    restart: unless-stopped

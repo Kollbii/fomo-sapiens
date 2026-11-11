@@ -1,0 +1,74 @@
+app:
+  name: "IBKR Options Analyzer & Dashboard"
+  host: "127.0.0.1"
+  port: 8000
+  default_theme: "print" # "print" (NYT Paper) or "terminal" (Obsidian)
+  log_level: "INFO"
+
+ibkr:
+  host: "127.0.0.1"
+  port: 4001             # Default to 4001 (IBKR Gateway Live Read-Only)
+  client_id: 77
+  connect_timeout_sec: 3.0
+  read_only_enforced: true
+  # Market Data Types:
+  # 3 = Delayed (15-min delayed from current session - DEFAULT)
+  # 4 = Delayed-Frozen (auto-fallback outside market hours)
+  # 1 = Live OPRA (for future subscription)
+  # 2 = Frozen (live fallback outside market hours)
+  market_data_mode: "DELAYED"
+  default_market_data_type: 3
+  fallback_market_data_type: 4
+
+watchlist:
+  default_ticker: "NVDA"
+  hardcoded_tickers:
+    - "NVDA"
+    - "AVGO"
+    - "CRDO"
+    - "PLTR"
+  allow_custom_ticker: true
+  custom_ticker_regex: "^[A-Z]{1,5}$"
+
+options_chain:
+  dte_min: 30
+  dte_max: 60            # Fetches closest DTEs in [30, 60)
+  dte_boundary_tolerance_days: 3
+  target_dte_buckets:
+    - 30
+    - 35
+    - 40
+    - 45
+    - 60
+  default_range_pct: 0.20 # +-20% around underlying spot price
+  allowed_range_pcts:
+    - 0.10
+    - 0.15
+    - 0.20
+    - 0.25
+    - 0.35
+    - 0.50
+  default_strike_step: 5.0 # $5.00 default strike jump
+  allowed_strike_steps:
+    - 1.0
+    - 2.5
+    - 5.0
+    - 10.0
+    - 25.0
+  max_contracts_per_page: 80
+  max_pages_per_refresh: 5 # Hard cap: 400 contracts max per refresh
+  page_collect_timeout_sec: 2.25
+  page_poll_interval_sec: 0.25
+  inter_page_cooldown_sec: 0.35
+
+analytics:
+  risk_free_rate: 0.0425   # 4.25% static default for BSM Greeks fallback
+  unusual_volume_zscore_threshold: 2.0
+  top_walls_count: 3
+
+storage:
+  mode: "ARCHIVE_MODE_1"
+  data_dir: "data"
+  snapshots_dir: "data/snapshots"
+  latest_dir: "data/latest"
+  metadata_index_file: "data/metadata/snapshot_index.json"
