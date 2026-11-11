@@ -112,3 +112,13 @@ All workflows are standardized through `Makefile` and `docker compose`:
 4. **NEVER** block the FastAPI `asyncio` event loop with synchronous `time.sleep()` or synchronous socket calls; always use `asyncio.sleep()` and async `ib-async` coroutines (`qualifyContractsAsync`, `reqSecDefOptParamsAsync`).
 5. **NEVER** overwrite historical CSV snapshots in `data/snapshots/`. Every manual refresh must create a new timestamped CSV (Mode 1 Archive) and atomically update `data/latest/{TICKER}_latest.csv`.
 6. **NEVER** finish a coding task without updating `AGENTS.md` and the affected files in `docs/`.
+
+---
+
+## 7. Specialized Sub-Agents & Token Optimization (`.agent/agents/`)
+To minimize token usage and keep context windows small, delegate tasks to the specialized profiles in `.agent/agents/` (see `.agent/agents/README.md` for full routing):
+- **`.agent/agents/broker-storage-eng.md`**: Use for Phases 1–3 (`src/core/`, `src/storage/`, `src/broker/`). Reads only architecture, security, and schema docs.
+- **`.agent/agents/quant-analytics-eng.md`**: Use for Phase 4 (`src/analytics/`). Pure Polars/NumPy/SciPy math; reads only schema and analytics specs.
+- **`.agent/agents/ui-frontend-eng.md`**: Use for Phase 5 (`src/main.py`, `src/web/`). Reads only `docs/UI_UX_GUIDELINES.md`.
+- **`.agent/agents/doc-sync-auditor.md`**: Lightweight agent that inspects `git diff` and updates `AGENTS.md` and `docs/*.md` without reading full source trees.
+- **`.agent/agents/qa-git-runner.md`**: Ultra-low-token runner that executes `make check` (`ruff`, `mypy`, security grep, `pytest`), reports compact pass/fail status, creates conventional commits, and pushes.
