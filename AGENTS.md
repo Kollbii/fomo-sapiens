@@ -64,6 +64,7 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - Moneyness filter (`+-20%` default around underlying spot, adjustable in UI) and strike step striding (`$5.00` default, adjustable in UI).
   - Paged micro-batch downloader (`MAX_CONTRACTS_PER_PAGE = 80`) respecting IBKR's 100-line ceiling and pacing limits, plus a modular collector/placeholder for generic tick `101` (Open Interest).
 - **Exit Gate:** Mocked `ib-async` integration tests proving pagination math, pacing compliance, and graceful disconnect recovery.
+- **Status: `[IMPLEMENTED]`** — `src/broker/{client,contracts,parser,fetcher}.py` with `tests/unit/test_contracts_and_pagination.py` (see `docs/ARCHITECTURE.md` §7).
 
 ### Phase 4: Quantitative Analytics & BSM Fallback Engine
 - **Scope:** Implement `src/analytics/bsm_fallback.py`, `src/analytics/walls.py`, `src/analytics/anomalies.py`, and `src/analytics/term_greeks.py`.
@@ -73,15 +74,17 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - Unusual activity detector (`Volume > Open Interest` and cross-strike Volume Z-score outliers across strikes and DTEs).
   - Multi-DTE aggregation profiles overlaying `[30, 35, 40, 45, 60]` DTE structures.
 - **Exit Gate:** Deterministic mathematical unit tests verifying BSM Greeks accuracy and wall/anomaly rankings.
+- **Status: `[IMPLEMENTED]`** — `src/analytics/{bsm_fallback,walls,anomalies,term_greeks}.py` with `tests/unit/test_bsm_and_analytics.py` (see `docs/ARCHITECTURE.md` §8).
 
 ### Phase 5: FastAPI Backend & NYT/Terminal Dual-Theme UI
 - **Scope:** Implement `src/main.py`, `src/web/api.py`, `src/web/templates/`, and `src/web/static/`.
 - **Key Deliverables:**
-  - FastAPI endpoints for on-demand refresh (`POST /api/refresh`), cached snapshot loading (`GET /api/chain/{ticker}`), and historical archive switching (`GET /api/snapshots/{ticker}`).
-  - Reserved top-level **Editorial Banner Container** (structural slot kept ready for future content).
+  - FastAPI endpoints for server status (`GET /api/status`), on-demand refresh (`POST /api/refresh`), cached snapshot loading (`GET /api/chain/{ticker}`), historical archive switching (`GET /api/snapshots/{ticker}`), and CSV download (`GET /api/csv/{ticker}`).
+  - Reserved top-level **Editorial Banner Container** (`#editorial-banner-slot`, structural slot kept ready for future content).
   - Dual-theme switcher (**Variant 1: NYT Print Edition** vs. **Variant 2: Obsidian Terminal**).
   - Interactive Plotly multi-DTE charts and high-density monospaced tabular option chains.
 - **Exit Gate:** End-to-end smoke test rendering UI from offline CSV fixtures and live/mocked refresh triggers.
+- **Status: `[IMPLEMENTED]`** — `src/main.py`, `src/web/api.py`, `src/web/templates/{base,index}.html`, `src/web/static/css/tokens.css`, `src/web/static/js/dashboard.js` with `tests/integration/test_web_api.py` (see `docs/ARCHITECTURE.md` §9).
 
 ---
 
