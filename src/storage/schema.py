@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import Counter
 from datetime import date, datetime
 from typing import Any, Literal, Self
 
@@ -15,8 +16,8 @@ from src.core.security import TickerValidator
 
 PRICE_SENTINEL_MAX = 1e9
 INT_SENTINEL = 2_147_483_647
-TARGET_DTE_BUCKETS = (30, 35, 40, 45, 60)
 SNAPSHOT_ID_RE = re.compile(r"[A-Z]{1,5}_\d{8}_\d{6}")
+_STANDARD_RANGE_PCTS = (0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
 
 GreeksSource = Literal["IBKR_MODEL", "BSM_FALLBACK", "NONE"]
 
@@ -51,7 +52,7 @@ def _sanitize_float(value: Any) -> float | None:
 
 
 class OptionContractRow(BaseModel):
-    """One option contract quote; the exact 28-column CSV contract (field order = column order)."""
+    """One option contract quote; the exact 27-column CSV contract (field order = column order)."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -65,7 +66,6 @@ class OptionContractRow(BaseModel):
     option_conid: int = Field(gt=0)
     expiry: str
     dte: int = Field(ge=0, le=400)
-    target_dte_bucket: Literal[30, 35, 40, 45, 60]
     strike: float = Field(gt=0.0, lt=PRICE_SENTINEL_MAX)
     moneyness_pct: float
     right: Literal["C", "P"]
@@ -181,7 +181,6 @@ OPTION_CHAIN_POLARS_SCHEMA = pl.Schema(
         "option_conid": pl.Int64,
         "expiry": pl.Utf8,
         "dte": pl.Int64,
-        "target_dte_bucket": pl.Int64,
         "strike": pl.Float64,
         "moneyness_pct": pl.Float64,
         "right": pl.Utf8,
@@ -218,3 +217,31 @@ class SnapshotMeta(BaseModel):
     expirations: list[str]
     range_pct: float | None = None
     strike_step: float | None = None
+    requested_strike_step: float | None = None
+
+
+def infer_chain_step_and_range(df: pl.DataFrame) -> tuple[float | None, float | None]:
+    """Infer `(strike_step, range_pct)` directly from an option chain DataFrame."""
+    if df.height == 0:
+        return (None, None)
+
+    strikes = sorted({float(s) for s in df["strike"].to_list() if s is not None})
+    inferred_step: float | None = None
+    if len(strikes) >= 2:
+        diffs = [
+            round(b - a, 4) for a, b in zip(strikes, strikes[1:], strict=False) if b - a > 1e-6
+        ]
+        if diffs:
+            counts = Counter(diffs)
+            inferred_step = min(counts, key=lambda d: (-counts[d], d))
+
+    spot = float(df["underlying_price"][0]) if df["underlying_price"][0] is not None else 0.0
+    inferred_range: float | None = None
+    if spot > 0.0 and strikes:
+        raw_range = max(abs(strikes[0] - spot), abs(strikes[-1] - spot)) / spot
+        if raw_range > 0.0:
+            nearest = min(_STANDARD_RANGE_PCTS, key=lambda p: abs(p - raw_range))
+            inferred_range = (
+                nearest if abs(nearest - raw_range) <= 0.03 else round(min(1.0, raw_range), 2)
+            )
+    return (inferred_step, inferred_range)

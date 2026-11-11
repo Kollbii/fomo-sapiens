@@ -345,20 +345,17 @@ class PagedOptionChainFetcher:
             underlying_conid=plan.underlying.conid,
             underlying_price=plan.underlying.spot,
         )
-        bucket_map = plan.bucket_by_expiry
         dte_map = {m.ib_expiry: m.dte for m in plan.expirations}
 
         rows: list[OptionContractRow] = []
         for contract, tk in zip(qualified, tickers, strict=True):
             ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
-            bucket = bucket_map.get(ib_exp, self.settings.options_chain.target_dte_buckets[0])
             dte = dte_map.get(ib_exp)
             rows.append(
                 TickerParser.parse_ticker(
                     tk,
                     contract=contract,
                     context=ctx,
-                    target_dte_bucket=bucket,
                     dte=dte,
                 )
             )

@@ -15,7 +15,7 @@ from src.storage.csv_repository import CSVRepository, make_snapshot_id
 from src.storage.schema import COLUMNS, OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
 
 SPOT = 142.65
-BUCKETS = (30, 35, 40, 45, 60)
+WEEKLY_DTES = (37, 43, 50, 58)
 MARKET_DATE = datetime(2026, 11, 11, 15, 50, 4, tzinfo=UTC)
 
 
@@ -23,7 +23,7 @@ def make_rows(ticker: str = "NVDA", ts: datetime = MARKET_DATE) -> list[dict[str
     sid = make_snapshot_id(ticker, ts)
     rows: list[dict[str, Any]] = []
     conid = 1000
-    for dte in BUCKETS:
+    for dte in WEEKLY_DTES:
         expiry = (ts.date() + timedelta(days=dte)).isoformat()
         for strike in (130.0, 140.0, 145.0, 155.0):
             for right in ("C", "P"):
@@ -40,7 +40,6 @@ def make_rows(ticker: str = "NVDA", ts: datetime = MARKET_DATE) -> list[dict[str
                         "option_conid": conid,
                         "expiry": expiry,
                         "dte": dte,
-                        "target_dte_bucket": dte,
                         "strike": strike,
                         "moneyness_pct": (strike - SPOT) / SPOT * 100.0,
                         "right": right,
@@ -67,8 +66,8 @@ def repo(tmp_path: Path) -> CSVRepository:
 
 
 # ------------------------------------------------------------------ schema
-def test_schema_has_28_columns_matching_model() -> None:
-    assert len(COLUMNS) == 28
+def test_schema_has_27_columns_matching_model() -> None:
+    assert len(COLUMNS) == 27
     assert tuple(OPTION_CHAIN_POLARS_SCHEMA.names()) == COLUMNS
 
 
@@ -105,7 +104,7 @@ def test_mid_and_mark_derivation() -> None:
     [
         ("greeks_source", "BOGUS"),
         ("right", "X"),
-        ("target_dte_bucket", 50),
+        ("dte", -1),
         ("expiry", "2026-13-40"),
         ("underlying_price", 0.0),
         ("strike", -5.0),
@@ -123,17 +122,24 @@ def test_invalid_row_rejected(field: str, value: Any) -> None:
 
 # ------------------------------------------------------------------ pipeline
 def test_save_and_offline_read(repo: CSVRepository) -> None:
-    meta = repo.save_snapshot("NVDA", make_rows(), range_pct=0.2, strike_step=5.0)
+    meta = repo.save_snapshot(
+        "NVDA",
+        make_rows(),
+        range_pct=0.2,
+        strike_step=5.0,
+        requested_strike_step=5.0,
+    )
     assert meta.snapshot_id == "NVDA_20261111_155004"
-    assert meta.contract_count == 40
+    assert meta.contract_count == 32
+    assert meta.requested_strike_step == 5.0
     assert meta.file_path == "data/snapshots/NVDA/NVDA_20261111_155004.csv"
-    assert len(meta.expirations) == 5
+    assert len(meta.expirations) == 4
 
     latest = repo.load_latest("NVDA")
     assert latest.schema == OPTION_CHAIN_POLARS_SCHEMA
-    assert latest.height == 40
-    assert sorted(latest["target_dte_bucket"].unique().to_list()) == list(BUCKETS)
-    assert latest["open_interest"].null_count() == 40
+    assert latest.height == 32
+    assert sorted(latest["dte"].unique().to_list()) == list(WEEKLY_DTES)
+    assert latest["open_interest"].null_count() == 32
     assert latest["mid"].to_list()[0] == pytest.approx(5.2)
     assert repo.load_snapshot("NVDA", meta.snapshot_id).equals(latest)
     assert not list(repo.snapshots_dir.rglob(".*.tmp"))
@@ -212,9 +218,9 @@ def test_corrupt_files_rejected(repo: CSVRepository) -> None:
 def test_corrupt_latest_falls_back_to_archive(repo: CSVRepository) -> None:
     repo.save_snapshot("NVDA", make_rows())
     repo.latest_path("NVDA").write_text("garbage", encoding="utf-8")
-    assert repo.load_latest("NVDA").height == 40
+    assert repo.load_latest("NVDA").height == 32
     repo.latest_path("NVDA").unlink()
-    assert repo.load_latest("NVDA").height == 40
+    assert repo.load_latest("NVDA").height == 32
 
 
 def test_missing_data_raises(repo: CSVRepository) -> None:
@@ -252,7 +258,7 @@ def test_values_survive_roundtrip(repo: CSVRepository) -> None:
     repo.save_snapshot("NVDA", make_rows())
     df = repo.load_latest("NVDA")
     row = df.filter(
-        (pl.col("target_dte_bucket") == 45) & (pl.col("strike") == 145.0) & (pl.col("right") == "P")
+        (pl.col("dte") == 50) & (pl.col("strike") == 145.0) & (pl.col("right") == "P")
     ).row(0, named=True)
     assert row["delta"] == -0.5
     assert math.isclose(row["moneyness_pct"], (145.0 - SPOT) / SPOT * 100.0)

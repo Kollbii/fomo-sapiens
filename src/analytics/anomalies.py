@@ -21,7 +21,6 @@ class ContractAnomaly(BaseModel):
     option_conid: int
     expiry: str
     dte: int
-    target_dte_bucket: int
     strike: float
     right: OptionRight
     moneyness_pct: float
@@ -122,7 +121,6 @@ def scan_anomalies(
                 option_conid=int(row["option_conid"]),
                 expiry=str(row["expiry"]),
                 dte=int(row["dte"]),
-                target_dte_bucket=int(row["target_dte_bucket"]),
                 strike=float(row["strike"]),
                 right=right_str,
                 moneyness_pct=float(row["moneyness_pct"]),

@@ -12,6 +12,7 @@ from ib_async import Option, OptionComputation, Stock
 from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import (
     ContractDiscoveryService,
+    choose_auto_strike_step,
     extract_spot,
     match_expirations,
     select_chain,
@@ -211,10 +212,13 @@ def test_client_error_event_absorbs_10089_354_and_flags_pacing() -> None:
 
 
 # ------------------------------------------------------------------ DTE & strike math
-def test_dte_bucket_matching_and_deduplication() -> None:
+def test_dte_strict_weekly_matching_and_iso_week_dedup() -> None:
+    # 2026-11-11 is Wednesday.
+    # Candidates inside (30, 60): 35 (Wed Dec 16), 37 (Fri Dec 18), 43 (Thu Dec 24),
+    # 50 (Thu Dec 31), 56 (Wed Jan 6), 58 (Fri Jan 8).
+    # Boundaries 15, 30, 60, 90 must be excluded by strict dte_min < dte < dte_max.
     market_date = date(2026, 11, 11)
-    # Expirations at DTE 15 (too close), 28 (within 30-3 tolerance), 36, 44, 62 (within 60+3), 90
-    dtes = [15, 28, 36, 44, 62, 90]
+    dtes = [15, 30, 35, 37, 43, 50, 56, 58, 60, 90]
     expirations = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in dtes]
 
     matches = match_expirations(
@@ -222,13 +226,10 @@ def test_dte_bucket_matching_and_deduplication() -> None:
         market_date=market_date,
         dte_min=30,
         dte_max=60,
-        tolerance=3,
-        buckets=(30, 35, 40, 45, 60),
     )
-    # 28 -> bucket 30; 36 -> closest to both 35 and 40 (35 wins as closer: |36-35|=1 < |36-40|=4);
-    # 44 -> bucket 45; 62 -> bucket 60. Deduplicated to 4 unique expirations!
-    assert [m.dte for m in matches] == [28, 36, 44, 62]
-    assert [m.target_dte_bucket for m in matches] == [30, 35, 45, 60]
+    # Within each ISO week, Friday overrides mid-week (37 beats 35, 58 beats 56).
+    assert [m.dte for m in matches] == [37, 43, 50, 58]
+    assert all(30 < m.dte < 60 for m in matches)
     assert len({m.ib_expiry for m in matches}) == 4
 
 
@@ -237,16 +238,29 @@ def test_select_strikes_moneyness_atm_anchor_and_auto_widening() -> None:
     # Dense $1.00 strikes from $50 to $250
     all_strikes = [float(x) for x in range(50, 251)]
 
-    # +-20% around 142.40 -> [113.92, 170.88], stride $5 anchored on ATM=142.0
+    # +-20% around 142.40 -> [113.92, 170.88], grid-aligned $5 multiples anchored on 140.0
     sel = select_strikes(all_strikes, spot=spot, range_pct=0.20, strike_step=5.0)
-    assert sel.atm_strike == 142.0
-    assert 142.0 in sel.strikes
+    assert sel.atm_strike == 140.0
+    assert 140.0 in sel.strikes
+    assert all(s % 5.0 == 0.0 for s in sel.strikes)
     assert not sel.widened
     assert all(142.40 * 0.80 <= s <= 142.40 * 1.20 for s in sel.strikes)
     diffs = [round(b - a, 6) for a, b in zip(sel.strikes, sel.strikes[1:], strict=False)]
     assert all(d >= 5.0 for d in diffs)
 
-    # Force auto-widening when max_strikes cap is exceeded (e.g. 5 expirations -> max 40 strikes)
+    # Mixed $2.50 short-DTE strikes must NOT trap step=$5.0 onto .50 off-grid strikes (e.g. 347.5)
+    aapl_spot = 347.40
+    mixed_strikes = [320.0 + 2.5 * i for i in range(25)]  # 320.0 .. 380.0 in $2.50 steps
+    aapl_sel = select_strikes(mixed_strikes, spot=aapl_spot, range_pct=0.10, strike_step=5.0)
+    assert aapl_sel.atm_strike == 345.0
+    assert all(s % 5.0 == 0.0 for s in aapl_sel.strikes)
+
+    # Auto strike step skips non-native $2.5 on integer-only grids and picks $5.0;
+    # when .50 increments are present, it picks $2.5.
+    assert choose_auto_strike_step(all_strikes, spot=spot, range_pct=0.20) == 5.0
+    assert choose_auto_strike_step(mixed_strikes, spot=aapl_spot, range_pct=0.10) == 2.5
+
+    # Force auto-widening when max_strikes cap is exceeded (e.g. 4 expirations -> max 40 strikes)
     wide = select_strikes(
         all_strikes,
         spot=spot,
@@ -255,10 +269,10 @@ def test_select_strikes_moneyness_atm_anchor_and_auto_widening() -> None:
         max_strikes=40,
     )
     assert len(wide.strikes) <= 40
-    assert wide.atm_strike == 142.0
-    assert 142.0 in wide.strikes
+    assert wide.atm_strike == 140.0
+    assert 140.0 in wide.strikes
     assert wide.widened
-    assert wide.effective_step >= 4.0
+    assert wide.effective_step >= 5.0
 
 
 def test_select_chain_prefers_smart_multiplier_100_largest_grid() -> None:
@@ -376,7 +390,7 @@ def test_parser_call_and_put_oi_and_ibkr_model_greeks() -> None:
             undPrice=140.0,
         ),
     )
-    row_c = TickerParser.parse_ticker(call_ticker, context=ctx, target_dte_bucket=30)
+    row_c = TickerParser.parse_ticker(call_ticker, context=ctx)
     assert row_c.right == "C"
     assert row_c.open_interest == 1200
     assert row_c.mid == pytest.approx(4.2)
@@ -397,7 +411,7 @@ def test_parser_call_and_put_oi_and_ibkr_model_greeks() -> None:
         putOpenInterest=750,
         modelGreeks=None,
     )
-    row_p = TickerParser.parse_ticker(put_ticker, context=ctx, target_dte_bucket=30)
+    row_p = TickerParser.parse_ticker(put_ticker, context=ctx)
     assert row_p.right == "P"
     assert row_p.open_interest == 750
     assert row_p.bid is None and row_p.ask is None and row_p.mid is None and row_p.last is None
@@ -431,7 +445,7 @@ def test_parser_rejects_out_of_bounds_model_greeks(bad_greeks: Any) -> None:
         callOpenInterest=-1,
         modelGreeks=bad_greeks,
     )
-    row = TickerParser.parse_ticker(tk, context=ctx, target_dte_bucket=30)
+    row = TickerParser.parse_ticker(tk, context=ctx)
     assert row.greeks_source == "NONE"
     assert (row.iv, row.delta, row.gamma, row.theta, row.vega) == (None,) * 5
     assert row.open_interest is None
@@ -555,10 +569,11 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
     fake_ib = FakeIB()
     now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
     market_date = date(2026, 11, 11)
+    # Boundaries 30 and 60 plus mid-week 35 should drop, leaving 4 weekly expiries (37, 43, 50, 58)
     expirations = [
-        (market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 40, 45, 58)
+        (market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 37, 43, 50, 58, 60)
     ]
-    strikes = [float(s) for s in range(110, 175, 5)]  # 13 strikes -> 5 * 13 * 2 = 130 contracts
+    strikes = [float(s) for s in range(110, 175, 5)]  # 11 in +-20% -> 4 * 11 * 2 = 88 contracts
     fake_ib.chains_result = [
         SimpleNamespace(
             exchange="SMART",
@@ -590,8 +605,9 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
 
     result = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert result.snapshot_id == "NVDA_20261111_153000"
-    assert result.pages_fetched == 2  # 110 contracts -> 80 + 30
-    assert len(result.rows) == 110
+    assert [m.dte for m in result.plan.expirations] == [37, 43, 50, 58]
+    assert result.pages_fetched == 2  # 88 contracts -> 80 + 8
+    assert len(result.rows) == 88
     assert len(fake_ib.subscribed) == len(fake_ib.cancelled)
     assert all(r.greeks_source == "NONE" for r in result.rows)
     assert all(r.mark_price == pytest.approx(5.2) for r in result.rows)

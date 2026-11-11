@@ -77,7 +77,8 @@ class _MockIB:
         self, symbol: str, _fut_exch: str, _sec_type: str, _con_id: int
     ) -> list[Any]:
         base = date(2026, 11, 11)
-        exps = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 40, 45, 58)]
+        # 30 and 60 are outside strict (30, 60); 35 yields to Friday 37 -> 4 weekly expiries
+        exps = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 37, 43, 50, 58, 60)]
         return [
             SimpleNamespace(
                 exchange="SMART",
@@ -118,7 +119,7 @@ def _seed_nvda_rows(ts: datetime) -> list[dict[str, Any]]:
     spot = 140.0
     rows: list[dict[str, Any]] = []
     conid = 3000
-    for dte in (30, 35, 40, 45, 60):
+    for dte in (37, 43, 50, 58):
         expiry = (ts.date() + timedelta(days=dte)).isoformat()
         for strike in (135.0, 140.0, 145.0):
             for right in ("C", "P"):
@@ -135,7 +136,6 @@ def _seed_nvda_rows(ts: datetime) -> list[dict[str, Any]]:
                         "option_conid": conid,
                         "expiry": expiry,
                         "dte": dte,
-                        "target_dte_bucket": dte,
                         "strike": strike,
                         "moneyness_pct": ((strike - spot) / spot) * 100.0,
                         "right": right,
@@ -160,7 +160,13 @@ def _build_test_app(tmp_path: Path, *, offline: bool = False) -> tuple[Any, CSVR
     settings = Settings(storage=StorageSettings())
     repo = CSVRepository(settings.storage, root=tmp_path)
     ts = datetime(2026, 11, 11, 15, 0, 0, tzinfo=UTC)
-    repo.save_snapshot("NVDA", _seed_nvda_rows(ts), range_pct=0.20, strike_step=5.0)
+    repo.save_snapshot(
+        "NVDA",
+        _seed_nvda_rows(ts),
+        range_pct=0.20,
+        strike_step=5.0,
+        requested_strike_step=5.0,
+    )
 
     mock_ib = _MockIB(offline=offline)
     client = IBKRBrokerClient(settings, ib_factory=lambda: mock_ib)
@@ -219,12 +225,16 @@ def test_chain_endpoint_enriches_bsm_and_handles_422_and_404(tmp_path: Path) -> 
             data = r_chain.json()
             assert data["meta"]["underlying"] == "NVDA"
             assert data["meta"]["source"] == "CACHE"
+            assert data["meta"]["range_pct"] == pytest.approx(0.20)
+            assert data["meta"]["strike_step"] == pytest.approx(5.0)
+            assert data["meta"]["requested_strike_step"] == pytest.approx(5.0)
+            assert data["meta"]["dtes"] == [37, 43, 50, 58]
             # Seeded rows had greeks_source="NONE", so BSM fallback enriched them
             assert data["meta"]["greeks_source_counts"].get("BSM_FALLBACK", 0) > 0
             assert data["walls"]["primary_basis"] == "VOLUME"
             assert data["walls"]["aggregate_primary_call_wall"]["strike"] == 140.0
-            assert len(data["profiles"]["buckets"]) == 5
-            assert len(data["contracts"]) == 30
+            assert len(data["profiles"]["expiries"]) == 4
+            assert len(data["contracts"]) == 24
 
             # Explicit snapshot_id query param
             r_snap = await client.get(
@@ -277,6 +287,9 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             payload = r_ok.json()
             assert payload["meta"]["snapshot_id"] == "NVDA_20261111_160000"
             assert payload["meta"]["source"] == "LIVE_REFRESH"
+            assert payload["meta"]["range_pct"] == pytest.approx(0.20)
+            assert payload["meta"]["strike_step"] == pytest.approx(5.0)
+            assert payload["meta"]["dtes"] == [37, 43, 50, 58]
             assert payload["meta"]["greeks_source_counts"].get("BSM_FALLBACK", 0) > 0
             assert len(repo_on.list_snapshots("NVDA")) == 2
 
@@ -335,6 +348,13 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="kpi-call-wall"',
                 'id="kpi-put-wall"',
                 'id="kpi-anomalies"',
+                'id="walls-basis-label"',
+                'id="walls-view-select"',
+                'id="walls-metric-select"',
+                'id="walls-dte-select"',
+                'id="walls-split-dte"',
+                'id="walls-show-anomalies"',
+                'id="walls-copy-ai-btn"',
                 'id="chart-walls"',
                 'id="chart-iv-smile"',
                 'id="chart-anomalies"',
@@ -345,7 +365,7 @@ def test_dashboard_html_static_assets_and_csv_download(
 
             for column in (
                 "Expiry",
-                "DTE (Bucket)",
+                "DTE",
                 "Right",
                 "Strike",
                 "Moneyness %",
@@ -368,11 +388,33 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert r_css.status_code == 200
             assert "--bg-canvas:" in r_css.text
             assert 'html[data-theme="terminal"]' in r_css.text
+            assert "panel-card--span-6" in r_css.text
+            assert "panel-resize-handle" in r_css.text
+            assert "nwse-resize" in r_css.text
 
             r_js = await client.get("/static/js/dashboard.js")
             assert r_js.status_code == 200
             assert "Plotly.react" in r_js.text
             assert "Plotly.purge" in r_js.text
+            assert "&bull;" not in r_js.text
+            assert "&mdash;" not in r_js.text
+            for js_hook in (
+                "populateWallsDteFilter",
+                "makeWallReferenceMarker",
+                "buildSymmetricPositiveTicks",
+                "resolveWallCandidate",
+                "buildWallsAiPrompt",
+                "copyWallsAiPrompt",
+                "Top 3 strategie opcyjne",
+                "BEZ ŚCIANY TEKSTU",
+                "snapCardToGrid",
+                "panel-resize-handle",
+                "initChartResizeHandling",
+                "ibkr_walls_view",
+                "ibkr_walls_show_anomalies",
+                "walls-dte-select",
+            ):
+                assert js_hook in r_js.text, f"Missing {js_hook} in dashboard.js"
 
             r_csv = await client.get("/api/csv/NVDA")
             assert r_csv.status_code == 200

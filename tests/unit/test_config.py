@@ -42,7 +42,8 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.ibkr.market_data_mode == "DELAYED"
     assert s.watchlist.hardcoded_tickers == ("NVDA", "AVGO", "CRDO", "PLTR")
     assert s.options_chain.max_contracts_per_page == 80
-    assert s.options_chain.target_dte_buckets == (30, 35, 40, 45, 60)
+    assert s.options_chain.dte_min == 30
+    assert s.options_chain.dte_max == 60
     assert s.analytics.risk_free_rate == 0.0425
 
 

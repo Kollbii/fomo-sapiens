@@ -25,6 +25,7 @@ from src.storage.schema import (
     SNAPSHOT_ID_RE,
     OptionContractRow,
     SnapshotMeta,
+    infer_chain_step_and_range,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,11 +56,11 @@ def _atomic_copy(src: Path, dest: Path) -> None:
 
 
 def validate_frame(df: pl.DataFrame, source: str) -> pl.DataFrame:
-    """Reject frames violating the 28-column contract."""
+    """Reject frames violating the canonical option chain column contract."""
     if df.height == 0:
         raise StorageSchemaError(f"{source}: no data rows")
     if tuple(df.columns) != COLUMNS:
-        raise StorageSchemaError(f"{source}: columns do not match the 28-column schema")
+        raise StorageSchemaError(f"{source}: columns do not match the {len(COLUMNS)}-column schema")
     for name in NON_NULLABLE_COLUMNS:
         if df[name].null_count() > 0:
             raise StorageSchemaError(f"{source}: null values in required column '{name}'")
@@ -105,6 +106,7 @@ class CSVRepository:
         *,
         range_pct: float | None = None,
         strike_step: float | None = None,
+        requested_strike_step: float | None = None,
     ) -> SnapshotMeta:
         """Validate rows and archive them as a new immutable snapshot (never overwrites)."""
         symbol = TickerValidator.validate(ticker)
@@ -130,7 +132,13 @@ class CSVRepository:
             pl.DataFrame([m.model_dump() for m in models], schema=OPTION_CHAIN_POLARS_SCHEMA),
             snapshot_id,
         )
-        meta = self._meta_from_frame(df, target, range_pct, strike_step)
+        meta = self._meta_from_frame(
+            df,
+            target,
+            range_pct,
+            strike_step,
+            requested_strike_step=requested_strike_step,
+        )
 
         with self._lock:
             if target.exists():
@@ -151,7 +159,9 @@ class CSVRepository:
             with path.open("r", encoding="utf-8") as fh:
                 header = fh.readline().strip().split(",")
             if tuple(header) != COLUMNS:
-                raise StorageSchemaError(f"{path.name}: header does not match the 28-column schema")
+                raise StorageSchemaError(
+                    f"{path.name}: header does not match the {len(COLUMNS)}-column schema"
+                )
             df = pl.read_csv(path, schema=OPTION_CHAIN_POLARS_SCHEMA)
         except StorageSchemaError:
             raise
@@ -191,9 +201,24 @@ class CSVRepository:
 
     # ------------------------------------------------------------------ index
     def _meta_from_frame(
-        self, df: pl.DataFrame, path: Path, range_pct: float | None, strike_step: float | None
+        self,
+        df: pl.DataFrame,
+        path: Path,
+        range_pct: float | None,
+        strike_step: float | None,
+        *,
+        requested_strike_step: float | None = None,
+        infer_missing: bool = False,
     ) -> SnapshotMeta:
         first = df.row(0, named=True)
+        resolved_step = strike_step
+        resolved_range = range_pct
+        if infer_missing and (resolved_step is None or resolved_range is None):
+            inf_step, inf_range = infer_chain_step_and_range(df)
+            if resolved_step is None:
+                resolved_step = inf_step
+            if resolved_range is None:
+                resolved_range = inf_range
         return SnapshotMeta(
             snapshot_id=first["snapshot_id"],
             file_path=self._rel(path),
@@ -203,8 +228,9 @@ class CSVRepository:
             underlying_price=first["underlying_price"],
             contract_count=df.height,
             expirations=sorted(df["expiry"].unique().to_list()),
-            range_pct=range_pct,
-            strike_step=strike_step,
+            range_pct=resolved_range,
+            strike_step=resolved_step,
+            requested_strike_step=requested_strike_step,
         )
 
     def _write_index(self, tickers: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -232,6 +258,7 @@ class CSVRepository:
                     if snap["snapshot_id"] == meta.snapshot_id:
                         snap["range_pct"] = meta.range_pct
                         snap["strike_step"] = meta.strike_step
+                        snap["requested_strike_step"] = meta.requested_strike_step
                 self._write_index(rebuilt["tickers"])
             return
         existing = [
@@ -292,7 +319,9 @@ class CSVRepository:
                         if df["snapshot_id"][0] != csv_path.stem:
                             logger.warning("rebuild_index skipping %s: id mismatch", csv_path.name)
                             continue
-                        metas.append(self._meta_from_frame(df, csv_path, None, None))
+                        metas.append(
+                            self._meta_from_frame(df, csv_path, None, None, infer_missing=True)
+                        )
                     if metas:
                         tickers[symbol] = self._ticker_entry(symbol, metas)
             return self._write_index(tickers)

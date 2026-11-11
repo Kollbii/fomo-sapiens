@@ -29,8 +29,8 @@
   aria-label="Editorial Headline Slot"
 >
   <span class="editorial-banner-kicker">OPTIONS INTELLIGENCE DISPATCH</span>
-  <span class="editorial-banner-copy">
-    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Multi-DTE Structure (30&ndash;60D)
+  <span id="editorial-banner-copy" class="editorial-banner-copy">
+    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (&gt;30D &amp; &lt;60D)
   </span>
 </section>
 
@@ -136,10 +136,71 @@
 
 <!-- Row 5: Interactive Multi-DTE Plotly Charts (2x2) -->
 <section class="chart-grid" aria-label="Multi-DTE Quantitative Charts">
-  <article class="panel-card">
-    <header class="panel-header">
-      <h2 class="panel-title">Call &amp; Put Walls by Strike</h2>
-      <span id="walls-basis-label" class="panel-meta">OPEN INTEREST / VOLUME</span>
+  <article class="panel-card panel-card--walls">
+    <header class="panel-header panel-header--walls">
+      <div class="panel-title-stack">
+        <h2 class="panel-title">Call &amp; Put Walls by Strike</h2>
+        <span id="walls-basis-label" class="panel-meta">OPEN INTEREST / VOLUME</span>
+      </div>
+      <div class="panel-controls">
+        <label class="field-group">
+          <span class="field-label">View</span>
+          <select id="walls-view-select" class="select-control" aria-label="Walls chart layout">
+            <option value="ladder" selected>Ladder (Horiz)</option>
+            <option value="grouped">Grouped (Vert)</option>
+          </select>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Metric</span>
+          <select id="walls-metric-select" class="select-control" aria-label="Walls chart metric">
+            <option value="auto" selected>Auto (OI &rarr; Vol)</option>
+            <option value="oi">Open Interest</option>
+            <option value="volume">Volume</option>
+            <option value="overlay">OI + Volume</option>
+          </select>
+        </label>
+        <label class="field-group">
+          <span class="field-label">DTE</span>
+          <select id="walls-dte-select" class="select-control" aria-label="Walls DTE and expiry filter">
+            <option value="ALL" selected>All DTEs</option>
+          </select>
+        </label>
+        <label id="walls-split-dte-wrap" class="field-group field-group--checkbox">
+          <input id="walls-split-dte" type="checkbox" />
+          <span class="field-label">By DTE</span>
+        </label>
+        <label
+          id="walls-show-anomalies-wrap"
+          class="field-group field-group--checkbox"
+          title="Highlight contracts with Volume > OI or Volume Z-Score spikes"
+        >
+          <input id="walls-show-anomalies" type="checkbox" checked />
+          <span class="field-label">Anomalies</span>
+        </label>
+        <button
+          id="walls-copy-ai-btn"
+          class="btn btn-icon-copy"
+          type="button"
+          title="Copy AI analysis prompt (Polish output) for active DTE Call/Put Walls"
+          aria-label="Copy AI analysis prompt for active DTE"
+        >
+          <svg
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+          <span>AI PROMPT</span>
+        </button>
+      </div>
     </header>
     <div id="chart-walls" class="chart-canvas" aria-label="Call and Put Walls Chart"></div>
   </article>
@@ -147,7 +208,7 @@
   <article class="panel-card">
     <header class="panel-header">
       <h2 class="panel-title">Multi-DTE Implied Volatility Smile</h2>
-      <span class="panel-meta">BUCKETS 30 / 35 / 40 / 45 / 60</span>
+      <span class="panel-meta">&gt;30D &amp; &lt;60D WEEKLY EXPIRATIONS</span>
     </header>
     <div id="chart-iv-smile" class="chart-canvas" aria-label="Multi-DTE IV Smile Chart"></div>
   </article>
@@ -186,8 +247,8 @@
     </div>
     <div class="control-group">
       <label class="field-group">
-        <span class="field-label">DTE Bucket</span>
-        <select id="filter-dte" class="select-control" aria-label="Filter by DTE Bucket">
+        <span class="field-label">DTE / Expiry</span>
+        <select id="filter-dte" class="select-control" aria-label="Filter by DTE and Expiry">
           <option value="ALL">All DTEs</option>
         </select>
       </label>
@@ -211,7 +272,7 @@
       <thead>
         <tr>
           <th class="text-left">Expiry</th>
-          <th>DTE (Bucket)</th>
+          <th>DTE</th>
           <th class="text-left">Right</th>
           <th>Strike</th>
           <th>Moneyness %</th>
@@ -250,5 +311,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/dashboard.js" defer></script>
+<script src="/static/js/dashboard.js?v=20261111b" defer></script>
 {% endblock %}

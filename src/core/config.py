@@ -77,8 +77,6 @@ class WatchlistSettings(_StrictModel):
 class OptionsChainSettings(_StrictModel):
     dte_min: int = Field(default=30, ge=0)
     dte_max: int = Field(default=60, ge=1)
-    dte_boundary_tolerance_days: int = Field(default=3, ge=0)
-    target_dte_buckets: tuple[int, ...] = (30, 35, 40, 45, 60)
     default_range_pct: float = Field(default=0.20, gt=0, le=1)
     allowed_range_pcts: tuple[float, ...] = (0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
     default_strike_step: float = Field(default=5.0, gt=0)

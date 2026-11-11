@@ -36,8 +36,8 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
 
 ---
 
-## 2. Canonical Option Chain CSV Schema (`28 Columns`)
-To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes **one unified 28-column CSV** containing normalized contract quotes and Greeks. Derived analytics (Put/Call Walls, Unusual Activity, Multi-DTE curves) are computed in memory by `Polars` in `<5ms` when loading the CSV.
+## 2. Canonical Option Chain CSV Schema (`27 Columns`)
+To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes **one unified 27-column CSV** containing normalized contract quotes and Greeks. Derived analytics (Put/Call Walls, Unusual Activity, Multi-DTE curves) are computed in memory by `Polars` in `<5ms` when loading the CSV.
 
 | # | Column Name | Polars Dtype | Nullable | Description & Domain Rules |
 | :- | :--- | :--- | :--- | :--- |
@@ -50,25 +50,24 @@ To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes
 | 7 | `underlying_price` | `Float64` | No | Underlying spot/reference price (`> 0.0`) at snapshot time. |
 | 8 | `option_conid` | `Int64` | No | IBKR unique `conId` for this specific option contract. |
 | 9 | `expiry` | `Utf8` | No | Option expiration date normalized to `YYYY-MM-DD`. |
-| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`0 <= dte <= 400` enforced by the row model; the `[30, 60)` window + `±3` day tolerance is enforced by the broker filter). |
-| 11 | `target_dte_bucket` | `Int64` | No | Matched target bucket (`30`, `35`, `40`, `45`, or `60`). |
-| 12 | `strike` | `Float64` | No | Option strike price (`> 0.0`). |
-| 13 | `moneyness_pct` | `Float64` | No | Signed percentage from spot: `((strike - underlying_price) / underlying_price) * 100.0`. |
-| 14 | `right` | `Utf8` | No | Option type: strictly `"C"` (Call) or `"P"` (Put). |
-| 15 | `bid` | `Float64` | Yes | Best bid price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
-| 16 | `ask` | `Float64` | Yes | Best ask price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
-| 17 | `mid` | `Float64` | Yes | `(bid + ask) / 2.0` when both `bid > 0` and `ask > 0`, else `null`. |
-| 18 | `last` | `Float64` | Yes | Last traded price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
-| 19 | `close` | `Float64` | Yes | Closing price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
-| 20 | `mark_price` | `Float64` | Yes | Canonical option price: `mid` -> fallback `last` -> fallback `close`. |
-| 21 | `volume` | `Int64` | Yes | Session contract volume (`>= 0`; `null` if unpopulated). |
-| 22 | `open_interest` | `Int64` | Yes | Contract Open Interest from tick `101` (`null` if omitted by Type 3 delayed feed). |
-| 23 | `iv` | `Float64` | Yes | Implied Volatility as decimal (`0.4520` = `45.20%`). |
-| 24 | `delta` | `Float64` | Yes | Option Delta (`-1.0` to `1.0`). |
-| 25 | `gamma` | `Float64` | Yes | Option Gamma (`>= 0.0`). |
-| 26 | `theta` | `Float64` | Yes | Option daily Theta. |
-| 27 | `vega` | `Float64` | Yes | Option Vega. |
-| 28 | `greeks_source` | `Utf8` | No | `"IBKR_MODEL"`, `"BSM_FALLBACK"`, or `"NONE"`. |
+| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`0 <= dte <= 400` in schema; the broker filter selects weekly expirations strictly `30 < dte < 60`). |
+| 11 | `strike` | `Float64` | No | Option strike price (`> 0.0`). |
+| 12 | `moneyness_pct` | `Float64` | No | Signed percentage from spot: `((strike - underlying_price) / underlying_price) * 100.0`. |
+| 13 | `right` | `Utf8` | No | Option type: strictly `"C"` (Call) or `"P"` (Put). |
+| 14 | `bid` | `Float64` | Yes | Best bid price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
+| 15 | `ask` | `Float64` | Yes | Best ask price (`null` if IBKR returns `<= 0.0`, `-1.0`, or `NaN`). |
+| 16 | `mid` | `Float64` | Yes | `(bid + ask) / 2.0` when both `bid > 0` and `ask > 0`, else `null`. |
+| 17 | `last` | `Float64` | Yes | Last traded price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
+| 18 | `close` | `Float64` | Yes | Closing price (`null` if `<= 0.0`, `-1.0`, or `NaN`). |
+| 19 | `mark_price` | `Float64` | Yes | Canonical option price: `mid` -> fallback `last` -> fallback `close`. |
+| 20 | `volume` | `Int64` | Yes | Session contract volume (`>= 0`; `null` if unpopulated). |
+| 21 | `open_interest` | `Int64` | Yes | Contract Open Interest from tick `101` (`null` if omitted by Type 3 delayed feed). |
+| 22 | `iv` | `Float64` | Yes | Implied Volatility as decimal (`0.4520` = `45.20%`). |
+| 23 | `delta` | `Float64` | Yes | Option Delta (`-1.0` to `1.0`). |
+| 24 | `gamma` | `Float64` | Yes | Option Gamma (`>= 0.0`). |
+| 25 | `theta` | `Float64` | Yes | Option daily Theta. |
+| 26 | `vega` | `Float64` | Yes | Option Vega. |
+| 27 | `greeks_source` | `Utf8` | No | `"IBKR_MODEL"`, `"BSM_FALLBACK"`, or `"NONE"`. |
 
 ---
 
@@ -98,20 +97,21 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
               "market_data_type": 3,
               "underlying_price": 142.65,
               "contract_count": 120,
-              "expirations": ["2026-12-11", "2026-12-18", "2026-12-24", "2027-01-08"],
+              "expirations": ["2026-12-18", "2026-12-24", "2026-12-31", "2027-01-08"],
               "range_pct": 0.20,
-              "strike_step": 5.0
+              "strike_step": 5.0,
+              "requested_strike_step": 5.0
             }
           ]
         }
       }
     }
 
-If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically.
+If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible).
 
 ---
 
 ## 5. Phase 2 Implementation Notes — `[IMPLEMENTED]`
-- **`src/storage/schema.py`:** `OptionContractRow` (field order = CSV column order), `COLUMNS`, `OPTION_CHAIN_POLARS_SCHEMA` (`pl.Schema`), `SnapshotMeta` (index entry). The row model also sanitizes sentinels (prices `<= 0`/NaN/`>= 1e9` → null; counts `< 0`/NaN/`>= 2147483647` → null; `iv <= 0` or `> 10`, `abs(delta) > 1.001`, `gamma < 0` → null), derives `mid` and `mark_price` (`mid` → `last` → `close`), and requires `snapshot_id` prefix == `underlying`.
-- **`src/storage/csv_repository.py`:** `CSVRepository(storage_settings, root)`; `make_snapshot_id(ticker, ts)`; `save_snapshot` (refuses to overwrite an existing snapshot id, raising `StorageSchemaError`), `load_latest` (falls back to the newest valid archive if the cache is missing/corrupt), `load_snapshot`, `list_snapshots` (newest first), `load_index` / `rebuild_index` (self-healing; corrupt or stray CSVs are skipped with a warning). Readers raise `StorageSchemaError` on header/dtype/null violations and `SnapshotNotFoundError` when nothing exists.
-- **Index notes:** `file_path` / `latest_file` are root-relative POSIX paths. `range_pct` / `strike_step` are `null` after a rebuild from CSVs (they are not CSV columns).
+- **`src/storage/schema.py`:** `OptionContractRow` (field order = CSV column order, 27 columns), `COLUMNS`, `OPTION_CHAIN_POLARS_SCHEMA` (`pl.Schema`), `SnapshotMeta` (index entry including `requested_strike_step`), and `infer_chain_step_and_range(df)` (infers effective canonical strike spacing and moneyness span directly from a chain `DataFrame`). The row model also sanitizes sentinels (prices `<= 0`/NaN/`>= 1e9` → null; counts `< 0`/NaN/`>= 2147483647` → null; `iv <= 0` or `> 10`, `abs(delta) > 1.001`, `gamma < 0` → null), derives `mid` and `mark_price` (`mid` → `last` → `close`), and requires `snapshot_id` prefix == `underlying`.
+- **`src/storage/csv_repository.py`:** `CSVRepository(storage_settings, root)`; `make_snapshot_id(ticker, ts)`; `save_snapshot` (refuses to overwrite an existing snapshot id, raising `StorageSchemaError`), `load_latest` (falls back to the newest valid archive if the cache is missing/corrupt), `load_snapshot`, `list_snapshots` (newest first), `load_index` / `rebuild_index` (self-healing with `infer_missing=True`; corrupt or stray CSVs are skipped with a warning). Readers raise `StorageSchemaError` on header/dtype/null violations and `SnapshotNotFoundError` when nothing exists.
+- **Index notes:** `file_path` / `latest_file` are root-relative POSIX paths. After `rebuild_index()`, `strike_step` and `range_pct` are inferred from CSV strikes via `infer_chain_step_and_range()` while `requested_strike_step` is `null` (since request metadata lives only in `snapshot_index.json`).

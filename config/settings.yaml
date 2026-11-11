@@ -32,14 +32,7 @@ watchlist:
 
 options_chain:
   dte_min: 30
-  dte_max: 60            # Fetches closest DTEs in [30, 60)
-  dte_boundary_tolerance_days: 3
-  target_dte_buckets:
-    - 30
-    - 35
-    - 40
-    - 45
-    - 60
+  dte_max: 60            # Strict weekly expiration window: dte_min < DTE < dte_max (31..59d)
   default_range_pct: 0.20 # +-20% around underlying spot price
   allowed_range_pcts:
     - 0.10

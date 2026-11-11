@@ -30,7 +30,7 @@ from src.core.exceptions import (
 )
 from src.core.security import TickerValidator
 from src.storage.csv_repository import CSVRepository
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SnapshotMeta
+from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SnapshotMeta, infer_chain_step_and_range
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
 
@@ -82,7 +82,9 @@ class ChainMetadataPayload(BaseModel):
     contract_count: int
     expirations: list[str]
     dtes: list[int]
-    target_dte_buckets: list[int]
+    range_pct: float | None = None
+    strike_step: float | None = None
+    requested_strike_step: float | None = None
     greeks_source_counts: dict[str, int]
     source: Literal["CACHE", "LIVE_REFRESH"]
     notices: list[str] = Field(default_factory=list)
@@ -179,13 +181,28 @@ class AnalyzerWebService:
         *,
         source: Literal["CACHE", "LIVE_REFRESH"],
         notices: list[str] | None = None,
+        range_pct: float | None = None,
+        strike_step: float | None = None,
+        requested_strike_step: float | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
         first = enriched.row(0, named=True)
         source_counts = dict(Counter(str(s) for s in enriched["greeks_source"].to_list()))
         expirations = sorted(str(e) for e in enriched["expiry"].unique().to_list())
         dtes = sorted(int(d) for d in enriched["dte"].unique().to_list())
-        buckets = sorted(int(b) for b in enriched["target_dte_bucket"].unique().to_list())
+
+        inferred_step, inferred_range = infer_chain_step_and_range(enriched)
+        resolved_range = range_pct if range_pct is not None else inferred_range
+        resolved_step: float | None
+        if inferred_step is not None and (
+            strike_step is None or inferred_step > strike_step + 1e-6
+        ):
+            resolved_step = inferred_step
+        else:
+            resolved_step = strike_step if strike_step is not None else inferred_step
+        resolved_requested_step = (
+            requested_strike_step if requested_strike_step is not None else strike_step
+        )
 
         meta = ChainMetadataPayload(
             snapshot_id=str(first["snapshot_id"]),
@@ -198,7 +215,9 @@ class AnalyzerWebService:
             contract_count=enriched.height,
             expirations=expirations,
             dtes=dtes,
-            target_dte_buckets=buckets,
+            range_pct=resolved_range,
+            strike_step=resolved_step,
+            requested_strike_step=resolved_requested_step,
             greeks_source_counts=source_counts,
             source=source,
             notices=list(notices or []),
@@ -228,7 +247,18 @@ class AnalyzerWebService:
             df = self.repo.load_snapshot(symbol, snapshot_id.strip())
         else:
             df = self.repo.load_latest(symbol)
-        return self.build_analytics_payload(df, source="CACHE")
+        loaded_snap_id = str(df["snapshot_id"][0])
+        snap_meta = next(
+            (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
+            None,
+        )
+        return self.build_analytics_payload(
+            df,
+            source="CACHE",
+            range_pct=snap_meta.range_pct if snap_meta else None,
+            strike_step=snap_meta.strike_step if snap_meta else None,
+            requested_strike_step=snap_meta.requested_strike_step if snap_meta else None,
+        )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
         symbol = self.validate_ticker(raw_ticker)
@@ -258,16 +288,33 @@ class AnalyzerWebService:
         enriched_df = BSMFallbackEngine.enrich_missing_greeks(
             raw_df, risk_free_rate=self.settings.analytics.risk_free_rate
         )
+        inferred_step, _ = infer_chain_step_and_range(enriched_df)
+        plan_step = fetch_res.plan.strikes.effective_step
+        actual_step = (
+            inferred_step
+            if (inferred_step is not None and inferred_step > plan_step + 1e-6)
+            else plan_step
+        )
+        req_step = fetch_res.plan.strikes.requested_step
+        notices = list(fetch_res.notices)
+        if actual_step > plan_step + 1e-6:
+            notices.append(
+                f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."
+            )
         self.repo.save_snapshot(
             symbol,
             enriched_df.to_dicts(),
             range_pct=fetch_res.plan.range_pct,
-            strike_step=fetch_res.plan.strikes.effective_step,
+            strike_step=actual_step,
+            requested_strike_step=req_step,
         )
         return self.build_analytics_payload(
             enriched_df,
             source="LIVE_REFRESH",
-            notices=list(fetch_res.notices),
+            notices=notices,
+            range_pct=fetch_res.plan.range_pct,
+            strike_step=actual_step,
+            requested_strike_step=req_step,
         )
 
 

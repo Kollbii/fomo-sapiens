@@ -25,9 +25,8 @@ def _make_row(
     right: str = "C",
     spot: float = 100.0,
     strike: float = 100.0,
-    dte: int = 30,
-    target_dte_bucket: int = 30,
-    expiry: str = "2026-12-11",
+    dte: int = 37,
+    expiry: str = "2026-12-18",
     mark_price: float | None = 3.60,
     volume: int | None = 100,
     open_interest: int | None = None,
@@ -49,7 +48,6 @@ def _make_row(
         option_conid=conid,
         expiry=expiry,
         dte=dte,
-        target_dte_bucket=target_dte_bucket,  # type: ignore[arg-type]
         strike=strike,
         moneyness_pct=((strike - spot) / spot) * 100.0,
         right=right,  # type: ignore[arg-type]
@@ -229,29 +227,28 @@ def test_empty_dataframe_preserves_schema() -> None:
     res = enrich_missing_greeks(empty_df)
     assert res.height == 0
     assert res.schema == OPTION_CHAIN_POLARS_SCHEMA
-    assert compute_walls(empty_df).by_dte_bucket == []
+    assert compute_walls(empty_df).by_dte == []
     assert scan_anomalies(empty_df).total_flagged == 0
-    assert build_multi_dte_profiles(empty_df).buckets == []
+    assert build_multi_dte_profiles(empty_df).expiries == []
 
 
 # ------------------------------------------------------------------ Phase 4B: Walls
 def test_compute_walls_open_interest_primary_mode_and_tiebreak() -> None:
     rows = [
-        # DTE 30 Calls: 110 has OI=5000, 105 has OI=3000 (vol=900), 115 has OI=3000 (vol=200)
+        # DTE 37 Calls: 110 has OI=5000, 105 has OI=3000 (vol=900), 115 has OI=3000 (vol=200)
         _make_row(conid=101, right="C", strike=105.0, open_interest=3000, volume=900),
         _make_row(conid=102, right="C", strike=110.0, open_interest=5000, volume=400),
         _make_row(conid=103, right="C", strike=115.0, open_interest=3000, volume=200),
-        # DTE 30 Puts: 90 has OI=4000, 95 has OI=2000
+        # DTE 37 Puts: 90 has OI=4000, 95 has OI=2000
         _make_row(conid=104, right="P", strike=90.0, open_interest=4000, volume=500),
         _make_row(conid=105, right="P", strike=95.0, open_interest=2000, volume=300),
-        # DTE 45 Call at 110 adds another 1000 OI -> aggregate 110 Call OI = 6000
+        # DTE 43 Call at 110 adds another 1000 OI -> aggregate 110 Call OI = 6000
         _make_row(
             conid=106,
             right="C",
             strike=110.0,
-            dte=45,
-            target_dte_bucket=45,
-            expiry="2026-12-26",
+            dte=43,
+            expiry="2026-12-24",
             open_interest=1000,
             volume=100,
         ),
@@ -271,7 +268,7 @@ def test_compute_walls_open_interest_primary_mode_and_tiebreak() -> None:
     assert report.aggregate_primary_put_wall is not None
     assert report.aggregate_primary_put_wall.strike == 90.0
     assert report.aggregate_primary_put_wall.distance_from_spot_pct == pytest.approx(-10.0)
-    assert len(report.by_dte_bucket) == 2
+    assert len(report.by_dte) == 2
 
 
 def test_compute_walls_automatic_volume_fallback_when_oi_null() -> None:
@@ -312,14 +309,13 @@ def test_scan_anomalies_vol_gt_oi_and_zscore_outliers() -> None:
         _make_row(conid=308, right="P", strike=95.0, volume=10, open_interest=None),
         _make_row(conid=309, right="P", strike=100.0, volume=10, open_interest=None),
         _make_row(conid=310, right="P", strike=105.0, volume=10, open_interest=None),
-        # Call with vol > OI (vol=150, OI=50 -> ratio=3.0) in DTE 45 (single row -> zscore=0)
+        # Call with vol > OI (vol=150, OI=50 -> ratio=3.0) in DTE 43 (single row -> zscore=0)
         _make_row(
             conid=311,
             right="C",
             strike=120.0,
-            dte=45,
-            target_dte_bucket=45,
-            expiry="2026-12-26",
+            dte=43,
+            expiry="2026-12-24",
             volume=150,
             open_interest=50,
         ),
@@ -342,18 +338,17 @@ def test_scan_anomalies_vol_gt_oi_and_zscore_outliers() -> None:
 
 
 # ------------------------------------------------------------------ Phase 4B: Multi-DTE Profiles
-def test_build_multi_dte_profiles_across_five_buckets() -> None:
-    buckets_and_expiries = [
-        (30, 30, "2026-12-11"),
-        (35, 35, "2026-12-16"),
-        (40, 40, "2026-12-21"),
-        (45, 45, "2026-12-26"),
-        (60, 60, "2027-01-10"),
+def test_build_multi_dte_profiles_across_weekly_expiries() -> None:
+    dtes_and_expiries = [
+        (37, "2026-12-18"),
+        (43, "2026-12-24"),
+        (50, "2026-12-31"),
+        (58, "2027-01-08"),
     ]
     rows: list[dict[str, Any]] = []
     conid = 500
     spot = 142.0
-    for bucket, dte, expiry in buckets_and_expiries:
+    for dte, expiry in dtes_and_expiries:
         for strike in (135.0, 140.0, 145.0):
             conid += 1
             rows.append(
@@ -363,13 +358,12 @@ def test_build_multi_dte_profiles_across_five_buckets() -> None:
                     spot=spot,
                     strike=strike,
                     dte=dte,
-                    target_dte_bucket=bucket,
                     expiry=expiry,
                     mark_price=6.0,
                     volume=120,
                     open_interest=500,
-                    greeks_source="IBKR_MODEL" if bucket == 30 else "BSM_FALLBACK",
-                    iv=0.40 + bucket * 0.001,
+                    greeks_source="IBKR_MODEL" if dte == 37 else "BSM_FALLBACK",
+                    iv=0.40 + dte * 0.001,
                     delta=0.52,
                     gamma=0.03,
                     theta=-0.10,
@@ -384,13 +378,12 @@ def test_build_multi_dte_profiles_across_five_buckets() -> None:
                     spot=spot,
                     strike=strike,
                     dte=dte,
-                    target_dte_bucket=bucket,
                     expiry=expiry,
                     mark_price=5.5,
                     volume=90,
                     open_interest=450,
-                    greeks_source="IBKR_MODEL" if bucket == 30 else "BSM_FALLBACK",
-                    iv=0.42 + bucket * 0.001,
+                    greeks_source="IBKR_MODEL" if dte == 37 else "BSM_FALLBACK",
+                    iv=0.42 + dte * 0.001,
                     delta=-0.48,
                     gamma=0.03,
                     theta=-0.09,
@@ -401,16 +394,16 @@ def test_build_multi_dte_profiles_across_five_buckets() -> None:
     profile_report = MultiDTEStructureAnalyzer().analyze(_to_df(rows))
     assert profile_report.underlying == "NVDA"
     assert profile_report.underlying_price == 142.0
-    assert profile_report.greeks_source_counts == {"IBKR_MODEL": 6, "BSM_FALLBACK": 24}
-    assert [b.target_dte_bucket for b in profile_report.buckets] == [30, 35, 40, 45, 60]
+    assert profile_report.greeks_source_counts == {"IBKR_MODEL": 6, "BSM_FALLBACK": 18}
+    assert [ex.dte for ex in profile_report.expiries] == [37, 43, 50, 58]
 
-    b30 = profile_report.buckets[0]
+    e37 = profile_report.expiries[0]
     # Strikes are 135, 140, 145 -> closest to spot 142.0 is 140.0
-    assert b30.atm_strike == 140.0
-    # call_iv=0.43, put_iv=0.45 -> atm_iv = 0.44
-    assert b30.atm_iv == pytest.approx(0.44)
-    assert [pt.strike for pt in b30.strikes] == [135.0, 140.0, 145.0]
-    assert b30.strikes[1].call_delta == pytest.approx(0.52)
-    assert b30.strikes[1].put_delta == pytest.approx(-0.48)
-    assert b30.strikes[1].call_oi == 500
-    assert b30.strikes[1].put_oi == 450
+    assert e37.atm_strike == 140.0
+    # call_iv=0.437, put_iv=0.457 -> atm_iv = 0.447
+    assert e37.atm_iv == pytest.approx(0.447)
+    assert [pt.strike for pt in e37.strikes] == [135.0, 140.0, 145.0]
+    assert e37.strikes[1].call_delta == pytest.approx(0.52)
+    assert e37.strikes[1].put_delta == pytest.approx(-0.48)
+    assert e37.strikes[1].call_oi == 500
+    assert e37.strikes[1].put_oi == 450

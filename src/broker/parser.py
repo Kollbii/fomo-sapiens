@@ -162,7 +162,6 @@ class TickerParser:
         underlying: str | None = None,
         underlying_conid: int | None = None,
         underlying_price: float | None = None,
-        target_dte_bucket: int = 30,
         dte: int | None = None,
         expiry: str | date | None = None,
     ) -> OptionContractRow:
@@ -236,7 +235,6 @@ class TickerParser:
             option_conid=option_conid,
             expiry=iso_expiry,
             dte=resolved_dte,
-            target_dte_bucket=target_dte_bucket,  # type: ignore[arg-type]
             strike=strike,
             moneyness_pct=moneyness_pct,
             right=right,
@@ -259,7 +257,6 @@ class TickerParser:
         ticker: Any,
         *,
         contract: Any | None = None,
-        target_dte_bucket: int = 30,
         dte: int | None = None,
         expiry: str | date | None = None,
     ) -> OptionContractRow:
@@ -268,7 +265,6 @@ class TickerParser:
             ticker,
             contract=contract,
             context=self.context,
-            target_dte_bucket=target_dte_bucket,
             dte=dte,
             expiry=expiry,
         )

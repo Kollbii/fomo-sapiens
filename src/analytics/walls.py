@@ -26,11 +26,10 @@ class WallLevel(BaseModel):
 
 
 class DTEWallSummary(BaseModel):
-    """Call and Put wall summary for a single expiration / target DTE bucket."""
+    """Call and Put wall summary for a single expiration date."""
 
     model_config = ConfigDict(extra="forbid")
 
-    target_dte_bucket: int
     expiry: str
     dte: int
     primary_call_wall: WallLevel | None
@@ -55,7 +54,7 @@ class ChainWallsReport(BaseModel):
     aggregate_primary_put_wall: WallLevel | None
     aggregate_top_call_walls: list[WallLevel]
     aggregate_top_put_walls: list[WallLevel]
-    by_dte_bucket: list[DTEWallSummary]
+    by_dte: list[DTEWallSummary]
 
 
 def _rank_side_walls(
@@ -129,7 +128,7 @@ def compute_walls(df: pl.DataFrame, top_n: int = 3) -> ChainWallsReport:
             aggregate_primary_put_wall=None,
             aggregate_top_call_walls=[],
             aggregate_top_put_walls=[],
-            by_dte_bucket=[],
+            by_dte=[],
         )
 
     first = df.row(0, named=True)
@@ -158,15 +157,12 @@ def compute_walls(df: pl.DataFrame, top_n: int = 3) -> ChainWallsReport:
         prepared, right="P", spot=spot, basis=primary_basis, top_n=top_n
     )
 
-    sorted_df = prepared.sort(["dte", "target_dte_bucket", "expiry", "strike"])
+    sorted_df = prepared.sort(["dte", "expiry", "strike"])
     by_dte: list[DTEWallSummary] = []
 
-    for key, group_df in sorted_df.group_by(
-        ["target_dte_bucket", "expiry", "dte"], maintain_order=True
-    ):
-        bucket_int = int(key[0])
-        expiry_str = str(key[1])
-        dte_int = int(key[2])
+    for key, group_df in sorted_df.group_by(["expiry", "dte"], maintain_order=True):
+        expiry_str = str(key[0])
+        dte_int = int(key[1])
 
         dte_call_walls = _rank_side_walls(
             group_df, right="C", spot=spot, basis=primary_basis, top_n=top_n
@@ -176,7 +172,6 @@ def compute_walls(df: pl.DataFrame, top_n: int = 3) -> ChainWallsReport:
         )
         by_dte.append(
             DTEWallSummary(
-                target_dte_bucket=bucket_int,
                 expiry=expiry_str,
                 dte=dte_int,
                 primary_call_wall=dte_call_walls[0] if dte_call_walls else None,
@@ -198,7 +193,7 @@ def compute_walls(df: pl.DataFrame, top_n: int = 3) -> ChainWallsReport:
         aggregate_primary_put_wall=agg_put_walls[0] if agg_put_walls else None,
         aggregate_top_call_walls=agg_call_walls,
         aggregate_top_put_walls=agg_put_walls,
-        by_dte_bucket=by_dte,
+        by_dte=by_dte,
     )
 
 

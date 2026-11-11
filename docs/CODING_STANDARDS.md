@@ -31,7 +31,7 @@ Every feature phase requires automated tests in `pytest`:
    - Tests `TickerValidator.validate()` against valid symbols (`NVDA`, `AVGO`, `CRDO`, `PLTR`, `SPY`) and malicious inputs (`../etc`, `NVDA;rm`, `BRK.A`, `12345`, `""`, `"ABCDEFG"`).
    - Tests `ReadOnlyIBGuard.lock()` ensuring `placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, and `whatIfOrder` raise `SecurityViolationError`.
 2. **`tests/unit/test_contracts_and_pagination.py`:**
-   - Verifies `[30, 60)` DTE bucket matching, `+-X%` moneyness filtering, `$ strike_step` striding, and `<= 80` contracts/page splitting.
+   - Verifies strict `(30, 60)` weekly DTE matching, `+-X%` moneyness filtering, grid-aligned `$ strike_step` striding (and Auto step selection), and `<= 80` contracts/page splitting.
 3. **`tests/unit/test_bsm_and_analytics.py`:**
    - Verifies vectorized BSM implied volatility and Greeks against known analytical option values.
    - Verifies Put/Call Wall detection (both OI mode and Volume fallback mode) and `Volume > OI` anomaly detection.

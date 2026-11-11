@@ -1,4 +1,4 @@
-"""Multi-DTE option chain structure alignment for `[30, 35, 40, 45, 60]` DTE overlays."""
+"""Multi-DTE option chain structure alignment across weekly `(30, 60)` expirations."""
 
 from __future__ import annotations
 
@@ -34,12 +34,11 @@ class StrikeProfilePoint(BaseModel):
     put_volume: int | None = None
 
 
-class DTEBucketProfile(BaseModel):
-    """Aligned strike profile and ATM summary for one target DTE bucket / expiration."""
+class DTEProfile(BaseModel):
+    """Aligned strike profile and ATM summary for one expiration date."""
 
     model_config = ConfigDict(extra="forbid")
 
-    target_dte_bucket: int
     expiry: str
     dte: int
     atm_strike: float
@@ -57,7 +56,7 @@ class MultiDTEProfilesReport(BaseModel):
     snapshot_id: str
     market_data_type: int
     greeks_source_counts: dict[str, int]
-    buckets: list[DTEBucketProfile]
+    expiries: list[DTEProfile]
 
 
 def _opt_float(val: Any) -> float | None:
@@ -69,7 +68,7 @@ def _opt_int(val: Any) -> int | None:
 
 
 def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
-    """Align Call and Put chains by `(target_dte_bucket, expiry)` and `strike`."""
+    """Align Call and Put chains by `(expiry, dte)` and `strike`."""
     if df.height == 0:
         return MultiDTEProfilesReport(
             underlying="",
@@ -77,7 +76,7 @@ def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
             snapshot_id="",
             market_data_type=3,
             greeks_source_counts={},
-            buckets=[],
+            expiries=[],
         )
 
     first = df.row(0, named=True)
@@ -88,15 +87,12 @@ def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
 
     source_counts: dict[str, int] = dict(Counter(str(s) for s in df["greeks_source"].to_list()))
 
-    sorted_df = df.sort(["dte", "target_dte_bucket", "expiry", "strike", "right"])
-    buckets: list[DTEBucketProfile] = []
+    sorted_df = df.sort(["dte", "expiry", "strike", "right"])
+    expiries: list[DTEProfile] = []
 
-    for key, group_df in sorted_df.group_by(
-        ["target_dte_bucket", "expiry", "dte"], maintain_order=True
-    ):
-        bucket_int = int(key[0])
-        expiry_str = str(key[1])
-        dte_int = int(key[2])
+    for key, group_df in sorted_df.group_by(["expiry", "dte"], maintain_order=True):
+        expiry_str = str(key[0])
+        dte_int = int(key[1])
 
         by_strike: dict[float, dict[str, Any]] = {}
         for row in group_df.iter_rows(named=True):
@@ -126,9 +122,8 @@ def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
         atm_ivs = [v for v in (atm_point.call_iv, atm_point.put_iv) if v is not None]
         atm_iv: float | None = (sum(atm_ivs) / len(atm_ivs)) if atm_ivs else None
 
-        buckets.append(
-            DTEBucketProfile(
-                target_dte_bucket=bucket_int,
+        expiries.append(
+            DTEProfile(
                 expiry=expiry_str,
                 dte=dte_int,
                 atm_strike=atm_point.strike,
@@ -143,7 +138,7 @@ def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
         snapshot_id=snapshot_id,
         market_data_type=market_data_type,
         greeks_source_counts=source_counts,
-        buckets=buckets,
+        expiries=expiries,
     )
 
 

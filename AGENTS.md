@@ -60,8 +60,8 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
 - **Key Deliverables:**
   - Connection manager targeting port `4001` with `ReadOnlyIBGuard` enforced.
   - Market data mode selector defaulting to **Type 3 (15-min Delayed from current date)** during trading hours with automatic cascade to **Type 4 (Delayed-Frozen)** when delayed bid-ask ticks are unpopulated after market close, plus a scaffolded placeholder for **Type 1 (Live OPRA)**.
-  - DTE filter selecting closest expirations in the `[30, 60)` calendar-day window (matching targets `30, 35, 40, 45, 60` DTE).
-  - Moneyness filter (`+-20%` default around underlying spot, adjustable in UI) and strike step striding (`$5.00` default, adjustable in UI).
+  - DTE filter selecting every weekly expiration strictly inside `(30, 60)` DTE (`dte_min < dte < dte_max`, one per ISO week preferring Friday).
+  - Moneyness filter (`+-20%` default around underlying spot, adjustable in UI) and grid-aligned canonical strike step striding (`$5.00` default or `Auto` step selection, adjustable in UI).
   - Paged micro-batch downloader (`MAX_CONTRACTS_PER_PAGE = 80`) respecting IBKR's 100-line ceiling and pacing limits, plus a modular collector/placeholder for generic tick `101` (Open Interest).
 - **Exit Gate:** Mocked `ib-async` integration tests proving pagination math, pacing compliance, and graceful disconnect recovery.
 - **Status: `[IMPLEMENTED]`** — `src/broker/{client,contracts,parser,fetcher}.py` with `tests/unit/test_contracts_and_pagination.py` (see `docs/ARCHITECTURE.md` §7).
@@ -72,7 +72,7 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - Vectorized Black-Scholes-Merton (BSM) solver that populates Implied Volatility, Delta, Gamma, Theta, and Vega whenever IBKR Type 3/4 delayed ticks omit `modelGreeks` (using configurable `risk_free_rate: 0.0425`).
   - Call Wall and Put Wall identification (by Open Interest and by Volume, with automatic Volume Wall fallback when Type 3 delayed data omits OI).
   - Unusual activity detector (`Volume > Open Interest` and cross-strike Volume Z-score outliers across strikes and DTEs).
-  - Multi-DTE aggregation profiles overlaying `[30, 35, 40, 45, 60]` DTE structures.
+  - Multi-DTE aggregation profiles overlaying weekly expirations inside `(30, 60)` DTE.
 - **Exit Gate:** Deterministic mathematical unit tests verifying BSM Greeks accuracy and wall/anomaly rankings.
 - **Status: `[IMPLEMENTED]`** — `src/analytics/{bsm_fallback,walls,anomalies,term_greeks}.py` with `tests/unit/test_bsm_and_analytics.py` (see `docs/ARCHITECTURE.md` §8).
 
@@ -82,7 +82,7 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - FastAPI endpoints for server status (`GET /api/status`), on-demand refresh (`POST /api/refresh`), cached snapshot loading (`GET /api/chain/{ticker}`), historical archive switching (`GET /api/snapshots/{ticker}`), and CSV download (`GET /api/csv/{ticker}`).
   - Reserved top-level **Editorial Banner Container** (`#editorial-banner-slot`, structural slot kept ready for future content).
   - Dual-theme switcher (**Variant 1: NYT Print Edition** vs. **Variant 2: Obsidian Terminal**).
-  - Interactive Plotly multi-DTE charts and high-density monospaced tabular option chains.
+  - Interactive snap-to-grid 12-column corner-resizable Plotly multi-DTE charts (with `#walls-copy-ai-btn` Polish-language AI prompt export for the active DTE scope and `Step $` / `Range %` telemetry sync) and high-density monospaced tabular option chains.
 - **Exit Gate:** End-to-end smoke test rendering UI from offline CSV fixtures and live/mocked refresh triggers.
 - **Status: `[IMPLEMENTED]`** — `src/main.py`, `src/web/api.py`, `src/web/templates/{base,index}.html`, `src/web/static/css/tokens.css`, `src/web/static/js/dashboard.js` with `tests/integration/test_web_api.py` (see `docs/ARCHITECTURE.md` §9).
 
@@ -113,7 +113,7 @@ All workflows are standardized through `Makefile` and `docker compose`:
 
 ## 6. Hard Architectural Anti-Patterns (NEVER DO THIS)
 1. **NEVER** invoke or expose `ib.placeOrder()`, `ib.cancelOrder()`, `ib.reqGlobalCancel()`, `ib.exerciseOptions()`, or `ib.whatIfOrder()`.
-2. **NEVER** request an unfiltered option chain (`reqTickers` or `reqMktData` on all strikes returned by `reqSecDefOptParams`). Always filter by DTE `[30, 60)`, moneyness percentage (`range_pct`), and strike stride (`strike_step`) before batching into pages of `<= 80` contracts.
+2. **NEVER** request an unfiltered option chain (`reqTickers` or `reqMktData` on all strikes returned by `reqSecDefOptParams`). Always filter to weekly expirations inside `(30, 60)` DTE, moneyness percentage (`range_pct`), and strike stride (`strike_step`) before batching into pages of `<= 80` contracts.
 3. **NEVER** pass raw user strings into file paths or IBKR contract constructors without passing through `TickerValidator.validate(symbol)`.
 4. **NEVER** block the FastAPI `asyncio` event loop with synchronous `time.sleep()` or synchronous socket calls; always use `asyncio.sleep()` and async `ib-async` coroutines (`qualifyContractsAsync`, `reqSecDefOptParamsAsync`).
 5. **NEVER** overwrite historical CSV snapshots in `data/snapshots/`. Every manual refresh must create a new timestamped CSV (Mode 1 Archive) and atomically update `data/latest/{TICKER}_latest.csv`.
