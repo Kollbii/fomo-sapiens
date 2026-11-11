@@ -128,6 +128,19 @@ class IBKRBrokerClient:
         self.current_type = data_type
         logger.info("reqMarketDataType(%d)", data_type)
 
+    def get_active_market_data_type(self) -> int:
+        """Query `ib.client.marketDataType` when present, else return tracked `current_type`."""
+        client = getattr(self.ib, "client", None)
+        client_md = getattr(client, "marketDataType", None)
+        if type(client_md) is int and client_md in {
+            LIVE_PRIMARY_TYPE,
+            LIVE_FALLBACK_TYPE,
+            DELAYED_PRIMARY_TYPE,
+            DELAYED_FALLBACK_TYPE,
+        }:
+            return client_md
+        return int(self.current_type)
+
     def reset_market_data_type(self) -> int:
         """Start every refresh from the configured primary type (3 = Delayed or 1 = Live)."""
         self._set_market_data_type(self.primary_type)

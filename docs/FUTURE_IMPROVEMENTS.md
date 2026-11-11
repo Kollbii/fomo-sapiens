@@ -21,7 +21,7 @@
     - $\text{Call GEX}_K = +\text{OI}_{\text{call}, K} \times \Gamma_{\text{call}, K} \times 100 \times S^2 \times 0.01$
     - $\text{Put GEX}_K = -\text{OI}_{\text{put}, K} \times \Gamma_{\text{put}, K} \times 100 \times S^2 \times 0.01$
     - $\text{Net GEX}_K = \text{Call GEX}_K + \text{Put GEX}_K$
-  - **Zero-Gamma Flip Level:** Interpolate the exact underlying spot price $S_{\text{flip}}$ where cumulative Net GEX across the `(30, 60)` weekly chain crosses zero (transitioning from positive mean-reverting gamma to negative volatility-amplifying gamma).
+  - **Zero-Gamma Flip Level:** Interpolate the exact underlying spot price $S_{\text{flip}}$ where cumulative Net GEX across the `[30, 60)` weekly chain crosses zero (transitioning from positive mean-reverting gamma to negative volatility-amplifying gamma).
 - **Module Target:** `src/analytics/gex.py` + new GEX Bar Profile tab in Chart A.
 
 ---
@@ -46,7 +46,7 @@
 ## 4. 25-Delta Risk Reversal (Put-Call Skew) & Term Structure Curve
 - **Status:** `[PLANNED — PHASE 7]`
 - **Quantitative Specification:**
-  - For each weekly expiration in the `(30, 60)` DTE window:
+  - For each weekly expiration in the `[30, 60)` DTE window:
     - Extract **ATM IV** (interpolated at `abs(delta) == 0.50` or `strike == spot`).
     - Extract **25-Delta Put IV** (`delta == -0.25`) and **25-Delta Call IV** (`delta == +0.25`).
     - Compute **25-Delta Risk Reversal:** $\text{RR}_{25} = \text{IV}_{25\Delta \text{ Call}} - \text{IV}_{25\Delta \text{ Put}}$.

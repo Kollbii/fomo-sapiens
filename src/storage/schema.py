@@ -218,6 +218,10 @@ class SnapshotMeta(BaseModel):
     range_pct: float | None = None
     strike_step: float | None = None
     requested_strike_step: float | None = None
+    exchange_validated_strike_count: int | None = None
+    available_strike_steps: list[float] | None = None
+    available_range_pcts: list[float] | None = None
+    exchange_native_verified: bool | None = None
 
 
 def infer_chain_step_and_range(df: pl.DataFrame) -> tuple[float | None, float | None]:

@@ -13,7 +13,7 @@
       <span class="badge-dot" aria-hidden="true"></span>
       <span>CHECKING GATEWAY...</span>
     </span>
-    <span id="md-type-badge" class="badge badge--info">TYPE 3 DELAYED</span>
+    <span id="md-type-badge" class="badge badge--info">CHECKING FEED...</span>
     <span id="greeks-source-badge" class="badge badge--info">GREEKS: &mdash;</span>
     <button id="theme-toggle" class="btn" type="button" aria-label="Toggle color theme">
       TERMINAL THEME
@@ -30,7 +30,7 @@
 >
   <span class="editorial-banner-kicker">OPTIONS INTELLIGENCE DISPATCH</span>
   <span id="editorial-banner-copy" class="editorial-banner-copy">
-    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (&gt;30D &amp; &lt;60D)
+    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (30&ndash;59 DTE)
   </span>
 </section>
 
@@ -67,7 +67,7 @@
   <div class="control-group">
     <label class="field-group">
       <span class="field-label">Range</span>
-      <select id="range-pct-select" class="select-control" aria-label="Moneyness range">
+      <select id="range-pct-select" class="select-control" aria-label="Moneyness range" title="Spot moneyness band (±%) intersected with IBKR exchange-valid strikes">
         {% for rp in allowed_range_pcts %}
         <option value="{{ rp }}"{% if rp == default_range_pct %} selected{% endif %}>
           &plusmn;{{ (rp * 100) | int }}%
@@ -78,7 +78,7 @@
 
     <label class="field-group">
       <span class="field-label">Step</span>
-      <select id="strike-step-select" class="select-control" aria-label="Strike stride">
+      <select id="strike-step-select" class="select-control" aria-label="Strike stride" title="Strike step ($) adapted to IBKR exchange-native option chains">
         <option value="auto">Auto</option>
         {% for step in allowed_strike_steps %}
         <option value="{{ step }}"{% if step == default_strike_step %} selected{% endif %}>
@@ -101,6 +101,61 @@
     <a id="export-csv-btn" class="btn" href="/api/csv/{{ default_ticker }}" download>
       EXPORT CSV
     </a>
+  </div>
+
+  <div
+    id="panel-visibility-controls"
+    class="control-group panel-visibility-bar"
+    role="group"
+    aria-label="Chart Panel Visibility Controls"
+  >
+    <span class="field-label panels-bar-label">PANELS:</span>
+    <div class="panel-toggle-group">
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="walls"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Put &amp; Call Walls</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill"
+        data-panel-target="iv_smile"
+        aria-pressed="false"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>IV Smile</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="anomalies"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Unusual Activity</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill"
+        data-panel-target="greeks"
+        aria-pressed="false"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Greeks Structure</span>
+      </button>
+    </div>
+    <button
+      id="panel-visibility-reset"
+      type="button"
+      class="panel-reset-btn"
+      title="Restore default visible panels and clear custom panel visibility"
+    >
+      Reset Panels
+    </button>
   </div>
 </section>
 
@@ -136,7 +191,7 @@
 
 <!-- Row 5: Interactive Multi-DTE Plotly Charts (2x2) -->
 <section class="chart-grid" aria-label="Multi-DTE Quantitative Charts">
-  <article class="panel-card panel-card--walls">
+  <article class="panel-card panel-card--walls" data-panel-id="walls">
     <header class="panel-header panel-header--walls">
       <div class="panel-title-stack">
         <h2 class="panel-title">Call &amp; Put Walls by Strike</h2>
@@ -205,15 +260,15 @@
     <div id="chart-walls" class="chart-canvas" aria-label="Call and Put Walls Chart"></div>
   </article>
 
-  <article class="panel-card">
+  <article class="panel-card is-hidden" data-panel-id="iv_smile">
     <header class="panel-header">
       <h2 class="panel-title">Multi-DTE Implied Volatility Smile</h2>
-      <span class="panel-meta">&gt;30D &amp; &lt;60D WEEKLY EXPIRATIONS</span>
+      <span class="panel-meta">30&ndash;59 DTE WEEKLY EXPIRATIONS</span>
     </header>
     <div id="chart-iv-smile" class="chart-canvas" aria-label="Multi-DTE IV Smile Chart"></div>
   </article>
 
-  <article class="panel-card">
+  <article class="panel-card" data-panel-id="anomalies">
     <header class="panel-header">
       <h2 class="panel-title">Unusual Activity &amp; Volume/OI Scan</h2>
       <span class="panel-meta">VOL &gt; OI &bull; VOLUME Z-SCORE</span>
@@ -221,7 +276,7 @@
     <div id="chart-anomalies" class="chart-canvas" aria-label="Unusual Activity Chart"></div>
   </article>
 
-  <article class="panel-card">
+  <article class="panel-card is-hidden" data-panel-id="greeks">
     <header class="panel-header">
       <h2 class="panel-title">Multi-DTE Greek Structure</h2>
       <label class="field-group">
@@ -311,5 +366,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/dashboard.js?v=20261111b" defer></script>
+<script src="/static/js/dashboard.js?v=20261111f" defer></script>
 {% endblock %}

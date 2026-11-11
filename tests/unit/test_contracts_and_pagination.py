@@ -13,6 +13,9 @@ from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import (
     ContractDiscoveryService,
     choose_auto_strike_step,
+    detect_available_range_pcts,
+    detect_available_strike_steps,
+    detect_native_strike_step,
     extract_spot,
     match_expirations,
     select_chain,
@@ -155,13 +158,21 @@ def test_client_locks_ib_and_connects_type3_default() -> None:
     _run(client.ensure_connected())
     assert client.is_connected
     assert client.current_type == 3
+    assert client.get_active_market_data_type() == 3
     assert fake_ib.market_data_types == [3]
 
     # Switching to fallback cascades 3 -> 4
     assert client.can_fallback()
     assert client.switch_to_fallback_data_type() == 4
     assert client.current_type == 4
+    assert client.get_active_market_data_type() == 4
     assert not client.can_fallback()
+
+    # If client.marketDataType is exposed as a valid int, get_active_market_data_type reads it
+    fake_ib.client.marketDataType = 2
+    assert client.get_active_market_data_type() == 2
+    delattr(fake_ib.client, "marketDataType")
+    assert client.get_active_market_data_type() == 4
 
     client.disconnect()
     assert not client.is_connected
@@ -216,7 +227,7 @@ def test_dte_strict_weekly_matching_and_iso_week_dedup() -> None:
     # 2026-11-11 is Wednesday.
     # Candidates inside (30, 60): 35 (Wed Dec 16), 37 (Fri Dec 18), 43 (Thu Dec 24),
     # 50 (Thu Dec 31), 56 (Wed Jan 6), 58 (Fri Jan 8).
-    # Boundaries 15, 30, 60, 90 must be excluded by strict dte_min < dte < dte_max.
+    # Boundaries 15, 30, 60, 90 must be excluded by dte_min <= dte < dte_max (30 is included).
     market_date = date(2026, 11, 11)
     dtes = [15, 30, 35, 37, 43, 50, 56, 58, 60, 90]
     expirations = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in dtes]
@@ -228,9 +239,9 @@ def test_dte_strict_weekly_matching_and_iso_week_dedup() -> None:
         dte_max=60,
     )
     # Within each ISO week, Friday overrides mid-week (37 beats 35, 58 beats 56).
-    assert [m.dte for m in matches] == [37, 43, 50, 58]
-    assert all(30 < m.dte < 60 for m in matches)
-    assert len({m.ib_expiry for m in matches}) == 4
+    assert [m.dte for m in matches] == [30, 37, 43, 50, 58]
+    assert all(30 <= m.dte < 60 for m in matches)  # 30 DTE retained
+    assert len({m.ib_expiry for m in matches}) == 5
 
 
 def test_select_strikes_moneyness_atm_anchor_and_auto_widening() -> None:
@@ -569,11 +580,11 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
     fake_ib = FakeIB()
     now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
     market_date = date(2026, 11, 11)
-    # Boundaries 30 and 60 plus mid-week 35 should drop, leaving 4 weekly expiries (37, 43, 50, 58)
+    # 30 DTE is retained, 60 and mid-week 35 drop: 5 weekly expiries (30, 37, 43, 50, 58)
     expirations = [
         (market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 37, 43, 50, 58, 60)
     ]
-    strikes = [float(s) for s in range(110, 175, 5)]  # 11 in +-20% -> 4 * 11 * 2 = 88 contracts
+    strikes = [float(s) for s in range(110, 175, 5)]  # 11 in +-20% -> 5 * 11 * 2 = 110 contracts
     fake_ib.chains_result = [
         SimpleNamespace(
             exchange="SMART",
@@ -605,9 +616,160 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
 
     result = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert result.snapshot_id == "NVDA_20261111_153000"
-    assert [m.dte for m in result.plan.expirations] == [37, 43, 50, 58]
-    assert result.pages_fetched == 2  # 88 contracts -> 80 + 8
-    assert len(result.rows) == 88
+    assert [m.dte for m in result.plan.expirations] == [30, 37, 43, 50, 58]
+    assert result.pages_fetched == 2  # 110 contracts -> 80 + 30
+    assert len(result.rows) == 110
     assert len(fake_ib.subscribed) == len(fake_ib.cancelled)
     assert all(r.greeks_source == "NONE" for r in result.rows)
     assert all(r.mark_price == pytest.approx(5.2) for r in result.rows)
+
+
+def test_per_expiration_intersection_prevents_phantom_strikes() -> None:
+    """Monthly/weekly SMART chains with distinct strike grids must not cross-pollinate."""
+    fake_ib = FakeIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    exp_weekly = (market_date + timedelta(days=37)).strftime("%Y%m%d")  # Friday weekly ($2.5)
+    exp_monthly = (market_date + timedelta(days=43)).strftime("%Y%m%d")  # Next week ($5 only)
+    weekly_strikes = [120.0 + 2.5 * i for i in range(17)]  # 120.0..160.0 in $2.5 steps
+    monthly_strikes = [float(s) for s in range(120, 165, 5)]  # $5 steps only (no 137.5, 142.5)
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp_weekly],
+            strikes=weekly_strikes,
+        ),
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp_monthly],
+            strikes=monthly_strikes,
+        ),
+    ]
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=_noop_sleep)
+
+    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=2.5))
+    spec_by_exp = {spec.match.ib_expiry: spec for spec in plan.expiration_specs}
+    assert set(spec_by_exp) == {exp_weekly, exp_monthly}
+    assert 137.5 in spec_by_exp[exp_weekly].strikes
+    assert 137.5 not in spec_by_exp[exp_monthly].strikes
+    assert 142.5 not in spec_by_exp[exp_monthly].strikes
+    assert spec_by_exp[exp_monthly].effective_step == pytest.approx(5.0)
+
+    fetcher = PagedOptionChainFetcher(client, sleep=_noop_sleep)
+    built = fetcher.build_candidate_contracts(plan)
+    monthly_built_strikes = {
+        float(c.strike) for c in built if c.lastTradeDateOrContractMonth == exp_monthly
+    }
+    assert 137.5 not in monthly_built_strikes
+    assert 142.5 not in monthly_built_strikes
+
+
+def test_non_standard_10_dollar_step_adapts_with_notice() -> None:
+    fake_ib = FakeIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    exps = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (37, 43)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[float(s) for s in range(100, 190, 10)],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=_noop_sleep)
+    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert plan.exchange_native_verified is True
+    assert plan.exchange_validated_strike_count > 0
+    assert plan.strikes.effective_step == pytest.approx(10.0)
+    assert 10.0 in plan.available_strike_steps
+    assert any("adapted" in n.lower() or "$10" in n for n in plan.notices)
+    assert any("exchange" in n.lower() or "validated" in n.lower() for n in plan.notices)
+
+
+def test_detect_available_strike_steps_and_range_pcts() -> None:
+    ten_dollar_chain = [110.0, 120.0, 130.0, 140.0, 150.0, 160.0, 170.0]
+    assert detect_native_strike_step(ten_dollar_chain) == pytest.approx(10.0)
+    avail_steps = detect_available_strike_steps(
+        ten_dollar_chain,
+        spot=140.0,
+        range_pct=0.20,
+        candidate_steps=[1.0, 2.5, 5.0, 10.0],
+    )
+    assert avail_steps == [10.0]
+
+    narrow_chain = [130.0, 140.0, 150.0]
+    avail_ranges = detect_available_range_pcts(
+        narrow_chain,
+        spot=140.0,
+        candidate_ranges=[0.05, 0.10, 0.20, 0.30],
+    )
+    assert avail_ranges == [0.10, 0.20, 0.30]
+
+
+def test_qualify_option_contracts_emits_notice_on_partial_reject() -> None:
+    fake_ib = FakeIB()
+    market_date = date(2026, 11, 11)
+    exps = [(market_date + timedelta(days=37)).strftime("%Y%m%d")]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[135.0, 140.0, 145.0],
+        )
+    ]
+
+    def _partial_qualify(*contracts: Any) -> list[Any]:
+        # Simulate underlying qualification succeeding cleanly, but rejecting 1 option contract.
+        if len(contracts) == 1 and getattr(contracts[0], "secType", "") == "STK":
+            contracts[0].conId = 4815
+            return [contracts[0]]
+        kept: list[Any] = []
+        for idx, c in enumerate(contracts):
+            if idx == 0:
+                c.conId = 0  # dropped by IBKR Error 200
+                continue
+            c.conId = 9000 + idx
+            kept.append(c)
+        return kept
+
+    fake_ib.qualify_handler = _partial_qualify
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=5.0,
+            ask=5.4,
+            last=5.2,
+            close=5.1,
+            volume=20,
+            callOpenInterest=100,
+            putOpenInterest=100,
+            modelGreeks=None,
+        )
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        clock=lambda: datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC),
+        sleep=_noop_sleep,
+    )
+    res = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    assert len(res.rows) == 5  # 6 candidates minus 1 rejected
+    assert any("filtered out 1 unqualified" in n.lower() for n in res.notices)

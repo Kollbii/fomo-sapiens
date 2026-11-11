@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
@@ -65,6 +66,16 @@ class UnderlyingInfo:
 
 
 @dataclass(frozen=True)
+class ExpirationSpec:
+    match: ExpirationMatch
+    trading_class: str
+    multiplier: str
+    strikes: tuple[float, ...]
+    effective_step: float
+    exchange_window_count: int
+
+
+@dataclass(frozen=True)
 class ChainPlan:
     underlying: UnderlyingInfo
     market_date: date
@@ -75,9 +86,16 @@ class ChainPlan:
     strikes: StrikeSelection
     range_pct: float
     notices: tuple[str, ...] = ()
+    expiration_specs: tuple[ExpirationSpec, ...] = ()
+    exchange_validated_strike_count: int = 0
+    available_strike_steps: tuple[float, ...] = ()
+    available_range_pcts: tuple[float, ...] = ()
+    exchange_native_verified: bool = True
 
     @property
     def total_contracts(self) -> int:
+        if self.expiration_specs:
+            return sum(len(spec.strikes) * 2 for spec in self.expiration_specs)
         return len(self.expirations) * len(self.strikes.strikes) * 2
 
 
@@ -102,7 +120,7 @@ def match_expirations(
     dte_min: int,
     dte_max: int,
 ) -> list[ExpirationMatch]:
-    """Select one weekly expiration for every ISO week strictly inside `(dte_min, dte_max)`.
+    """Select one weekly expiration per ISO week inside `[dte_min, dte_max)` (inclusive lower).
 
     When multiple expirations share an ISO calendar week (for instance Mon/Wed/Fri ETF
     listings), standard Friday expirations (`weekday == 4`) take precedence; otherwise the
@@ -118,7 +136,7 @@ def match_expirations(
         if ib_exp in seen_dates:
             continue
         dte = (parsed - market_date).days
-        if dte_min < dte < dte_max:
+        if dte_min <= dte < dte_max:
             seen_dates.add(ib_exp)
             iso = parsed.isocalendar()
             by_week.setdefault((iso.year, iso.week), []).append((ib_exp, parsed, dte))
@@ -214,6 +232,77 @@ def choose_auto_strike_step(
     return candidates[-1]
 
 
+def detect_native_strike_step(strikes: Iterable[float]) -> float:
+    """Return the modal positive strike increment from `strikes` (or min diff on ties)."""
+    ordered = sorted({float(s) for s in strikes if s > 0})
+    diffs = [round(b - a, 4) for a, b in zip(ordered, ordered[1:], strict=False) if b - a > 1e-6]
+    if not diffs:
+        return 5.0
+    counts = Counter(diffs)
+    return float(min(counts, key=lambda d: (-counts[d], d)))
+
+
+def detect_available_strike_steps(
+    available: Iterable[float],
+    spot: float,
+    range_pct: float,
+    candidate_steps: Sequence[float] | None = None,
+) -> list[float]:
+    """Identify candidate strike steps that match exchange strikes in `+-range_pct`."""
+    if spot <= 0 or not 0 < range_pct <= 1:
+        return list(candidate_steps or ())
+    lo, hi = spot * (1 - range_pct) - _EPS, spot * (1 + range_pct) + _EPS
+    window = sorted({float(s) for s in available if s > 0 and lo <= s <= hi})
+    if len(window) < 2:
+        return [detect_native_strike_step(available)]
+
+    diffs = [round(b - a, 4) for a, b in zip(window, window[1:], strict=False) if b - a > 1e-6]
+    min_gap = min(diffs) if diffs else 5.0
+    native_modal = detect_native_strike_step(window)
+    pool_steps = list(candidate_steps) if candidate_steps is not None else list(_CANONICAL_STEPS)
+    if all(abs(native_modal - s) > 1e-4 for s in pool_steps):
+        pool_steps.append(native_modal)
+
+    supported: list[float] = []
+    for cand in sorted({float(s) for s in pool_steps if s > 0}):
+        if cand + _EPS < min_gap:
+            continue
+        is_fractional = cand < 1.0 or not _is_grid_multiple(cand, 1.0)
+        if is_fractional and not any(
+            _is_grid_multiple(s, cand) and not _is_grid_multiple(s, cand * 2.0) for s in window
+        ):
+            continue
+        aligned = [s for s in window if _is_grid_multiple(s, cand)]
+        if len(aligned) >= 2:
+            aligned_diffs = [
+                round(b - a, 4) for a, b in zip(aligned, aligned[1:], strict=False) if b - a > 1e-6
+            ]
+            if aligned_diffs and min(aligned_diffs) <= cand * 1.5 + _EPS:
+                supported.append(cand)
+                continue
+        if abs(cand - native_modal) <= 1e-4:
+            supported.append(cand)
+
+    return supported or [native_modal]
+
+
+def detect_available_range_pcts(
+    available: Iterable[float],
+    spot: float,
+    candidate_ranges: Sequence[float],
+) -> list[float]:
+    """Return candidate moneyness ranges covering at least 2 exchange-valid strikes."""
+    if spot <= 0:
+        return list(candidate_ranges)
+    clean = sorted({float(s) for s in available if s > 0})
+    supported: list[float] = []
+    for rp in sorted({float(r) for r in candidate_ranges if 0 < r <= 1}):
+        lo, hi = spot * (1 - rp) - _EPS, spot * (1 + rp) + _EPS
+        if sum(1 for s in clean if lo <= s <= hi) >= 2:
+            supported.append(rp)
+    return supported or [max(candidate_ranges)]
+
+
 def select_strikes(
     available: Iterable[float],
     spot: float,
@@ -221,7 +310,7 @@ def select_strikes(
     strike_step: float,
     max_strikes: int | None = None,
 ) -> StrikeSelection:
-    """Moneyness window + grid-aligned ATM stride, widening along canonical steps if capped."""
+    """Intersect candidate strike grid with exchange-valid strikes and adapt to native steps."""
     if spot <= 0 or not 0 < range_pct <= 1 or strike_step <= 0:
         raise ValueError("spot, range_pct (0, 1] and strike_step must be positive")
     if max_strikes is not None and max_strikes < 1:
@@ -230,11 +319,16 @@ def select_strikes(
     window = sorted({float(s) for s in available if s > 0 and lo <= s <= hi})
     if not window:
         raise OptionChainFetchError(f"No strikes within ±{range_pct:.0%} of spot {spot:.2f}")
+    exchange_lookup = {round(s, 6): s for s in window}
 
     def _run_step(step_val: float) -> tuple[list[float], float]:
         pool = _pool_for_step(window, spot, step_val)
         anchor = min(pool, key=lambda s: (abs(s - spot), s))
-        return _stride(pool, anchor, step_val), anchor
+        candidates = _stride(pool, anchor, step_val)
+        intersected = [
+            exchange_lookup[round(s, 6)] for s in candidates if round(s, 6) in exchange_lookup
+        ]
+        return (intersected or candidates), anchor
 
     effective_step = float(strike_step)
     selected, atm = _run_step(effective_step)
@@ -244,18 +338,44 @@ def select_strikes(
             effective_step = cand_step
             if len(selected) <= max_strikes:
                 break
+
+    if len(selected) >= 2:
+        diffs = [
+            round(b - a, 4) for a, b in zip(selected, selected[1:], strict=False) if b - a > 1e-6
+        ]
+        if diffs and min(diffs) > effective_step + _EPS:
+            effective_step = detect_native_strike_step(selected)
+
     return StrikeSelection(tuple(selected), atm, float(strike_step), effective_step)
+
+
+def select_smart_chains(chains: Sequence[OptionChainLike], symbol: str) -> list[OptionChainLike]:
+    """Return all SMART option chains matching `symbol` (preferring multiplier 100)."""
+    smart = [c for c in chains if c.exchange == "SMART"]
+    if not smart:
+        raise OptionChainFetchError(f"No SMART option chain for {symbol}")
+    return [c for c in smart if c.multiplier == "100"] or smart
 
 
 def select_chain(chains: Sequence[OptionChainLike], symbol: str) -> OptionChainLike:
     """Primary SMART chain: multiplier 100 preferred, then largest expiration x strike grid."""
-    smart = [c for c in chains if c.exchange == "SMART"]
-    if not smart:
-        raise OptionChainFetchError(f"No SMART option chain for {symbol}")
-    preferred = [c for c in smart if c.multiplier == "100"] or smart
+    preferred = select_smart_chains(chains, symbol)
     return max(
         preferred,
         key=lambda c: (len(c.expirations) * len(c.strikes), c.tradingClass == symbol),
+    )
+
+
+def select_chain_for_expiration(
+    chains: Sequence[OptionChainLike], ib_expiry: str, symbol: str
+) -> OptionChainLike:
+    """Pick the SMART chain descriptor owning `ib_expiry` (`tradingClass` + exchange strikes)."""
+    preferred = select_smart_chains(chains, symbol)
+    matching = [c for c in preferred if any(exp[:8] == ib_expiry for exp in c.expirations)]
+    candidates = matching or preferred
+    return max(
+        candidates,
+        key=lambda c: (c.tradingClass == symbol, len(c.strikes), len(c.expirations)),
     )
 
 
@@ -328,11 +448,14 @@ class ContractDiscoveryService:
             )
         return spot
 
-    async def fetch_chain(self, contract: Any) -> OptionChainLike:
+    async def fetch_chains(self, contract: Any) -> list[OptionChainLike]:
         chains = await self.client.ib.reqSecDefOptParamsAsync(
             contract.symbol, "", contract.secType, contract.conId
         )
-        return select_chain(list(chains or []), contract.symbol)
+        return select_smart_chains(list(chains or []), contract.symbol)
+
+    async def fetch_chain(self, contract: Any) -> OptionChainLike:
+        return select_chain(await self.fetch_chains(contract), contract.symbol)
 
     async def build_plan(
         self,
@@ -345,46 +468,112 @@ class ContractDiscoveryService:
 
         contract = await self.qualify_underlying(ticker)
         spot = await self.resolve_spot(contract)
-        chain = await self.fetch_chain(contract)
+        smart_chains = await self.fetch_chains(contract)
+        primary_chain = select_chain(smart_chains, contract.symbol)
 
         market_date = market_date_for(self.clock())
+        raw_expirations = [exp for ch in smart_chains for exp in ch.expirations]
         expirations = match_expirations(
-            chain.expirations,
+            raw_expirations,
             market_date,
             oc.dte_min,
             oc.dte_max,
         )
         if not expirations:
             raise OptionChainFetchError(
-                f"No weekly expirations in ({oc.dte_min}, {oc.dte_max}) DTE for {contract.symbol}"
+                f"No weekly expirations in [{oc.dte_min}, {oc.dte_max}) DTE for {contract.symbol}"
             )
+
         max_strikes = self.max_total_contracts // (2 * len(expirations))
         notices: list[str] = []
+        all_exchange_strikes = sorted(
+            {float(s) for ch in smart_chains for s in ch.strikes if s > 0}
+        )
         if strike_step is None:
-            step = choose_auto_strike_step(chain.strikes, spot, rp, max_strikes=max_strikes)
+            step = choose_auto_strike_step(all_exchange_strikes, spot, rp, max_strikes=max_strikes)
             notices.append(
                 f"Auto strike step selected ${step:g} for {contract.symbol} spot ${spot:.2f}"
             )
         else:
             step = float(strike_step)
-        strikes = select_strikes(chain.strikes, spot, rp, step, max_strikes)
 
-        if strikes.widened:
+        lo, hi = spot * (1 - rp) - _EPS, spot * (1 + rp) + _EPS
+        specs: list[ExpirationSpec] = []
+        for exp in expirations:
+            exp_chain = select_chain_for_expiration(smart_chains, exp.ib_expiry, contract.symbol)
+            exp_sel = select_strikes(exp_chain.strikes, spot, rp, step, max_strikes)
+            exp_window_count = sum(
+                1 for s in {float(v) for v in exp_chain.strikes} if lo <= s <= hi
+            )
+            specs.append(
+                ExpirationSpec(
+                    match=exp,
+                    trading_class=exp_chain.tradingClass,
+                    multiplier=exp_chain.multiplier,
+                    strikes=exp_sel.strikes,
+                    effective_step=exp_sel.effective_step,
+                    exchange_window_count=exp_window_count,
+                )
+            )
+
+        union_strikes = tuple(sorted({s for spec in specs for s in spec.strikes}))
+        if not union_strikes:
+            raise OptionChainFetchError(
+                f"No exchange-valid strikes within ±{rp:.0%} of spot {spot:.2f}"
+            )
+        step_counts = Counter(spec.effective_step for spec in specs)
+        overall_step = float(min(step_counts, key=lambda st: (-step_counts[st], st)))
+        atm_strike = min(union_strikes, key=lambda s: (abs(s - spot), s))
+        strikes = StrikeSelection(
+            strikes=union_strikes,
+            atm_strike=atm_strike,
+            requested_step=step,
+            effective_step=overall_step,
+        )
+
+        if strikes.widened or any(abs(spec.effective_step - step) > _EPS for spec in specs):
+            adapted_vals = sorted({spec.effective_step for spec in specs})
+            adapted_str = ", ".join(f"${v:g}" for v in adapted_vals)
             notices.append(
-                f"Strike step widened from ${strikes.requested_step:g} to "
-                f"${strikes.effective_step:g} to respect the "
-                f"{self.max_total_contracts}-contract cap"
+                f"Adapted strike step from requested ${strikes.requested_step:g} to "
+                f"exchange-native {adapted_str} for {contract.symbol} "
+                f"(cap {self.max_total_contracts} contracts)"
             )
             logger.info(notices[-1])
+
+        avail_steps = tuple(
+            detect_available_strike_steps(
+                all_exchange_strikes,
+                spot,
+                rp,
+                candidate_steps=oc.allowed_strike_steps,
+            )
+        )
+        avail_ranges = tuple(
+            detect_available_range_pcts(
+                all_exchange_strikes,
+                spot,
+                oc.allowed_range_pcts,
+            )
+        )
+        notices.append(
+            f"Exchange-native verified {len(union_strikes)} strikes across "
+            f"{len(specs)} expiration(s) via reqSecDefOptParams."
+        )
 
         return ChainPlan(
             underlying=UnderlyingInfo(contract.symbol, int(contract.conId), contract, spot),
             market_date=market_date,
             exchange="SMART",
-            trading_class=chain.tradingClass,
-            multiplier=chain.multiplier,
+            trading_class=primary_chain.tradingClass,
+            multiplier=primary_chain.multiplier,
             expirations=tuple(expirations),
             strikes=strikes,
             range_pct=rp,
             notices=tuple(notices),
+            expiration_specs=tuple(specs),
+            exchange_validated_strike_count=len(union_strikes),
+            available_strike_steps=avail_steps,
+            available_range_pcts=avail_ranges,
+            exchange_native_verified=True,
         )

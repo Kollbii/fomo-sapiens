@@ -55,6 +55,12 @@ class GatewayStatusResponse(BaseModel):
     allowed_range_pcts: list[float]
     default_strike_step: float
     allowed_strike_steps: list[float]
+    available_strike_steps: list[float] = Field(default_factory=list)
+    available_range_pcts: list[float] = Field(default_factory=list)
+    active_capabilities_ticker: str | None = None
+
+
+SystemStatusResponse = GatewayStatusResponse
 
 
 class SnapshotsListResponse(BaseModel):
@@ -85,6 +91,10 @@ class ChainMetadataPayload(BaseModel):
     range_pct: float | None = None
     strike_step: float | None = None
     requested_strike_step: float | None = None
+    exchange_validated_strike_count: int | None = None
+    exchange_native_verified: bool = False
+    available_strike_steps: list[float] = Field(default_factory=list)
+    available_range_pcts: list[float] = Field(default_factory=list)
     greeks_source_counts: dict[str, int]
     source: Literal["CACHE", "LIVE_REFRESH"]
     notices: list[str] = Field(default_factory=list)
@@ -131,14 +141,29 @@ class AnalyzerWebService:
             watchlist=self.settings.watchlist.hardcoded_tickers,
             allow_custom=self.settings.watchlist.allow_custom_ticker,
         )
+        self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
 
-    def get_status(self) -> GatewayStatusResponse:
+    def get_status(self, ticker: str | None = None) -> GatewayStatusResponse:
         ibkr = self.settings.ibkr
         wl = self.settings.watchlist
         oc = self.settings.options_chain
+        active_md = (
+            self.broker_client.get_active_market_data_type()
+            if hasattr(self.broker_client, "get_active_market_data_type")
+            else int(self.broker_client.current_type)
+        )
+        cap_sym: str | None = None
+        if ticker is not None and ticker.strip():
+            try:
+                cap_sym = self.validate_ticker(ticker)
+            except InvalidTickerError:
+                cap_sym = None
+        caps = self._ticker_capabilities.get(cap_sym) if cap_sym else None
+        avail_steps = list(caps[0]) if caps else list(oc.allowed_strike_steps)
+        avail_ranges = list(caps[1]) if caps else list(oc.allowed_range_pcts)
         return GatewayStatusResponse(
             connected=self.broker_client.is_connected,
             host=ibkr.host,
@@ -146,7 +171,7 @@ class AnalyzerWebService:
             client_id=ibkr.client_id,
             market_data_mode=ibkr.market_data_mode,
             default_market_data_type=ibkr.default_market_data_type,
-            active_market_data_type=self.broker_client.current_type,
+            active_market_data_type=active_md,
             default_ticker=wl.default_ticker,
             watchlist=list(wl.hardcoded_tickers),
             allow_custom_ticker=wl.allow_custom_ticker,
@@ -154,6 +179,9 @@ class AnalyzerWebService:
             allowed_range_pcts=list(oc.allowed_range_pcts),
             default_strike_step=oc.default_strike_step,
             allowed_strike_steps=list(oc.allowed_strike_steps),
+            available_strike_steps=avail_steps,
+            available_range_pcts=avail_ranges,
+            active_capabilities_ticker=cap_sym if caps else None,
         )
 
     def list_snapshots(self, raw_ticker: str) -> SnapshotsListResponse:
@@ -184,6 +212,10 @@ class AnalyzerWebService:
         range_pct: float | None = None,
         strike_step: float | None = None,
         requested_strike_step: float | None = None,
+        exchange_validated_strike_count: int | None = None,
+        exchange_native_verified: bool | None = None,
+        available_strike_steps: list[float] | None = None,
+        available_range_pcts: list[float] | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
         first = enriched.row(0, named=True)
@@ -204,11 +236,33 @@ class AnalyzerWebService:
             requested_strike_step if requested_strike_step is not None else strike_step
         )
 
+        underlying_sym = str(first["underlying"])
+        caps = self._ticker_capabilities.get(underlying_sym)
+        oc = self.settings.options_chain
+        resolved_avail_steps = (
+            list(available_strike_steps)
+            if available_strike_steps is not None
+            else (list(caps[0]) if caps else list(oc.allowed_strike_steps))
+        )
+        resolved_avail_ranges = (
+            list(available_range_pcts)
+            if available_range_pcts is not None
+            else (list(caps[1]) if caps else list(oc.allowed_range_pcts))
+        )
+        resolved_validated_count = (
+            exchange_validated_strike_count
+            if exchange_validated_strike_count is not None
+            else (caps[2] if caps else None)
+        )
+        resolved_verified = (
+            exchange_native_verified if exchange_native_verified is not None else (caps is not None)
+        )
+
         meta = ChainMetadataPayload(
             snapshot_id=str(first["snapshot_id"]),
             snapshot_ts_utc=str(first["snapshot_ts_utc"]),
             market_date=str(first["market_date"]),
-            underlying=str(first["underlying"]),
+            underlying=underlying_sym,
             underlying_conid=int(first["underlying_conid"]),
             underlying_price=float(first["underlying_price"]),
             market_data_type=int(first["market_data_type"]),
@@ -218,6 +272,10 @@ class AnalyzerWebService:
             range_pct=resolved_range,
             strike_step=resolved_step,
             requested_strike_step=resolved_requested_step,
+            exchange_validated_strike_count=resolved_validated_count,
+            exchange_native_verified=resolved_verified,
+            available_strike_steps=resolved_avail_steps,
+            available_range_pcts=resolved_avail_ranges,
             greeks_source_counts=source_counts,
             source=source,
             notices=list(notices or []),
@@ -258,6 +316,12 @@ class AnalyzerWebService:
             range_pct=snap_meta.range_pct if snap_meta else None,
             strike_step=snap_meta.strike_step if snap_meta else None,
             requested_strike_step=snap_meta.requested_strike_step if snap_meta else None,
+            exchange_validated_strike_count=(
+                snap_meta.exchange_validated_strike_count if snap_meta else None
+            ),
+            exchange_native_verified=(snap_meta.exchange_native_verified if snap_meta else None),
+            available_strike_steps=(snap_meta.available_strike_steps if snap_meta else None),
+            available_range_pcts=(snap_meta.available_range_pcts if snap_meta else None),
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -301,10 +365,27 @@ class AnalyzerWebService:
             notices.append(
                 f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."
             )
+        plan = fetch_res.plan
+        avail_steps = (
+            list(plan.available_strike_steps)
+            if plan.available_strike_steps
+            else list(self.settings.options_chain.allowed_strike_steps)
+        )
+        avail_ranges = (
+            list(plan.available_range_pcts)
+            if plan.available_range_pcts
+            else list(self.settings.options_chain.allowed_range_pcts)
+        )
+        validated_count = (
+            int(plan.exchange_validated_strike_count)
+            if plan.exchange_validated_strike_count > 0
+            else len({float(r.strike) for r in fetch_res.rows})
+        )
+        self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
         self.repo.save_snapshot(
             symbol,
             enriched_df.to_dicts(),
-            range_pct=fetch_res.plan.range_pct,
+            range_pct=plan.range_pct,
             strike_step=actual_step,
             requested_strike_step=req_step,
         )
@@ -312,9 +393,13 @@ class AnalyzerWebService:
             enriched_df,
             source="LIVE_REFRESH",
             notices=notices,
-            range_pct=fetch_res.plan.range_pct,
+            range_pct=plan.range_pct,
             strike_step=actual_step,
             requested_strike_step=req_step,
+            exchange_validated_strike_count=validated_count,
+            exchange_native_verified=bool(plan.exchange_native_verified),
+            available_strike_steps=avail_steps,
+            available_range_pcts=avail_ranges,
         )
 
 
@@ -330,9 +415,10 @@ async def get_web_service(request: Request) -> AnalyzerWebService:
 # ------------------------------------------------------------------ routes
 @router.get("/status", response_model=GatewayStatusResponse)
 async def api_status(
+    ticker: str | None = None,
     svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
 ) -> GatewayStatusResponse:
-    return svc.get_status()
+    return svc.get_status(ticker=ticker)
 
 
 @router.get("/snapshots/{ticker}", response_model=SnapshotsListResponse)

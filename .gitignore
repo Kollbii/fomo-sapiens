@@ -218,3 +218,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local IBKR option chain snapshots, latest cache, metadata & runtime data
+data/
+

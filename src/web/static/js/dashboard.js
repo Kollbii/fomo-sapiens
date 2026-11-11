@@ -12,6 +12,23 @@
     "chart-greeks",
   ];
 
+  var PANEL_VISIBILITY_KEY = "ibkr_panel_visibility_v1";
+  var DEFAULT_PANEL_VISIBILITY = {
+    walls: true,
+    iv_smile: false,
+    anomalies: true,
+    greeks: false,
+  };
+
+  function cloneDefaultPanelVisibility() {
+    return {
+      walls: DEFAULT_PANEL_VISIBILITY.walls,
+      iv_smile: DEFAULT_PANEL_VISIBILITY.iv_smile,
+      anomalies: DEFAULT_PANEL_VISIBILITY.anomalies,
+      greeks: DEFAULT_PANEL_VISIBILITY.greeks,
+    };
+  }
+
   var bootstrapEl = document.getElementById("app-bootstrap");
   var bootstrap = bootstrapEl ? JSON.parse(bootstrapEl.textContent || "{}") : {};
 
@@ -23,6 +40,7 @@
     snapshots: [],
     status: null,
     loading: false,
+    panelVisibility: cloneDefaultPanelVisibility(),
   };
 
   var dom = {
@@ -39,6 +57,8 @@
     snapshotSelect: document.getElementById("snapshot-select"),
     refreshBtn: document.getElementById("refresh-btn"),
     exportCsvBtn: document.getElementById("export-csv-btn"),
+    panelVisibilityControls: document.getElementById("panel-visibility-controls"),
+    panelVisibilityReset: document.getElementById("panel-visibility-reset"),
     alertBanner: document.getElementById("alert-banner"),
     kpiSpot: document.getElementById("kpi-spot"),
     kpiCallWall: document.getElementById("kpi-call-wall"),
@@ -198,6 +218,115 @@
     return rangeTxt + " \u2022 " + stepTxt;
   }
 
+  function resetSelectCapabilities(selectEl) {
+    if (!selectEl) return;
+    var stale = selectEl.querySelectorAll(
+      'option[data-pulled-temp="true"], option[data-exchange-native="true"]'
+    );
+    for (var s = 0; s < stale.length; s++) {
+      stale[s].parentNode.removeChild(stale[s]);
+    }
+    for (var i = 0; i < selectEl.options.length; i++) {
+      var opt = selectEl.options[i];
+      if (!opt.dataset.baseLabel) {
+        opt.dataset.baseLabel = opt.textContent.trim();
+      }
+      opt.disabled = false;
+      opt.textContent = opt.dataset.baseLabel;
+    }
+  }
+
+  function applySelectCapabilityList(selectEl, availableVals, labelFn) {
+    if (!selectEl) return;
+    var prevVal = selectEl.value;
+    resetSelectCapabilities(selectEl);
+    if (!Array.isArray(availableVals) || !availableVals.length) {
+      if (prevVal && selectEl.querySelector('option[value="' + prevVal + '"]')) {
+        selectEl.value = prevVal;
+      }
+      return;
+    }
+
+    var supported = [];
+    for (var a = 0; a < availableVals.length; a++) {
+      var num = Number(availableVals[a]);
+      if (!Number.isNaN(num) && num > 0) {
+        supported.push(num);
+      }
+    }
+    if (!supported.length) return;
+
+    // Ensure every exchange-discovered value exists as a selectable option.
+    for (var k = 0; k < supported.length; k++) {
+      var val = supported[k];
+      var found = false;
+      for (var j = 0; j < selectEl.options.length; j++) {
+        var existing = selectEl.options[j];
+        if (existing.value === "auto") continue;
+        if (Math.abs(Number(existing.value) - val) < 1e-4) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        var nativeOpt = document.createElement("option");
+        nativeOpt.value = String(val);
+        var nativeLabel = labelFn(val);
+        nativeOpt.textContent = nativeLabel;
+        nativeOpt.dataset.baseLabel = nativeLabel;
+        nativeOpt.setAttribute("data-exchange-native", "true");
+        selectEl.appendChild(nativeOpt);
+      }
+    }
+
+    var firstEnabledVal = null;
+    var hasAuto = false;
+    for (var i = 0; i < selectEl.options.length; i++) {
+      var opt = selectEl.options[i];
+      if (opt.value === "auto") {
+        hasAuto = true;
+        continue;
+      }
+      var optNum = Number(opt.value);
+      var isSupported = false;
+      for (var m = 0; m < supported.length; m++) {
+        if (Math.abs(supported[m] - optNum) < 1e-4) {
+          isSupported = true;
+          break;
+        }
+      }
+      opt.disabled = !isSupported;
+      opt.textContent = isSupported
+        ? opt.dataset.baseLabel
+        : opt.dataset.baseLabel + " (N/A)";
+      if (isSupported && firstEnabledVal === null) {
+        firstEnabledVal = opt.value;
+      }
+    }
+
+    if (prevVal) {
+      selectEl.value = prevVal;
+    }
+    var activeOpt = selectEl.options[selectEl.selectedIndex];
+    if (!activeOpt || activeOpt.disabled) {
+      selectEl.value = hasAuto ? "auto" : firstEnabledVal || "";
+    }
+  }
+
+  function resetControlCapabilities() {
+    resetSelectCapabilities(dom.rangeSelect);
+    resetSelectCapabilities(dom.stepSelect);
+  }
+
+  function syncControlCapabilities(caps) {
+    if (!caps) {
+      resetControlCapabilities();
+      return;
+    }
+    applySelectCapabilityList(dom.rangeSelect, caps.available_range_pcts, formatRangeShort);
+    applySelectCapabilityList(dom.stepSelect, caps.available_strike_steps, formatStepShort);
+  }
+
   function syncSelectToNumeric(selectEl, targetVal, labelFn) {
     if (!selectEl) return;
     var stale = selectEl.querySelectorAll('option[data-pulled-temp="true"]');
@@ -212,6 +341,10 @@
       var opt = selectEl.options[i];
       if (opt.value === "auto") continue;
       if (Math.abs(Number(opt.value) - numTarget) < 1e-4) {
+        if (opt.disabled) {
+          opt.disabled = false;
+          opt.textContent = opt.dataset.baseLabel || opt.textContent;
+        }
         selectEl.value = opt.value;
         return;
       }
@@ -225,7 +358,11 @@
   }
 
   function syncControlsFromMeta(meta) {
-    if (!meta) return;
+    if (!meta) {
+      resetControlCapabilities();
+      return;
+    }
+    syncControlCapabilities(meta);
     syncSelectToNumeric(dom.rangeSelect, meta.range_pct, formatRangeShort);
     syncSelectToNumeric(dom.stepSelect, meta.strike_step, formatStepShort);
   }
@@ -273,11 +410,32 @@
     dom.exportCsvBtn.setAttribute("href", url);
   }
 
+  function marketDataBadgeInfo(mdType) {
+    var code = Number(mdType);
+    if (code === 1) {
+      return { label: "TYPE 1: LIVE OPRA", cls: "badge badge--live" };
+    }
+    if (code === 2) {
+      return { label: "TYPE 2: FROZEN", cls: "badge badge--amber" };
+    }
+    if (code === 4) {
+      return { label: "TYPE 4: DELAYED-FROZEN", cls: "badge badge--amber" };
+    }
+    if (code === 3) {
+      return { label: "TYPE 3: 15M DELAYED", cls: "badge badge--delayed" };
+    }
+    return { label: "TYPE " + (mdType || "3"), cls: "badge badge--info" };
+  }
+
   function marketDataLabel(mdType) {
-    if (mdType === 1) return "TYPE 1 LIVE";
-    if (mdType === 4) return "TYPE 4 DELAYED-FROZEN";
-    if (mdType === 2) return "TYPE 2 FROZEN";
-    return "TYPE 3 DELAYED";
+    return marketDataBadgeInfo(mdType).label;
+  }
+
+  function applyMdTypeBadge(mdType) {
+    if (!dom.mdTypeBadge) return;
+    var info = marketDataBadgeInfo(mdType);
+    dom.mdTypeBadge.className = info.cls;
+    dom.mdTypeBadge.textContent = info.label;
   }
 
   function updateThemeToggleLabel() {
@@ -298,19 +456,32 @@
         "</span>";
     }
     if (dom.mdTypeBadge && statusPayload) {
-      var md = statusPayload.active_market_data_type || statusPayload.default_market_data_type || 3;
-      dom.mdTypeBadge.textContent = marketDataLabel(md);
+      var md =
+        statusPayload.active_market_data_type !== null &&
+        statusPayload.active_market_data_type !== undefined
+          ? statusPayload.active_market_data_type
+          : statusPayload.default_market_data_type || 3;
+      applyMdTypeBadge(md);
+    }
+    if (statusPayload && !state.chainData) {
+      syncControlCapabilities(statusPayload);
     }
   }
 
   function renderChainBadges(meta) {
-    if (dom.mdTypeBadge && meta) {
-      dom.mdTypeBadge.textContent = marketDataLabel(meta.market_data_type);
+    if (
+      dom.mdTypeBadge &&
+      meta &&
+      (!state.status ||
+        state.status.active_market_data_type === null ||
+        state.status.active_market_data_type === undefined)
+    ) {
+      applyMdTypeBadge(meta.market_data_type);
     }
     if (dom.editorialBannerCopy) {
       if (!meta) {
         dom.editorialBannerCopy.textContent =
-          "Immutable CSV Archive \u2022 Delayed Type 3/4 Feed \u2022 Weekly Expirations (>30D & <60D)";
+          "Immutable CSV Archive \u2022 Delayed Type 3/4 Feed \u2022 Weekly Expirations (30\u201359 DTE)";
       } else {
         var dteSpanTxt =
           meta.dtes && meta.dtes.length
@@ -320,7 +491,11 @@
               "d (" +
               meta.dtes.length +
               " wk exp)"
-            : ">30D & <60D";
+            : "30\u201359 DTE";
+        var verifiedSuffix =
+          meta.exchange_native_verified && meta.exchange_validated_strike_count
+            ? " \u2022 " + meta.exchange_validated_strike_count + " IBKR strikes"
+            : "";
         dom.editorialBannerCopy.textContent =
           meta.underlying +
           " (" +
@@ -328,7 +503,8 @@
           ") \u2022 Pulled Scope: " +
           formatPullScopeSummary(meta) +
           " \u2022 Expirations: " +
-          dteSpanTxt;
+          dteSpanTxt +
+          verifiedSuffix;
       }
     }
     if (dom.greeksBadge) {
@@ -1559,16 +1735,143 @@
     window.Plotly.react(el, traces, layout, { responsive: true, displayModeBar: false });
   }
 
+  // ------------------------------------------------------------------ Panel Visibility
+  function readPanelVisibility() {
+    var next = cloneDefaultPanelVisibility();
+    try {
+      var raw = window.localStorage.getItem(PANEL_VISIBILITY_KEY);
+      if (!raw) return next;
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return next;
+      Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (panelId) {
+        if (typeof parsed[panelId] === "boolean") {
+          next[panelId] = parsed[panelId];
+        }
+      });
+    } catch (_err) {
+      return cloneDefaultPanelVisibility();
+    }
+    return next;
+  }
+
+  function writePanelVisibility(vis) {
+    try {
+      window.localStorage.setItem(PANEL_VISIBILITY_KEY, JSON.stringify(vis));
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  function clearPanelVisibilityOverrides() {
+    try {
+      window.localStorage.removeItem(PANEL_VISIBILITY_KEY);
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  function isPanelVisible(panelId) {
+    if (!state.panelVisibility || typeof state.panelVisibility[panelId] !== "boolean") {
+      return Boolean(DEFAULT_PANEL_VISIBILITY[panelId]);
+    }
+    return state.panelVisibility[panelId];
+  }
+
+  function syncPanelVisibilityUI(vis) {
+    var buttons = document.querySelectorAll(
+      "#panel-visibility-controls [data-panel-target]"
+    );
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      var target = btn.getAttribute("data-panel-target");
+      if (!target) continue;
+      var on = Boolean(vis[target]);
+      btn.setAttribute("aria-pressed", on ? "true" : "false");
+      btn.classList.toggle("active", on);
+    }
+    var cards = document.querySelectorAll(".chart-grid .panel-card[data-panel-id]");
+    for (var j = 0; j < cards.length; j++) {
+      var card = cards[j];
+      var pid = card.getAttribute("data-panel-id");
+      if (!pid) continue;
+      card.classList.toggle("is-hidden", !vis[pid]);
+    }
+  }
+
+  function renderPanelChartById(panelId, data, t) {
+    if (!data || !isPanelVisible(panelId)) return;
+    var theme = t || themeVars();
+    if (panelId === "walls") renderWallsChart(data, theme);
+    else if (panelId === "iv_smile") renderIvSmileChart(data, theme);
+    else if (panelId === "anomalies") renderAnomaliesChart(data, theme);
+    else if (panelId === "greeks") renderGreeksChart(data, theme);
+  }
+
+  function applyPanelVisibility(nextVis, options) {
+    var opts = options || {};
+    var normalized = cloneDefaultPanelVisibility();
+    Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (pid) {
+      normalized[pid] =
+        typeof nextVis[pid] === "boolean"
+          ? nextVis[pid]
+          : DEFAULT_PANEL_VISIBILITY[pid];
+    });
+
+    var revealed = [];
+    Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (pid) {
+      if (!normalized[pid]) return;
+      var card = document.querySelector(
+        '.chart-grid .panel-card[data-panel-id="' + pid + '"]'
+      );
+      var wasHidden = card
+        ? card.classList.contains("is-hidden")
+        : !isPanelVisible(pid);
+      if (wasHidden) {
+        revealed.push(pid);
+      }
+    });
+
+    state.panelVisibility = normalized;
+    syncPanelVisibilityUI(normalized);
+
+    if (opts.clearOverrides) {
+      clearPanelVisibilityOverrides();
+    } else if (opts.persist) {
+      writePanelVisibility(normalized);
+    }
+
+    if (revealed.length && !opts.skipRender) {
+      window.requestAnimationFrame(function () {
+        var t = themeVars();
+        for (var i = 0; i < revealed.length; i++) {
+          var pid = revealed[i];
+          if (!isPanelVisible(pid)) continue;
+          var card = document.querySelector(
+            '.chart-grid .panel-card[data-panel-id="' + pid + '"]'
+          );
+          if (card && card.classList.contains("is-hidden")) continue;
+          if (state.chainData) {
+            renderPanelChartById(pid, state.chainData, t);
+          }
+          var canvasEl = card ? card.querySelector(".chart-canvas") : null;
+          if (canvasEl && window.Plotly && window.Plotly.Plots && canvasEl.data) {
+            window.Plotly.Plots.resize(canvasEl);
+          }
+        }
+      });
+    }
+  }
+
   function renderAllCharts(data) {
     if (!data) {
       purgeCharts();
       return;
     }
     var t = themeVars();
-    renderWallsChart(data, t);
-    renderIvSmileChart(data, t);
-    renderAnomaliesChart(data, t);
-    renderGreeksChart(data, t);
+    if (isPanelVisible("walls")) renderWallsChart(data, t);
+    if (isPanelVisible("iv_smile")) renderIvSmileChart(data, t);
+    if (isPanelVisible("anomalies")) renderAnomaliesChart(data, t);
+    if (isPanelVisible("greeks")) renderGreeksChart(data, t);
   }
 
   // ------------------------------------------------------------------ Option Chain Table
@@ -1780,9 +2083,14 @@
     return { ok: resp.ok, status: resp.status, body: body };
   }
 
-  async function fetchStatus() {
+  async function fetchStatus(tickerOverride) {
+    var targetTicker = tickerOverride || state.ticker;
+    var url = "/api/status";
+    if (targetTicker) {
+      url += "?ticker=" + encodeURIComponent(targetTicker);
+    }
     try {
-      var res = await apiJson("/api/status");
+      var res = await apiJson(url);
       if (res.ok && res.body) {
         renderStatusBadges(res.body);
       }
@@ -1834,6 +2142,8 @@
 
     if (res.status === 404) {
       state.chainData = null;
+      resetControlCapabilities();
+      await fetchStatus(ticker);
       purgeCharts();
       renderChainBadges(null);
       renderKpis(null);
@@ -1892,7 +2202,14 @@
         var msg =
           res.body.meta.notices && res.body.meta.notices.length
             ? res.body.meta.notices.join(" ")
-            : "Archived new IBKR snapshot " + res.body.meta.snapshot_id + ".";
+            : res.body.meta.exchange_native_verified &&
+                res.body.meta.exchange_validated_strike_count
+              ? "Archived IBKR snapshot " +
+                res.body.meta.snapshot_id +
+                " (" +
+                res.body.meta.exchange_validated_strike_count +
+                " exchange-validated strikes)."
+              : "Archived new IBKR snapshot " + res.body.meta.snapshot_id + ".";
         showBanner("info", msg);
       } else if (res.status === 503) {
         await fetchStatus();
@@ -1901,6 +2218,7 @@
           "IBKR Gateway is offline or unreachable. Preserving cached snapshot view.";
         showBanner("warn", offlineMsg);
       } else {
+        await fetchStatus();
         var errMsg = (res.body && res.body.message) || "Refresh failed.";
         showBanner("error", errMsg);
       }
@@ -1976,9 +2294,30 @@
 
     if (dom.greeksMetricSelect) {
       dom.greeksMetricSelect.addEventListener("change", function () {
-        if (state.chainData) {
+        if (state.chainData && isPanelVisible("greeks")) {
           renderGreeksChart(state.chainData, themeVars());
         }
+      });
+    }
+
+    if (dom.panelVisibilityControls) {
+      dom.panelVisibilityControls.addEventListener("click", function (ev) {
+        var target =
+          ev.target && ev.target.closest ? ev.target.closest("[data-panel-target]") : null;
+        if (!target) return;
+        var panelId = target.getAttribute("data-panel-target");
+        if (!panelId || !Object.prototype.hasOwnProperty.call(DEFAULT_PANEL_VISIBILITY, panelId)) {
+          return;
+        }
+        var nextVis = Object.assign({}, state.panelVisibility);
+        nextVis[panelId] = !isPanelVisible(panelId);
+        applyPanelVisibility(nextVis, { persist: true });
+      });
+    }
+
+    if (dom.panelVisibilityReset) {
+      dom.panelVisibilityReset.addEventListener("click", function () {
+        applyPanelVisibility(cloneDefaultPanelVisibility(), { clearOverrides: true });
       });
     }
 
@@ -1990,7 +2329,7 @@
         writePref("ibkr_walls_show_anomalies", dom.wallsShowAnomalies.checked);
       }
       syncWallsSplitCheckboxState();
-      if (state.chainData) {
+      if (state.chainData && isPanelVisible("walls")) {
         renderWallsChart(state.chainData, themeVars());
       }
     }
@@ -2034,15 +2373,71 @@
     return s || "n/a";
   }
 
-  function computeScopedWallsForPrompt(activeExpiries, spot) {
+  function promptGreekVal(val, digits) {
+    if (val === null || val === undefined || isNaN(Number(val))) return "n/a";
+    return Number(val).toFixed(digits);
+  }
+
+  function promptGammaVal(val) {
+    if (val === null || val === undefined || isNaN(Number(val))) return "n/a";
+    var num = Number(val);
+    var abs = Math.abs(num);
+    var digits = abs > 0 && abs < 0.005 ? 4 : 3;
+    return num.toFixed(digits);
+  }
+
+  function promptThetaVal(val) {
+    if (val === null || val === undefined || isNaN(Number(val))) return "n/a";
+    var num = Number(val);
+    var abs = Math.abs(num);
+    var digits = abs > 0 && abs < 0.02 ? 3 : 2;
+    return num.toFixed(digits);
+  }
+
+  function firstValidNum(primary, fallback) {
+    if (primary !== null && primary !== undefined && !isNaN(Number(primary))) {
+      return Number(primary);
+    }
+    if (fallback !== null && fallback !== undefined && !isNaN(Number(fallback))) {
+      return Number(fallback);
+    }
+    return null;
+  }
+
+  function formatPromptGreeksInline(ivVal, deltaVal, gammaVal, thetaVal) {
+    var ivStr =
+      ivVal !== null && ivVal !== undefined && !isNaN(Number(ivVal))
+        ? promptNum(Number(ivVal) * 100, 1) + "%"
+        : "n/a";
+    return (
+      "IV " +
+      ivStr +
+      ", Δ " +
+      promptGreekVal(deltaVal, 2) +
+      ", Γ " +
+      promptGammaVal(gammaVal) +
+      ", Θ " +
+      promptThetaVal(thetaVal)
+    );
+  }
+
+  function computeScopedWallsForPrompt(activeExpiries, spot, contractByKey) {
     var byStrike = {};
+    var cMap = contractByKey || {};
     var totalCallOi = 0;
     var totalPutOi = 0;
     var totalCallVol = 0;
     var totalPutVol = 0;
 
+    function addMetric(row, prefix, metric, val) {
+      if (val === null || val === undefined || isNaN(Number(val))) return;
+      row[prefix + "_" + metric + "_sum"] += Number(val);
+      row[prefix + "_" + metric + "_cnt"] += 1;
+    }
+
     for (var i = 0; i < activeExpiries.length; i++) {
       var expObj = activeExpiries[i];
+      var expKey = String(expObj.expiry || "");
       var strikes = expObj && expObj.strikes ? expObj.strikes : [];
       for (var j = 0; j < strikes.length; j++) {
         var pt = strikes[j];
@@ -2060,6 +2455,18 @@
             call_iv_cnt: 0,
             put_iv_sum: 0,
             put_iv_cnt: 0,
+            call_delta_sum: 0,
+            call_delta_cnt: 0,
+            put_delta_sum: 0,
+            put_delta_cnt: 0,
+            call_gamma_sum: 0,
+            call_gamma_cnt: 0,
+            put_gamma_sum: 0,
+            put_gamma_cnt: 0,
+            call_theta_sum: 0,
+            call_theta_cnt: 0,
+            put_theta_sum: 0,
+            put_theta_cnt: 0,
           };
         }
         var row = byStrike[key];
@@ -2075,26 +2482,43 @@
         totalPutOi += poi;
         totalCallVol += cvol;
         totalPutVol += pvol;
-        if (pt.call_iv !== null && pt.call_iv !== undefined && !isNaN(Number(pt.call_iv))) {
-          row.call_iv_sum += Number(pt.call_iv);
-          row.call_iv_cnt += 1;
-        }
-        if (pt.put_iv !== null && pt.put_iv !== undefined && !isNaN(Number(pt.put_iv))) {
-          row.put_iv_sum += Number(pt.put_iv);
-          row.put_iv_cnt += 1;
-        }
+
+        var cRow = cMap[expKey + "|" + k + "|C"] || null;
+        var pRow = cMap[expKey + "|" + k + "|P"] || null;
+        addMetric(row, "call", "iv", firstValidNum(pt.call_iv, cRow ? cRow.iv : null));
+        addMetric(row, "put", "iv", firstValidNum(pt.put_iv, pRow ? pRow.iv : null));
+        addMetric(row, "call", "delta", firstValidNum(pt.call_delta, cRow ? cRow.delta : null));
+        addMetric(row, "put", "delta", firstValidNum(pt.put_delta, pRow ? pRow.delta : null));
+        addMetric(row, "call", "gamma", firstValidNum(pt.call_gamma, cRow ? cRow.gamma : null));
+        addMetric(row, "put", "gamma", firstValidNum(pt.put_gamma, pRow ? pRow.gamma : null));
+        addMetric(row, "call", "theta", firstValidNum(pt.call_theta, cRow ? cRow.theta : null));
+        addMetric(row, "put", "theta", firstValidNum(pt.put_theta, pRow ? pRow.theta : null));
       }
+    }
+
+    function avgMetric(row, prefix, metric) {
+      var cnt = row[prefix + "_" + metric + "_cnt"];
+      return cnt > 0 ? row[prefix + "_" + metric + "_sum"] / cnt : null;
     }
 
     var ladder = Object.keys(byStrike)
       .map(function (k) {
-        return byStrike[k];
+        var r = byStrike[k];
+        r.call_iv = avgMetric(r, "call", "iv");
+        r.put_iv = avgMetric(r, "put", "iv");
+        r.call_delta = avgMetric(r, "call", "delta");
+        r.put_delta = avgMetric(r, "put", "delta");
+        r.call_gamma = avgMetric(r, "call", "gamma");
+        r.put_gamma = avgMetric(r, "put", "gamma");
+        r.call_theta = avgMetric(r, "call", "theta");
+        r.put_theta = avgMetric(r, "put", "theta");
+        return r;
       })
       .sort(function (a, b) {
         return a.strike - b.strike;
       });
 
-    function topN(field, n) {
+    function topN(field, n, side) {
       return ladder
         .filter(function (r) {
           return Number(r[field] || 0) > 0;
@@ -2111,6 +2535,10 @@
             strike: r.strike,
             value: r[field],
             dist_pct: distPct,
+            iv: r[side + "_iv"],
+            delta: r[side + "_delta"],
+            gamma: r[side + "_gamma"],
+            theta: r[side + "_theta"],
           };
         });
     }
@@ -2121,10 +2549,10 @@
       totalPutOi: totalPutOi,
       totalCallVol: totalCallVol,
       totalPutVol: totalPutVol,
-      topCallOi: topN("call_oi", 3),
-      topPutOi: topN("put_oi", 3),
-      topCallVol: topN("call_volume", 3),
-      topPutVol: topN("put_volume", 3),
+      topCallOi: topN("call_oi", 3, "call"),
+      topPutOi: topN("put_oi", 3, "put"),
+      topCallVol: topN("call_volume", 3, "call"),
+      topPutVol: topN("put_volume", 3, "put"),
     };
   }
 
@@ -2134,19 +2562,37 @@
     var walls = data.walls || {};
     var spot = Number(meta.underlying_price || 0);
     var allExpiries = Array.isArray(data.profiles.expiries) ? data.profiles.expiries : [];
-    var selectedExpiry = dom.wallsDteSelect ? dom.wallsDteSelect.value : "ALL";
-    var isSingleDte = selectedExpiry && selectedExpiry !== "ALL";
-    var activeExpiries = isSingleDte
-      ? allExpiries.filter(function (ex) {
-          return String(ex.expiry) === String(selectedExpiry);
-        })
-      : allExpiries;
-    if (!activeExpiries.length) {
-      activeExpiries = allExpiries;
-      isSingleDte = false;
+    // Multi-expiration mode: the prompt always covers every weekly expiry in the loaded
+    // chain (independent of the #walls-dte-select chart scope).
+    var isSingleDte = false;
+    var activeExpiries = allExpiries;
+    if (!activeExpiries.length) return "";
+
+    var activeExpirySet = {};
+    for (var ae = 0; ae < activeExpiries.length; ae++) {
+      activeExpirySet[String(activeExpiries[ae].expiry)] = true;
     }
 
-    var scoped = computeScopedWallsForPrompt(activeExpiries, spot);
+    var contracts = Array.isArray(data.contracts) ? data.contracts : [];
+    var contractByConid = {};
+    var contractByKey = {};
+    var scopedSourceCounts = {};
+    for (var ci = 0; ci < contracts.length; ci++) {
+      var cItem = contracts[ci];
+      if (!cItem) continue;
+      if (cItem.option_conid !== null && cItem.option_conid !== undefined) {
+        contractByConid[String(cItem.option_conid)] = cItem;
+      }
+      var cExp = String(cItem.expiry || "");
+      var cKey = cExp + "|" + Number(cItem.strike) + "|" + String(cItem.right || "");
+      contractByKey[cKey] = cItem;
+      if (activeExpirySet[cExp] && cItem.greeks_source) {
+        scopedSourceCounts[cItem.greeks_source] =
+          (scopedSourceCounts[cItem.greeks_source] || 0) + 1;
+      }
+    }
+
+    var scoped = computeScopedWallsForPrompt(activeExpiries, spot, contractByKey);
     var hasOi = scoped.totalCallOi + scoped.totalPutOi > 0;
     var selectedMetric = dom.wallsMetricSelect ? dom.wallsMetricSelect.value : "auto";
     var effectiveBasis =
@@ -2192,13 +2638,19 @@
       }
     }
     var avgAtmIvLabel = ivCnt > 0 ? promptNum((ivSum / ivCnt) * 100, 1) + "%" : "n/a";
-    var greeksCounts = meta.greeks_source_counts || {};
-    var greeksLabel = Object.keys(greeksCounts).length
-      ? Object.keys(greeksCounts)
+    var greeksCounts = Object.keys(scopedSourceCounts).length
+      ? scopedSourceCounts
+      : meta.greeks_source_counts || {};
+    var greeksSourceNames = Object.keys(greeksCounts);
+    var greeksLabel = greeksSourceNames.length
+      ? greeksSourceNames
           .map(function (k) {
             return k + ":" + greeksCounts[k];
           })
           .join(", ")
+      : "n/a";
+    var greeksSourceSummary = greeksSourceNames.length
+      ? greeksSourceNames.join(" / ")
       : "n/a";
 
     var mdNames = {
@@ -2215,12 +2667,27 @@
         " DTE (" +
         promptExpiryIso(activeExpiries[0].expiry) +
         ")"
-      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (>30D i <60D): " +
+      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (30\u201359 DTE): " +
         activeExpiries
           .map(function (ex) {
             return ex.dte + "d (" + promptExpiryIso(ex.expiry) + ")";
           })
           .join(", ");
+
+    var atmStats = {
+      cDeltaSum: 0,
+      cDeltaCnt: 0,
+      pDeltaSum: 0,
+      pDeltaCnt: 0,
+      cGammaSum: 0,
+      cGammaCnt: 0,
+      pGammaSum: 0,
+      pGammaCnt: 0,
+      cThetaSum: 0,
+      cThetaCnt: 0,
+      pThetaSum: 0,
+      pThetaCnt: 0,
+    };
 
     var byDteList = Array.isArray(walls.by_dte) ? walls.by_dte : [];
     var dteSummaryLines = activeExpiries.map(function (ex) {
@@ -2249,6 +2716,60 @@
           : "n/a";
       var atmIv =
         ex.atm_iv !== null && ex.atm_iv !== undefined ? promptNum(Number(ex.atm_iv) * 100, 1) + "%" : "n/a";
+
+      var targetAtm =
+        ex.atm_strike !== null && ex.atm_strike !== undefined && !isNaN(Number(ex.atm_strike))
+          ? Number(ex.atm_strike)
+          : spot;
+      var exStrikes = Array.isArray(ex.strikes) ? ex.strikes : [];
+      var atmPt = null;
+      var bestAtmDist = Infinity;
+      for (var si = 0; si < exStrikes.length; si++) {
+        var stCand = exStrikes[si];
+        var d = Math.abs(Number(stCand.strike) - targetAtm);
+        if (d < bestAtmDist) {
+          bestAtmDist = d;
+          atmPt = stCand;
+        }
+      }
+      var atmCallRow = atmPt
+        ? contractByKey[String(ex.expiry) + "|" + Number(atmPt.strike) + "|C"] || null
+        : null;
+      var atmPutRow = atmPt
+        ? contractByKey[String(ex.expiry) + "|" + Number(atmPt.strike) + "|P"] || null
+        : null;
+      var acDelta = atmPt ? firstValidNum(atmPt.call_delta, atmCallRow ? atmCallRow.delta : null) : null;
+      var apDelta = atmPt ? firstValidNum(atmPt.put_delta, atmPutRow ? atmPutRow.delta : null) : null;
+      var acGamma = atmPt ? firstValidNum(atmPt.call_gamma, atmCallRow ? atmCallRow.gamma : null) : null;
+      var apGamma = atmPt ? firstValidNum(atmPt.put_gamma, atmPutRow ? atmPutRow.gamma : null) : null;
+      var acTheta = atmPt ? firstValidNum(atmPt.call_theta, atmCallRow ? atmCallRow.theta : null) : null;
+      var apTheta = atmPt ? firstValidNum(atmPt.put_theta, atmPutRow ? atmPutRow.theta : null) : null;
+
+      if (acDelta !== null) {
+        atmStats.cDeltaSum += acDelta;
+        atmStats.cDeltaCnt += 1;
+      }
+      if (apDelta !== null) {
+        atmStats.pDeltaSum += apDelta;
+        atmStats.pDeltaCnt += 1;
+      }
+      if (acGamma !== null) {
+        atmStats.cGammaSum += acGamma;
+        atmStats.cGammaCnt += 1;
+      }
+      if (apGamma !== null) {
+        atmStats.pGammaSum += apGamma;
+        atmStats.pGammaCnt += 1;
+      }
+      if (acTheta !== null) {
+        atmStats.cThetaSum += acTheta;
+        atmStats.cThetaCnt += 1;
+      }
+      if (apTheta !== null) {
+        atmStats.pThetaSum += apTheta;
+        atmStats.pThetaCnt += 1;
+      }
+
       return (
         "- " +
         ex.dte +
@@ -2261,9 +2782,43 @@
         " | Call Wall: " +
         cw +
         " | Put Wall: " +
-        pw
+        pw +
+        " | ATM Greki C[Δ " +
+        promptGreekVal(acDelta, 2) +
+        ", Γ " +
+        promptGammaVal(acGamma) +
+        ", Θ " +
+        promptThetaVal(acTheta) +
+        "] P[Δ " +
+        promptGreekVal(apDelta, 2) +
+        ", Γ " +
+        promptGammaVal(apGamma) +
+        ", Θ " +
+        promptThetaVal(apTheta) +
+        "]"
       );
     });
+
+    var avgAtmCallDelta = atmStats.cDeltaCnt ? atmStats.cDeltaSum / atmStats.cDeltaCnt : null;
+    var avgAtmPutDelta = atmStats.pDeltaCnt ? atmStats.pDeltaSum / atmStats.pDeltaCnt : null;
+    var avgAtmCallGamma = atmStats.cGammaCnt ? atmStats.cGammaSum / atmStats.cGammaCnt : null;
+    var avgAtmPutGamma = atmStats.pGammaCnt ? atmStats.pGammaSum / atmStats.pGammaCnt : null;
+    var avgAtmCallTheta = atmStats.cThetaCnt ? atmStats.cThetaSum / atmStats.cThetaCnt : null;
+    var avgAtmPutTheta = atmStats.pThetaCnt ? atmStats.pThetaSum / atmStats.pThetaCnt : null;
+    var atmGreeksSummary =
+      "Call [Δ " +
+      promptGreekVal(avgAtmCallDelta, 2) +
+      ", Γ " +
+      promptGammaVal(avgAtmCallGamma) +
+      ", Θ " +
+      promptThetaVal(avgAtmCallTheta) +
+      "] | Put [Δ " +
+      promptGreekVal(avgAtmPutDelta, 2) +
+      ", Γ " +
+      promptGammaVal(avgAtmPutGamma) +
+      ", Θ " +
+      promptThetaVal(avgAtmPutTheta) +
+      "]";
 
     function fmtTopList(items) {
       if (!items.length) return "brak niezerowych pozycji (0)";
@@ -2280,6 +2835,8 @@
             promptNum(item.dist_pct, 1) +
             "% od Spot, kontr.: " +
             promptInt(item.value) +
+            ", " +
+            formatPromptGreeksInline(item.iv, item.delta, item.gamma, item.theta) +
             ")"
           );
         })
@@ -2293,13 +2850,7 @@
 
     var allAnomalies =
       data.anomalies && Array.isArray(data.anomalies.anomalies) ? data.anomalies.anomalies : [];
-    var scopedAnomalies = isSingleDte
-      ? allAnomalies.filter(function (a) {
-          return String(a.expiry) === String(activeExpiries[0].expiry);
-        })
-      : allAnomalies;
-
-    var anomalyLines = scopedAnomalies.slice(0, 12).map(function (a) {
+    var formatAnomalyLine = function (a) {
       var volOi =
         a.vol_oi_ratio !== null && a.vol_oi_ratio !== undefined
           ? promptNum(a.vol_oi_ratio, 2) + "x"
@@ -2308,6 +2859,22 @@
         a.volume_zscore !== null && a.volume_zscore !== undefined
           ? "z=" + promptNum(a.volume_zscore, 2)
           : "z=n/a";
+      var matchedContract =
+        (a.option_conid !== null && a.option_conid !== undefined
+          ? contractByConid[String(a.option_conid)]
+          : null) ||
+        contractByKey[
+          String(a.expiry || "") + "|" + Number(a.strike) + "|" + String(a.right || "")
+        ] ||
+        null;
+      var aIv = firstValidNum(a.iv, matchedContract ? matchedContract.iv : null);
+      var aDelta = firstValidNum(a.delta, matchedContract ? matchedContract.delta : null);
+      var aGamma = firstValidNum(a.gamma, matchedContract ? matchedContract.gamma : null);
+      var aTheta = firstValidNum(a.theta, matchedContract ? matchedContract.theta : null);
+      var aSrc =
+        a.greeks_source ||
+        (matchedContract && matchedContract.greeks_source) ||
+        greeksSourceSummary;
       return (
         "- " +
         a.dte +
@@ -2325,18 +2892,36 @@
         volOi +
         ", " +
         zsc +
-        ") | Flagi: " +
+        ") | " +
+        formatPromptGreeksInline(aIv, aDelta, aGamma, aTheta) +
+        " [" +
+        aSrc +
+        "] | Flagi: " +
         (a.reasons && a.reasons.length ? a.reasons.join(", ") : "VOLUME")
       );
-    });
+    };
 
-    var ladderLines = ["Strike | OdSpot% | Call_OI | Put_OI | Net_OI(C-P) | Call_Vol | Put_Vol | Call_IV% | Put_IV%"];
-    for (var m = 0; m < scoped.ladder.length; m++) {
-      var st = scoped.ladder[m];
+    function formatLadderLines(sc) {
+      var out = [
+        "Strike | OdSpot% | Call_OI | Put_OI | Net_OI(C-P) | Call_Vol | Put_Vol | Call_IV% | Put_IV% | C_Δ | P_Δ | C_Γ | P_Γ | C_Θ | P_Θ",
+      ];
+      for (var m = 0; m < sc.ladder.length; m++) {
+        out.push(formatLadderRow(sc.ladder[m]));
+      }
+      return out;
+    }
+
+    function formatLadderRow(st) {
       var dist = spot > 0 ? ((st.strike - spot) / spot) * 100 : 0;
-      var cIv = st.call_iv_cnt > 0 ? promptNum((st.call_iv_sum / st.call_iv_cnt) * 100, 1) + "%" : "-";
-      var pIv = st.put_iv_cnt > 0 ? promptNum((st.put_iv_sum / st.put_iv_cnt) * 100, 1) + "%" : "-";
-      ladderLines.push(
+      var cIv =
+        st.call_iv !== null && st.call_iv !== undefined
+          ? promptNum(st.call_iv * 100, 1) + "%"
+          : "n/a";
+      var pIv =
+        st.put_iv !== null && st.put_iv !== undefined
+          ? promptNum(st.put_iv * 100, 1) + "%"
+          : "n/a";
+      return (
         "$" +
           promptNum(st.strike, 2) +
           " | " +
@@ -2355,70 +2940,147 @@
           " | " +
           cIv +
           " | " +
-          pIv
+          pIv +
+          " | " +
+          promptGreekVal(st.call_delta, 2) +
+          " | " +
+          promptGreekVal(st.put_delta, 2) +
+          " | " +
+          promptGammaVal(st.call_gamma) +
+          " | " +
+          promptGammaVal(st.put_gamma) +
+          " | " +
+          promptThetaVal(st.call_theta) +
+          " | " +
+          promptThetaVal(st.put_theta)
       );
     }
 
     var todayIso = meta.market_date || "n/a";
+    var undName = meta.underlying || "n/a";
+
+    // Per-expiry detail blocks (Section 3).
+    var expiryBlocks = [];
+    var totalAnomalyCount = 0;
+    for (var ei = 0; ei < activeExpiries.length; ei++) {
+      var exp = activeExpiries[ei];
+      var expSc = computeScopedWallsForPrompt([exp], spot, contractByKey);
+      var expAnoms = allAnomalies.filter(function (a) {
+        return String(a.expiry) === String(exp.expiry);
+      });
+      totalAnomalyCount += expAnoms.length;
+      var expAtmIv =
+        exp.atm_iv !== null && exp.atm_iv !== undefined && !isNaN(Number(exp.atm_iv))
+          ? promptNum(Number(exp.atm_iv) * 100, 1) + "%"
+          : "n/a";
+      var expPcOi =
+        expSc.totalCallOi > 0 ? promptNum(expSc.totalPutOi / expSc.totalCallOi, 2) : "n/a";
+      var expPcVol =
+        expSc.totalCallVol > 0 ? promptNum(expSc.totalPutVol / expSc.totalCallVol, 2) : "n/a";
+      var expCallShare =
+        expSc.totalCallOi + expSc.totalPutOi > 0
+          ? promptNum((expSc.totalCallOi / (expSc.totalCallOi + expSc.totalPutOi)) * 100, 0) + "%"
+          : "n/a";
+      var block = [
+        "--- EXPIRY " +
+          (ei + 1) +
+          "/" +
+          activeExpiries.length +
+          ": " +
+          exp.dte +
+          " DTE (" +
+          promptExpiryIso(exp.expiry) +
+          ") | ATM IV " +
+          expAtmIv +
+          " | ATM Strike $" +
+          promptNum(exp.atm_strike, 2) +
+          " ---",
+        "- Call OI: " +
+          promptInt(expSc.totalCallOi) +
+          " | Put OI: " +
+          promptInt(expSc.totalPutOi) +
+          " | P/C (OI): " +
+          expPcOi +
+          " | udział Call w OI: " +
+          expCallShare,
+        "- Call Vol: " +
+          promptInt(expSc.totalCallVol) +
+          " | Put Vol: " +
+          promptInt(expSc.totalPutVol) +
+          " | P/C (Vol): " +
+          expPcVol,
+        "- Top 3 Call Walls (OI): " + fmtTopList(expSc.topCallOi),
+        "- Top 3 Put Walls (OI): " + fmtTopList(expSc.topPutOi),
+        "- Top 3 Call Walls (Vol): " + fmtTopList(expSc.topCallVol),
+        "- Top 3 Put Walls (Vol): " + fmtTopList(expSc.topPutVol),
+        "- Anomalie (Vol > OI / Z-Score), " + exp.dte + "d:",
+        expAnoms.length
+          ? expAnoms.slice(0, 6).map(formatAnomalyLine).join("\n")
+          : "  brak wykrytych anomalii dla tego wygaśnięcia.",
+        "- Drabina strike'ów (Greki: " + greeksSourceSummary + "):",
+        formatLadderLines(expSc).join("\n"),
+      ];
+      expiryBlocks.push(block.join("\n"));
+    }
+
     var lines = [
-      "ROLA: Jesteś praktycznym analitykiem rynku opcji.",
+      "ROLA: Jesteś praktycznym analitykiem rynku opcji (struktura terminowa, wielu wygaśnięć naraz).",
       "ZADANIE WEWNĘTRZNE (zrób przed napisaniem odpowiedzi):",
-      "1) Przeanalizuj głęboko poniższe dane opcyjne (ściany Put/Call z OI vs Volume, dystans od Spot, IV, anomalie Vol > OI i Z-Score, horyzont DTE).",
-      "2) Uwzględnij kontekst dnia dzisiejszego (" + todayIso + ", UTC: " + (meta.snapshot_ts_utc || "n/a") + ") i aktualnego otoczenia rynkowego/makro/sektorowego dla " + (meta.underlying || "n/a") + " (jeśli nie masz dostępu do bieżących wiadomości lub daty wyników, zaznacz to w 1 zdaniu zamiast zgadywać).",
+      "1) Przeanalizuj głęboko WSZYSTKIE poniższe wygaśnięcia razem: porównaj ATM IV między datami (kształt struktury terminowej: contango / backwardation), migrację ścian Put/Call między datami (czy ściany rosną, przesuwają się wyżej/niżej, czy się kumulują), rozkład Gamma i Theta w czasie, układ P/C OI i Volume oraz anomalie Vol > OI i Z-Score.",
+      "2) Uwzględnij kontekst dnia dzisiejszego (" + todayIso + ", UTC: " + (meta.snapshot_ts_utc || "n/a") + ") i aktualnego otoczenia rynkowego/makro/sektorowego dla " + undName + " (jeśli nie masz dostępu do bieżących wiadomości lub daty wyników, zaznacz to w 1 zdaniu zamiast zgadywać).",
+      "3) Szukaj zależności między wygaśnięciami: czy ta sama ściana powtarza się w kilku datach (silny poziom), czy anomalie koncentrują się w jednej dacie, gdzie Theta jest najdroższa, a gdzie Gamma najbardziej wrażliwa.",
       "",
       "ŚCISŁE ZASADY ODPOWIEDZI:",
-      "- JĘZYK: wyłącznie PROSTY, CODZIENNY POLSKI (zero ciężkiego żargonu; każde pojęcie typu Call Wall/Put Wall/IV wyjaśnij od razu w 3-5 prostych słowach).",
-      "- FORMAT: BEZ ŚCIANY TEKSTU. Tylko krótkie wypunktowania dokładnie według szablonu poniżej.",
-      "- LIMIT DŁUGOŚCI: MAKSYMALNIE 250-350 słów. Krótko, konkretnie, zero ogólników.",
+      "- JĘZYK: wyłącznie PROSTY, CODZIENNY POLSKI (zero ciężkiego żargonu; każde pojęcie typu Call Wall/Put Wall/IV/Delta/Gamma/Theta/struktura terminowa wyjaśnij od razu w prostych, ludzkich słowach).",
+      "- FORMAT: BEZ ŚCIANY TEKSTU. Tylko krótkie wypunktowania dokładnie według 5-punktowego szablonu poniżej; w każdej sekcji porównuj wygaśnięcia (np. 'Expiry 1 vs Expiry 3'), nie opisuj każdego osobno od zera.",
+      "- OBOWIĄZKOWO WYJAŚNIJ GREKI (SEKCJA 3): dokładnie 3 krótkie punkty (Delta, Gamma, Theta; max 2 zdania na każdy) z odniesieniem do różnic między wygaśnięciami.",
+      "- LIMIT DŁUGOŚCI: MAKSYMALNIE 450-600 słów łącznie. Dokładnie, konkretnie, zero ogólników i powtórzeń danych.",
       "",
-      "=== DANE ANALITYCZNE (" + (meta.underlying || "n/a") + ") ===",
-      "- Ticker: " + (meta.underlying || "n/a") + " | Cena Spot: $" + promptNum(spot, 2),
+      "=== SEKCJA 1: KONTEKST OGÓLNY ===",
+      "- Ticker: " + undName + " | Cena Spot: $" + promptNum(spot, 2),
       "- Data rynkowa: " + todayIso + " | Timestamp UTC: " + (meta.snapshot_ts_utc || "n/a") + " | Snapshot ID: " + (meta.snapshot_id || "n/a"),
-      "- Tryb danych IBKR: " + mdLabel + " | Źródło Greeks/IV: " + greeksLabel + " | Śr. ATM IV: " + avgAtmIvLabel,
-      "- Zakres pobrania: Range " + rangeLabel + " | Step $ " + stepLabel + " | Metryka wykresu: " + selectedMetric.toUpperCase() + " (baza ścian: " + effectiveBasis + ")",
-      "- Aktywny zakres DTE: " + scopeTitle,
+      "- Tryb danych IBKR: " + mdLabel + " | Źródło Greeks/IV: " + greeksLabel + " | Śr. ATM IV (wszystkie daty): " + avgAtmIvLabel,
+      "- Śr. Greeks ATM (" + greeksSourceSummary + "): " + atmGreeksSummary,
+      "- Zakres pobrania: Range " + rangeLabel + " | Step $ " + stepLabel + " | Baza ścian: " + effectiveBasis,
+      "- Zakres DTE: " + scopeTitle,
+      "- Łącznie: Call OI " + promptInt(scoped.totalCallOi) + " | Put OI " + promptInt(scoped.totalPutOi) + " | P/C (OI) " + pcOiRatio + " | Call Vol " + promptInt(scoped.totalCallVol) + " | Put Vol " + promptInt(scoped.totalPutVol) + " | P/C (Vol) " + pcVolRatio + " | Anomalie: " + totalAnomalyCount,
       "",
-      "=== PODSUMOWANIE DTE ===",
+      "=== SEKCJA 2: STRUKTURA TERMINOWA - PORÓWNANIE WYGAŚNIĘĆ (Expiry 1-" + activeExpiries.length + ") ===",
       dteSummaryLines.join("\n"),
       "",
-      "=== BILANS PUT / CALL I TOP ŚCIANY ===",
-      "- Call OI: " + promptInt(scoped.totalCallOi) + " | Put OI: " + promptInt(scoped.totalPutOi) + " | P/C (OI): " + pcOiRatio,
-      "- Call Vol: " + promptInt(scoped.totalCallVol) + " | Put Vol: " + promptInt(scoped.totalPutVol) + " | P/C (Vol): " + pcVolRatio,
-      "- Top 3 Call Walls (OI): " + fmtTopList(scoped.topCallOi),
-      "- Top 3 Put Walls (OI): " + fmtTopList(scoped.topPutOi),
-      "- Top 3 Call Walls (Vol): " + fmtTopList(scoped.topCallVol),
-      "- Top 3 Put Walls (Vol): " + fmtTopList(scoped.topPutVol),
+      "=== SEKCJA 3: SZCZEGÓŁY WG WYGAŚNIĘCIA (ściany, Greki, anomalie, drabina) ===",
+      expiryBlocks.join("\n\n"),
       "",
-      "=== ANOMALIE (Volume > OI / Z-Score) ===",
-      anomalyLines.length ? anomalyLines.join("\n") : "- Brak wykrytych anomalii w wybranym zakresie DTE.",
+      "=== WYMAGANA STRUKTURA ODPOWIEDZI (SKOPIUJ DOKŁADNIE TE 5 NAGŁÓWKÓW, BEZ DŁUGICH AKAPITÓW) ===",
+      "### 1. Kontekst i Struktura Terminowa",
+      "- **Obecna pozycja ($" + promptNum(spot, 2) + "):** 1 krótkie zdanie - gdzie stoi kurs względem ścian z różnych dat i jaki widać klimat (spokój / presja wzrostowa / defensywa).",
+      "- **Struktura terminowa IV:** 1-2 punkty - ATM IV rośnie czy maleje z datą (Expiry 1 vs ostatnie), co to mówi o oczekiwaniach rynku (np. strach krótkoterminowy vs spokój dalej).",
+      "- **Kontekst dnia (" + todayIso + ") i świata:** 1-2 krótkie punkty o sytuacji rynkowej/sektorowej dla " + undName + " (lub wzmianka, jeśli brak live kalendarza, np. daty wyników).",
+      "- **Jakość danych:** 1 punkt - źródło Greków (" + greeksSourceSummary + "), baza ścian (" + effectiveBasis + ", " + mdLabel + "), czy " + stepLabel + " i " + rangeLabel + " dają pełny obraz.",
       "",
-      "=== DRABINA STRIKE'ÓW ===",
-      ladderLines.join("\n"),
+      "### 2. Porównanie Walli (Expirations 1-" + activeExpiries.length + ")",
+      "- **Call Wall (opór) w czasie:** główne poziomy $ w kolejnych datach i dystans %; czy ściana migruje w górę/dół, czy powtarza się (silny opór).",
+      "- **Put Wall (wsparcie) w czasie:** analogicznie dla wsparcia; gdzie leży najmocniejsze wsparcie wspólne dla kilku dat.",
+      "- **Przewaga stron (P/C):** 1 wniosek porównujący P/C OI i Volume między datami (która data jest najbardziej defensywna / agresywna).",
       "",
-      "=== WYMAGANA STRUKTURA ODPOWIEDZI (SKOPIUJ DOKŁADNIE TE 4 NAGŁÓWKI, BEZ DŁUGICH AKAPITÓW) ===",
-      "### 1. Kontekst (dane + dziś na rynku)",
-      "- **Obecna pozycja ($" + promptNum(spot, 2) + "):** 1 krótkie zdanie - gdzie stoi kurs między barierami i jaki widać klimat (spokój / presja wzrostowa / defensywa).",
-      "- **Kontekst dnia (" + todayIso + ") i świata:** 1-2 krótkie punkty o sytuacji rynkowej/sektorowej dla " + (meta.underlying || "n/a") + " teraz (lub krótka wzmianka, jeśli brak live kalendarza).",
-      "- **Zmienność i jakość danych:** 1 krótki punkt - ile wynosi IV (~" + avgAtmIvLabel + "), czy ściany opierają się na OI czy tylko Volume (" + mdLabel + "), oraz czy skok " + stepLabel + " i zakres " + rangeLabel + " dają pełny obraz.",
+      "### 3. Analiza Greków (Delta, Gamma, Theta)",
+      "- **Delta (wpływ ruchu kursu):** max 2 zdania - jak mocno reagują opcje przy ścianach i czy różni się to między bliską a dalszą datą.",
+      "- **Gamma (przyspieszenie):** max 2 zdania - w której dacie Gamma jest największa przy kursie i co to znaczy dla gwałtownych ruchów.",
+      "- **Theta (ucieczka czasu):** max 2 zdania - gdzie czas ucieka najszybciej i kto zyskuje (kupujący vs sprzedający opcje).",
       "",
-      "### 2. Put / Call Walls (Główne bariery)",
-      "- **Call Wall (górna bariera / opór):** główny poziom $ i dystans %, plus co może się stać po wybiciu wyżej.",
-      "- **Put Wall (dolna bariera / wsparcie):** główny poziom $ i dystans %, plus gdzie leży kolejne wsparcie.",
-      "- **Przewaga stron (Put vs Call):** 1 krótki wniosek z P/C Ratio i układu ścian.",
+      "### 4. Wykryte Anomalie",
+      "- Maksymalnie 3 punkty o najsilniejszych sygnałach (data, C/P, strike $, Vol vs OI, Delta/Gamma/Theta - ostrożny zakład przy kursie czy tani los na loterię) i prosty wniosek, czy anomalie układają się w jedną spójną tezę między datami (albo wprost: brak istotnych anomalii).",
       "",
-      "### 3. Anomalie (Nietypowy ruch)",
-      "- Maksymalnie 2-3 krótkie punkty o najsilniejszych sygnałach z sekcji ANOMALIE (DTE, C/P, strike $, Vol vs OI) i prosty wniosek: świeży zakład kierunkowy czy hedging (albo napisz wprost: brak istotnych anomalii).",
-      "",
-      "### 4. Top 3 strategie opcyjne pod ten układ",
-      "Wybierz 3 najlepiej pasujące do tych barier, IV i wybranego DTE. Dla każdej napisz TYLKO te 2 krótkie podpunkty:",
-      "1. **[Nazwa strategii — konkretne strike'i $ i data YYYY-MM-DD z danych]**",
-      "   - *Dlaczego pasuje:* 1 krótkie, proste zdanie (jak wykorzystuje tutejsze ściany / anomalie / IV).",
+      "### 5. Top 3 strategie opcyjne pod ten układ",
+      "Wybierz 3 najlepiej pasujące do struktury terminowej, ścian i IV (możesz użyć kalendarza/diagonali łączących różne daty). Dla każdej napisz TYLKO te podpunkty:",
+      "1. **[Nazwa strategii - konkretne strike'i $ i daty YYYY-MM-DD z danych]**",
+      "   - *Dlaczego pasuje:* 1 krótkie zdanie (jak wykorzystuje ściany / IV / różnicę między datami).",
       "   - *Scenariusz i ryzyko:* kiedy zarabia vs konkretny poziom $, gdzie teza się psuje.",
-      "2. **[Nazwa strategii — konkretne strike'i $ i data YYYY-MM-DD z danych]**",
-      "   - *Dlaczego pasuje:* 1 krótkie, proste zdanie.",
+      "2. **[Nazwa strategii - konkretne strike'i $ i daty YYYY-MM-DD z danych]**",
+      "   - *Dlaczego pasuje:* 1 krótkie zdanie.",
       "   - *Scenariusz i ryzyko:* kiedy zarabia vs konkretny poziom $, gdzie teza się psuje.",
-      "3. **[Nazwa strategii — konkretne strike'i $ i data YYYY-MM-DD z danych]**",
-      "   - *Dlaczego pasuje:* 1 krótkie, proste zdanie.",
+      "3. **[Nazwa strategii - konkretne strike'i $ i daty YYYY-MM-DD z danych]**",
+      "   - *Dlaczego pasuje:* 1 krótkie zdanie.",
       "   - *Scenariusz i ryzyko:* kiedy zarabia vs konkretny poziom $, gdzie teza się psuje.",
     ];
 
@@ -2466,10 +3128,7 @@
       showBanner("warn", "No option strikes available in the active DTE scope.");
       return;
     }
-    var dteScope =
-      dom.wallsDteSelect && dom.wallsDteSelect.value !== "ALL"
-        ? dom.wallsDteSelect.options[dom.wallsDteSelect.selectedIndex].textContent
-        : "All weekly DTEs (>30d & <60d)";
+    var dteScope = "all weekly expirations (30\u201359 DTE)";
     copyTextToClipboard(promptText)
       .then(function () {
         if (dom.wallsCopyAiBtn) {
@@ -2590,11 +3249,17 @@
     var rafByCanvasId = {};
     function schedulePlotlyResize(canvasEl) {
       if (!canvasEl || typeof window.Plotly === "undefined" || !canvasEl.data) return;
+      var cardEl = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
+      if (cardEl && cardEl.classList.contains("is-hidden")) return;
       var cid = canvasEl.id || "chart";
       if (rafByCanvasId[cid]) {
         window.cancelAnimationFrame(rafByCanvasId[cid]);
       }
       rafByCanvasId[cid] = window.requestAnimationFrame(function () {
+        var cardNow = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
+        if (cardNow && cardNow.classList.contains("is-hidden")) return;
+        var rect = canvasEl.getBoundingClientRect ? canvasEl.getBoundingClientRect() : null;
+        if (rect && (rect.width <= 0 || rect.height <= 0)) return;
         if (window.Plotly && window.Plotly.Plots && canvasEl.data) {
           window.Plotly.Plots.resize(canvasEl);
         }
@@ -2855,6 +3520,7 @@
   function init() {
     updateThemeToggleLabel();
     restoreWallsPreferences();
+    applyPanelVisibility(readPanelVisibility(), { skipRender: true });
     bindEvents();
     initChartResizeHandling();
     fetchStatus();

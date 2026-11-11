@@ -77,7 +77,7 @@ class _MockIB:
         self, symbol: str, _fut_exch: str, _sec_type: str, _con_id: int
     ) -> list[Any]:
         base = date(2026, 11, 11)
-        # 30 and 60 are outside strict (30, 60); 35 yields to Friday 37 -> 4 weekly expiries
+        # 30 is included, 60 is excluded ([30, 60)); 35 yields to Friday 37 -> 5 weekly expiries
         exps = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 35, 37, 43, 50, 58, 60)]
         return [
             SimpleNamespace(
@@ -201,7 +201,17 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert st["port"] == 4001
                 assert st["market_data_mode"] == "DELAYED"
                 assert st["default_market_data_type"] == 3
+                assert st["active_market_data_type"] == 3
                 assert st["watchlist"] == ["NVDA", "AVGO", "CRDO", "PLTR"]
+                assert st["available_strike_steps"] == st["allowed_strike_steps"]
+                assert st["available_range_pcts"] == st["allowed_range_pcts"]
+                assert st["active_capabilities_ticker"] is None
+
+                mock_ib.client.marketDataType = 1
+                r_status_live = await client.get("/api/status")
+                assert r_status_live.status_code == 200
+                assert r_status_live.json()["active_market_data_type"] == 1
+                delattr(mock_ib.client, "marketDataType")
 
                 r_snaps = await client.get("/api/snapshots/NVDA")
                 assert r_snaps.status_code == 200
@@ -228,6 +238,8 @@ def test_chain_endpoint_enriches_bsm_and_handles_422_and_404(tmp_path: Path) -> 
             assert data["meta"]["range_pct"] == pytest.approx(0.20)
             assert data["meta"]["strike_step"] == pytest.approx(5.0)
             assert data["meta"]["requested_strike_step"] == pytest.approx(5.0)
+            assert isinstance(data["meta"]["available_strike_steps"], list)
+            assert isinstance(data["meta"]["available_range_pcts"], list)
             assert data["meta"]["dtes"] == [37, 43, 50, 58]
             # Seeded rows had greeks_source="NONE", so BSM fallback enriched them
             assert data["meta"]["greeks_source_counts"].get("BSM_FALLBACK", 0) > 0
@@ -289,9 +301,32 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             assert payload["meta"]["source"] == "LIVE_REFRESH"
             assert payload["meta"]["range_pct"] == pytest.approx(0.20)
             assert payload["meta"]["strike_step"] == pytest.approx(5.0)
-            assert payload["meta"]["dtes"] == [37, 43, 50, 58]
+            assert payload["meta"]["exchange_native_verified"] is True
+            assert payload["meta"]["exchange_validated_strike_count"] >= 3
+            assert 5.0 in payload["meta"]["available_strike_steps"]
+            assert len(payload["meta"]["available_range_pcts"]) >= 1
+            assert payload["meta"]["dtes"] == [30, 37, 43, 50, 58]
             assert payload["meta"]["greeks_source_counts"].get("BSM_FALLBACK", 0) > 0
             assert len(repo_on.list_snapshots("NVDA")) == 2
+
+            r_status_nvda = await client.get("/api/status", params={"ticker": "NVDA"})
+            assert r_status_nvda.status_code == 200
+            st_nvda = r_status_nvda.json()
+            assert st_nvda["active_capabilities_ticker"] == "NVDA"
+            assert st_nvda["available_strike_steps"] == payload["meta"]["available_strike_steps"]
+            assert st_nvda["available_range_pcts"] == payload["meta"]["available_range_pcts"]
+
+            r_status_avgo = await client.get("/api/status", params={"ticker": "AVGO"})
+            assert r_status_avgo.status_code == 200
+            assert r_status_avgo.json()["active_capabilities_ticker"] is None
+
+            r_chain_nvda = await client.get("/api/chain/NVDA")
+            assert r_chain_nvda.status_code == 200
+            assert r_chain_nvda.json()["meta"]["exchange_native_verified"] is True
+            assert (
+                r_chain_nvda.json()["meta"]["exchange_validated_strike_count"]
+                == payload["meta"]["exchange_validated_strike_count"]
+            )
 
             # Invalid ticker in POST /api/refresh -> 422
             r_bad = await client.post(
@@ -355,6 +390,16 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="walls-split-dte"',
                 'id="walls-show-anomalies"',
                 'id="walls-copy-ai-btn"',
+                'id="panel-visibility-controls"',
+                'id="panel-visibility-reset"',
+                'data-panel-target="walls"',
+                'data-panel-target="iv_smile"',
+                'data-panel-target="anomalies"',
+                'data-panel-target="greeks"',
+                'class="panel-card panel-card--walls" data-panel-id="walls"',
+                'class="panel-card is-hidden" data-panel-id="iv_smile"',
+                'class="panel-card" data-panel-id="anomalies"',
+                'class="panel-card is-hidden" data-panel-id="greeks"',
                 'id="chart-walls"',
                 'id="chart-iv-smile"',
                 'id="chart-anomalies"',
@@ -391,11 +436,27 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "panel-card--span-6" in r_css.text
             assert "panel-resize-handle" in r_css.text
             assert "nwse-resize" in r_css.text
+            assert ".panel-card.is-hidden" in r_css.text
+            assert "panel-toggle-pill" in r_css.text
+            assert ".badge--live" in r_css.text
+            assert ".badge--amber" in r_css.text
+            assert ".badge--delayed" in r_css.text
 
             r_js = await client.get("/static/js/dashboard.js")
             assert r_js.status_code == 200
             assert "Plotly.react" in r_js.text
             assert "Plotly.purge" in r_js.text
+            assert "DEFAULT_PANEL_VISIBILITY" in r_js.text
+            assert "ibkr_panel_visibility_v1" in r_js.text
+            assert "applyPanelVisibility" in r_js.text
+            assert "TYPE 1: LIVE OPRA" in r_js.text
+            assert "TYPE 2: FROZEN" in r_js.text
+            assert "TYPE 3: 15M DELAYED" in r_js.text
+            assert "TYPE 4: DELAYED-FROZEN" in r_js.text
+            assert "applyMdTypeBadge" in r_js.text
+            assert "30&ndash;59 DTE WEEKLY EXPIRATIONS" in html
+            assert "&gt;30D" not in html
+            assert "CHECKING FEED..." in html
             assert "&bull;" not in r_js.text
             assert "&mdash;" not in r_js.text
             for js_hook in (
@@ -413,6 +474,10 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "ibkr_walls_view",
                 "ibkr_walls_show_anomalies",
                 "walls-dte-select",
+                "syncControlCapabilities",
+                "resetControlCapabilities",
+                "exchange_validated_strike_count",
+                "exchange_native_verified",
             ):
                 assert js_hook in r_js.text, f"Missing {js_hook} in dashboard.js"
 

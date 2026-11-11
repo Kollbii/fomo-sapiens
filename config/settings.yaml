@@ -32,7 +32,7 @@ watchlist:
 
 options_chain:
   dte_min: 30
-  dte_max: 60            # Strict weekly expiration window: dte_min < DTE < dte_max (31..59d)
+  dte_max: 60            # Weekly expiration window: dte_min <= DTE < dte_max (30..59d)
   default_range_pct: 0.20 # +-20% around underlying spot price
   allowed_range_pcts:
     - 0.10

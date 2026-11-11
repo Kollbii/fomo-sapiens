@@ -105,8 +105,26 @@ class PagedOptionChainFetcher:
         return self.settings.options_chain.max_pages_per_refresh
 
     def build_candidate_contracts(self, plan: ChainPlan) -> list[Option]:
-        """Build the `(expiry, strike, right)` candidate `Option` grid for `plan`."""
+        """Build exchange-verified `(expiry, strike, right)` candidate `Option` contracts."""
         candidates: list[Option] = []
+        if plan.expiration_specs:
+            for spec in plan.expiration_specs:
+                for strike in spec.strikes:
+                    for right in ("C", "P"):
+                        candidates.append(
+                            Option(
+                                symbol=plan.underlying.symbol,
+                                lastTradeDateOrContractMonth=spec.match.ib_expiry,
+                                strike=strike,
+                                right=right,
+                                exchange=plan.exchange,
+                                multiplier=spec.multiplier,
+                                currency="USD",
+                                tradingClass=spec.trading_class,
+                            )
+                        )
+            return candidates
+
         for exp in plan.expirations:
             for strike in plan.strikes.strikes:
                 for right in ("C", "P"):
@@ -151,6 +169,14 @@ class PagedOptionChainFetcher:
                     qualified.append(item)
         if not qualified:
             raise OptionChainFetchError("IBKR failed to qualify any option contracts in chain")
+        dropped = len(candidates) - len(qualified)
+        if dropped > 0:
+            drop_msg = (
+                f"Filtered out {dropped} unqualified contract(s) rejected by IBKR security "
+                f"definition lookup; continuing with {len(qualified)} verified contract(s)."
+            )
+            self._notices.append(drop_msg)
+            logger.warning(drop_msg)
         return qualified
 
     async def _collect_page_once(
