@@ -203,6 +203,9 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert st["default_market_data_type"] == 3
                 assert st["active_market_data_type"] == 3
                 assert st["watchlist"] == ["NVDA", "AVGO", "CRDO", "PLTR"]
+                assert st["dte_min"] == 30
+                assert st["dte_max"] == 120
+                assert st["default_strike_step"] is None
                 assert st["available_strike_steps"] == st["allowed_strike_steps"]
                 assert st["available_range_pcts"] == st["allowed_range_pcts"]
                 assert st["active_capabilities_ticker"] is None
@@ -405,29 +408,41 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="chart-anomalies"',
                 'id="chart-greeks"',
                 'id="chain-table"',
+                'id="strategy-auto-populate"',
+                'class="chain-leg-col">Leg</th>',
             ):
                 assert required_id in html, f"Missing {required_id} in index HTML"
+            assert 'colspan="18"' in html
+            assert 'id="alert-banner"' in html and 'aria-live="polite"' in html
 
-            for column in (
-                "Expiry",
-                "DTE",
-                "Right",
-                "Strike",
-                "Moneyness %",
-                "Bid",
-                "Ask",
-                "Mark",
-                "Volume",
-                "Open Int",
-                "Vol/OI",
-                "IV %",
-                "Delta",
-                "Gamma",
-                "Theta",
-                "Vega",
-                "Source",
+            for col_key, col_label in (
+                ("expiry", "Expiry"),
+                ("dte", "DTE"),
+                ("right", "Right"),
+                ("strike", "Strike"),
+                ("moneyness_pct", "Moneyness %"),
+                ("bid", "Bid"),
+                ("ask", "Ask"),
+                ("mark_price", "Mark"),
+                ("volume", "Volume"),
+                ("open_interest", "Open Int"),
+                ("vol_oi", "Vol/OI"),
+                ("iv", "IV %"),
+                ("delta", "Delta"),
+                ("gamma", "Gamma"),
+                ("theta", "Theta"),
+                ("vega", "Vega"),
+                ("greeks_source", "Source"),
             ):
-                assert f">{column}</th>" in html, f"Missing table header {column}"
+                assert f'data-sort-col="{col_key}">{col_label}<span class="th-sort-ind"' in html, (
+                    f"Missing sortable table header {col_label}"
+                )
+                assert f'data-filter-col="{col_key}"' in html, f"Missing header filter {col_key}"
+            assert 'id="table-reset-filters-btn"' in html
+            assert 'class="table-filter-row"' in html
+            assert 'id="th-filter-expiry"' in html
+            assert 'id="th-filter-right"' in html
+            assert 'id="th-filter-source"' in html
 
             r_css = await client.get("/static/css/tokens.css")
             assert r_css.status_code == 200
@@ -441,6 +456,13 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".badge--live" in r_css.text
             assert ".badge--amber" in r_css.text
             assert ".badge--delayed" in r_css.text
+            assert ".th-sort-btn" in r_css.text
+            assert ".table-filter-row" in r_css.text
+            assert ".th-filter-input.is-filtered" in r_css.text
+            assert ".alert-banner.is-fresh" in r_css.text
+            assert ".alert-banner-close" in r_css.text
+            assert ".chain-add-leg-btn" in r_css.text
+            assert 'href="/static/css/tokens.css?v=20261111i"' in html
 
             r_js = await client.get("/static/js/dashboard.js")
             assert r_js.status_code == 200
@@ -454,15 +476,28 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "TYPE 3: 15M DELAYED" in r_js.text
             assert "TYPE 4: DELAYED-FROZEN" in r_js.text
             assert "applyMdTypeBadge" in r_js.text
-            assert "30&ndash;59 DTE WEEKLY EXPIRATIONS" in html
+            assert "30&ndash;120 DTE WEEKLY EXPIRATIONS" in html
+            assert '<option value="auto" selected>Auto</option>' in html
+            assert 'id="dte-max-select"' in html
+            assert 'id="dte-bucket-tabs"' in html
+            assert 'data-dte-bucket="BUCKET:61-90"' in html
+            assert 'data-dte-bucket="BUCKET:91-120"' in html
+            assert "30&ndash;59 DTE" not in html
             assert "&gt;30D" not in html
             assert "CHECKING FEED..." in html
             assert "&bull;" not in r_js.text
             assert "&mdash;" not in r_js.text
+            assert "var minStep = 5;" not in r_js.text
+            assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
+            assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
+            assert 'src="/static/js/dashboard.js?v=20261111p"' in html
             for js_hook in (
                 "populateWallsDteFilter",
                 "makeWallReferenceMarker",
                 "buildSymmetricPositiveTicks",
+                "computeStrikeAxisGeometry",
+                "localStepByKey",
+                "stepBadgeText",
                 "resolveWallCandidate",
                 "buildWallsAiPrompt",
                 "copyWallsAiPrompt",
@@ -474,12 +509,77 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "ibkr_walls_view",
                 "ibkr_walls_show_anomalies",
                 "walls-dte-select",
+                "dte-max-select",
+                "dte-bucket-tabs",
+                "matchesDteFilterValue",
+                "syncDteBucketTabs",
+                "BUCKET:91-120",
                 "syncControlCapabilities",
                 "resetControlCapabilities",
                 "exchange_validated_strike_count",
                 "exchange_native_verified",
+                "renderStrategyPayoffChart",
+                "autoBuildStrategy",
+                "evaluateStrategyRequest",
+                "syncStrategySelectors",
+                "extractApiErrorMessage",
+                "resolveLocalContractMid",
+                "findExactEvaluatedLeg",
+                "snapLegToValidContract",
+                "clearAlertBanner",
+                "textSnippet",
+                "timeoutMs",
+                "elapsedMs",
+                "addSpecificStrategyLeg",
+                "maybeAutoPopulateStrategy",
+                "snapDteValueToExpiries",
+                "applyTickerPullPrefsToControls",
+                "ibkr_strategy_auto_populate_v1",
+                "ibkr_pull_prefs_v1",
+                "UI_RENDER",
+                "REFRESH_HTTP",
+                "chain-add-leg-btn",
+                "alert-banner-close",
+                "markStrategyEvaluationDirty",
+                "syncStrategyActionButtons",
+                "strategyPendingEvaluate",
+                "strategy: true",
+                "corridor: true",
+                "startCorridorStream",
+                "stopCorridorStream",
+                "refreshCorridorQuotesOneShot",
+                "refreshStrategyLegsQuotesOnly",
+                "renderCorridorChart",
+                "TABLE_COLUMNS",
+                "matchesNumericFilterExpr",
+                "applyTableSort",
+                "populateTableHeaderFilters",
+                "resetAllTableFilters",
+                "ibkr_chain_table_sort_v1",
             ):
                 assert js_hook in r_js.text, f"Missing {js_hook} in dashboard.js"
+
+            assert 'data-panel-target="strategy"' in html
+            assert 'data-panel-target="corridor"' in html
+            assert "panel-toggle-btn" not in html
+            assert html.count('class="panel-toggle-pill') == 6
+            assert 'data-panel-id="corridor"' in html
+            assert 'id="wall-corridor-card"' in html
+            assert 'id="corridor-refresh-btn"' in html
+            assert 'id="corridor-stream-toggle"' in html
+            assert 'id="corridor-reprice-btn"' not in html
+            assert 'id="corridor-auto-reprice"' in html
+            assert 'data-panel-id="strategy"' in html
+            assert 'id="strategy-autobuild-btn"' in html
+            assert 'id="strategy-evaluate-btn"' in html
+            assert "Evaluate / Re-Price" in html
+            assert 'id="strategy-legs-tbody"' in html
+            assert ".panel-card--corridor" in r_css.text
+            assert ".corridor-stream-switch" in r_css.text
+            assert ".chart-canvas--corridor" in r_css.text
+            assert ".panel-card--strategy" in r_css.text
+            assert ".chart-canvas--strategy" in r_css.text
+            assert ".chart-canvas--strategy.is-idle" in r_css.text
 
             r_csv = await client.get("/api/csv/NVDA")
             assert r_csv.status_code == 200
@@ -508,5 +608,171 @@ def test_dashboard_html_static_assets_and_csv_download(
                 json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": None},
             )
             assert r_auto.status_code == 200
+
+    _run(_exercise())
+
+
+def test_expanded_120_dte_refresh_and_query_filtering(tmp_path: Path) -> None:
+    app, _repo, mock_ib = _build_test_app(tmp_path, offline=False)
+
+    async def _expirations_up_to_125(
+        symbol: str, _fut_exch: str, _sec_type: str, _con_id: int
+    ) -> list[Any]:
+        base = date(2026, 11, 11)
+        exps = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 58, 93, 120, 125)]
+        return [
+            SimpleNamespace(
+                exchange="SMART",
+                tradingClass=symbol,
+                multiplier="100",
+                expirations=exps,
+                strikes=[135.0, 140.0, 145.0],
+            )
+        ]
+
+    mock_ib.reqSecDefOptParamsAsync = _expirations_up_to_125  # type: ignore[method-assign]
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ref = await client.post(
+                "/api/refresh",
+                json={
+                    "ticker": "NVDA",
+                    "range_pct": 0.20,
+                    "strike_step": 5.0,
+                    "dte_min": 30,
+                    "dte_max": 120,
+                },
+            )
+            assert r_ref.status_code == 200
+            assert r_ref.json()["meta"]["dtes"] == [30, 58, 93, 120]
+
+            r_bucket = await client.get("/api/chain/NVDA", params={"dte_min": 61, "dte_max": 120})
+            assert r_bucket.status_code == 200
+            assert r_bucket.json()["meta"]["dtes"] == [93, 120]
+
+            r_bad_dte = await client.get("/api/chain/NVDA", params={"dte_max": 121})
+            assert r_bad_dte.status_code == 422
+
+    _run(_exercise())
+
+
+def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
+    app, repo, _mock_ib = _build_test_app(tmp_path, offline=True)
+    # Seed a multi-strike ticker (AAPL) so Iron Condor + 4 presets all construct cleanly
+    ts = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    rich_rows: list[dict[str, Any]] = []
+    conid = 9000
+    for dte in (37, 65):
+        expiry = (ts.date() + timedelta(days=dte)).isoformat()
+        for strike in (125.0, 130.0, 135.0, 140.0, 145.0, 150.0, 155.0):
+            for right in ("C", "P"):
+                conid += 1
+                rich_rows.append(
+                    {
+                        "snapshot_id": make_snapshot_id("AAPL", ts),
+                        "snapshot_ts_utc": ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "market_date": "2026-11-11",
+                        "market_data_type": 3,
+                        "underlying": "AAPL",
+                        "underlying_conid": 265598,
+                        "underlying_price": 140.0,
+                        "option_conid": conid,
+                        "expiry": expiry,
+                        "dte": dte,
+                        "strike": strike,
+                        "moneyness_pct": ((strike - 140.0) / 140.0) * 100.0,
+                        "right": right,
+                        "bid": 4.0,
+                        "ask": 4.4,
+                        "last": 4.2,
+                        "close": 4.2,
+                        "volume": 2000 if strike in (130.0, 150.0) else 250,
+                        "open_interest": None,
+                        "iv": None,
+                        "delta": None,
+                        "gamma": None,
+                        "theta": None,
+                        "vega": None,
+                        "greeks_source": "NONE",
+                    }
+                )
+    repo.save_snapshot("AAPL", rich_rows)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_all = await client.post("/api/strategy/suggest", json={"ticker": "AAPL"})
+            assert r_all.status_code == 200
+            payload = r_all.json()
+            assert payload["ticker"] == "AAPL"
+            kinds = [ev["strategy_kind"] for ev in payload["evaluations"]]
+            assert kinds == [
+                "BULL_PUT_SPREAD",
+                "BULL_CALL_SPREAD",
+                "DIAGONAL_SPREAD",
+                "IRON_CONDOR",
+            ]
+            condor = payload["evaluations"][3]
+            assert len(condor["legs"]) == 4
+            assert condor["risk"]["expected_move_1sigma_low"] is not None
+
+            exp_front = (ts.date() + timedelta(days=37)).isoformat()
+            r_eval = await client.post(
+                "/api/strategy/evaluate",
+                json={
+                    "ticker": "NVDA",
+                    "strategy_kind": "CUSTOM",
+                    "legs": [
+                        {
+                            "side": "SELL",
+                            "right": "P",
+                            "expiry": exp_front,
+                            "strike": 140.0,
+                            "qty": 1,
+                        },
+                        {
+                            "side": "BUY",
+                            "right": "P",
+                            "expiry": exp_front,
+                            "strike": 135.0,
+                            "qty": 1,
+                        },
+                    ],
+                    "days_forward": 10,
+                    "iv_shift": -0.05,
+                    "qty_multiplier": 2,
+                },
+            )
+            assert r_eval.status_code == 200
+            ev = r_eval.json()
+            assert ev["strategy_kind"] == "CUSTOM"
+            assert ev["qty_multiplier"] == 2
+            assert any(c["label"].startswith("Simulated (T+10d") for c in ev["curves"])
+
+            r_bad_leg = await client.post(
+                "/api/strategy/evaluate",
+                json={
+                    "ticker": "NVDA",
+                    "strategy_kind": "CUSTOM",
+                    "legs": [
+                        {
+                            "side": "BUY",
+                            "right": "C",
+                            "expiry": exp_front,
+                            "strike": 999.0,
+                            "qty": 1,
+                        }
+                    ],
+                },
+            )
+            assert r_bad_leg.status_code == 422
+
+            r_404 = await client.post(
+                "/api/strategy/suggest",
+                json={"ticker": "PLTR", "strategy_kind": "BULL_PUT_SPREAD"},
+            )
+            assert r_404.status_code == 404
 
     _run(_exercise())

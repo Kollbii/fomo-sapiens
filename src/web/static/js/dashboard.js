@@ -10,14 +10,21 @@
     "chart-iv-smile",
     "chart-anomalies",
     "chart-greeks",
+    "chart-corridor-ladder",
+    "chart-strategy-payoff",
   ];
 
   var PANEL_VISIBILITY_KEY = "ibkr_panel_visibility_v1";
+  var TABLE_SORT_KEY = "ibkr_chain_table_sort_v1";
+  var STRATEGY_AUTO_POPULATE_KEY = "ibkr_strategy_auto_populate_v1";
+  var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
   var DEFAULT_PANEL_VISIBILITY = {
     walls: true,
     iv_smile: false,
     anomalies: true,
     greeks: false,
+    corridor: true,
+    strategy: true,
   };
 
   function cloneDefaultPanelVisibility() {
@@ -26,6 +33,8 @@
       iv_smile: DEFAULT_PANEL_VISIBILITY.iv_smile,
       anomalies: DEFAULT_PANEL_VISIBILITY.anomalies,
       greeks: DEFAULT_PANEL_VISIBILITY.greeks,
+      corridor: DEFAULT_PANEL_VISIBILITY.corridor,
+      strategy: DEFAULT_PANEL_VISIBILITY.strategy,
     };
   }
 
@@ -41,6 +50,28 @@
     status: null,
     loading: false,
     panelVisibility: cloneDefaultPanelVisibility(),
+    corridorExpiry: "",
+    corridorWindow: 5,
+    corridorFrame: null,
+    corridorBusy: false,
+    corridorStreaming: false,
+    corridorStreamSource: null,
+    corridorPrevMids: {},
+    corridorLastRepriceAt: 0,
+    corridorAutoRepriceTimer: null,
+    strategyKind: "BULL_PUT_SPREAD",
+    strategyLegs: [],
+    strategyEvaluation: null,
+    strategyEvaluationDirty: false,
+    strategyPendingEvaluate: null,
+    strategyBusy: false,
+    strategyLoadedTicker: "",
+    bannerSeq: 0,
+    activeBannerKey: "",
+    activeBannerCount: 0,
+    bannerFreshTimer: null,
+    tableSort: { col: null, dir: null },
+    tableFilters: {},
   };
 
   var dom = {
@@ -54,6 +85,7 @@
     customInput: document.getElementById("custom-ticker-input"),
     rangeSelect: document.getElementById("range-pct-select"),
     stepSelect: document.getElementById("strike-step-select"),
+    dteMaxSelect: document.getElementById("dte-max-select"),
     snapshotSelect: document.getElementById("snapshot-select"),
     refreshBtn: document.getElementById("refresh-btn"),
     exportCsvBtn: document.getElementById("export-csv-btn"),
@@ -73,14 +105,82 @@
     wallsShowAnomalies: document.getElementById("walls-show-anomalies"),
     wallsCopyAiBtn: document.getElementById("walls-copy-ai-btn"),
     greeksMetricSelect: document.getElementById("greeks-metric-select"),
+    dteBucketTabs: document.getElementById("dte-bucket-tabs"),
     filterDte: document.getElementById("filter-dte"),
     filterRight: document.getElementById("filter-right"),
     filterUnusual: document.getElementById("filter-unusual"),
+    tableResetFiltersBtn: document.getElementById("table-reset-filters-btn"),
+    chainTableHead: document.querySelector("#chain-table thead"),
+    thFilterExpiry: document.getElementById("th-filter-expiry"),
+    thFilterRight: document.getElementById("th-filter-right"),
+    thFilterSource: document.getElementById("th-filter-source"),
     tableBody: document.getElementById("chain-table-body"),
     tableRowCount: document.getElementById("table-row-count"),
+    strategyBasisBadge: document.getElementById("strategy-basis-badge"),
+    strategyAutoPopulate: document.getElementById("strategy-auto-populate"),
+    strategyPresetPills: document.getElementById("strategy-preset-pills"),
+    strategyExpirySelect: document.getElementById("strategy-expiry-select"),
+    strategyQtyInput: document.getElementById("strategy-qty-input"),
+    strategyAutoBuildBtn: document.getElementById("strategy-autobuild-btn"),
+    strategyEvaluateBtn: document.getElementById("strategy-evaluate-btn"),
+    strategyAddLegBtn: document.getElementById("strategy-add-leg-btn"),
+    strategyResetBtn: document.getElementById("strategy-reset-btn"),
+    strategyKpiPrice: document.getElementById("strategy-kpi-price"),
+    strategyKpiPriceSub: document.getElementById("strategy-kpi-price-sub"),
+    strategyKpiSlip: document.getElementById("strategy-kpi-slip"),
+    strategyKpiSlipSub: document.getElementById("strategy-kpi-slip-sub"),
+    strategyKpiRisk: document.getElementById("strategy-kpi-risk"),
+    strategyKpiRiskSub: document.getElementById("strategy-kpi-risk-sub"),
+    strategyKpiPop: document.getElementById("strategy-kpi-pop"),
+    strategyKpiPopSub: document.getElementById("strategy-kpi-pop-sub"),
+    strategyKpiGreeks: document.getElementById("strategy-kpi-greeks"),
+    strategyKpiGreeksSub: document.getElementById("strategy-kpi-greeks-sub"),
+    strategyRationale: document.getElementById("strategy-rationale"),
+    strategyLegsTbody: document.getElementById("strategy-legs-tbody"),
+    strategyDaysSlider: document.getElementById("strategy-days-slider"),
+    strategyDaysReadout: document.getElementById("strategy-days-readout"),
+    strategyIvSlider: document.getElementById("strategy-iv-slider"),
+    strategyIvReadout: document.getElementById("strategy-iv-readout"),
+    strategyChartEl: document.getElementById("chart-strategy-payoff"),
+    corridorStatusBadge: document.getElementById("corridor-status-badge"),
+    corridorSubsBadge: document.getElementById("corridor-subs-badge"),
+    corridorExpirySelect: document.getElementById("corridor-expiry-select"),
+    corridorWindowSelect: document.getElementById("corridor-window-select"),
+    corridorRefreshBtn: document.getElementById("corridor-refresh-btn"),
+    corridorStreamToggle: document.getElementById("corridor-stream-toggle"),
+    corridorAutoReprice: document.getElementById("corridor-auto-reprice"),
+    corridorKpiPw: document.getElementById("corridor-kpi-pw"),
+    corridorKpiPwSub: document.getElementById("corridor-kpi-pw-sub"),
+    corridorKpiCw: document.getElementById("corridor-kpi-cw"),
+    corridorKpiCwSub: document.getElementById("corridor-kpi-cw-sub"),
+    corridorKpiSpot: document.getElementById("corridor-kpi-spot"),
+    corridorKpiSpotSub: document.getElementById("corridor-kpi-spot-sub"),
+    corridorKpiSync: document.getElementById("corridor-kpi-sync"),
+    corridorKpiSyncSub: document.getElementById("corridor-kpi-sync-sub"),
+    corridorLadderTbody: document.getElementById("corridor-ladder-tbody"),
+    corridorChartEl: document.getElementById("chart-corridor-ladder"),
   };
 
   // ------------------------------------------------------------------ Helpers
+  function extractApiErrorMessage(body, fallback) {
+    if (!body) return fallback;
+    if (typeof body.detail === "string" && body.detail.trim()) return body.detail;
+    if (Array.isArray(body.detail) && body.detail.length) {
+      var parts = body.detail
+        .map(function (item) {
+          if (typeof item === "string") return item;
+          if (!item || typeof item !== "object") return "";
+          var loc = Array.isArray(item.loc) ? item.loc.join(".") : "";
+          var msg = item.msg || "";
+          return loc && msg ? loc + ": " + msg : msg || loc;
+        })
+        .filter(Boolean);
+      if (parts.length) return parts.join("; ");
+    }
+    if (typeof body.message === "string" && body.message.trim()) return body.message;
+    return fallback;
+  }
+
   function currentTheme() {
     return document.documentElement.getAttribute("data-theme") === "terminal"
       ? "terminal"
@@ -132,6 +232,145 @@
     } catch (_err) {
       /* ignore */
     }
+  }
+
+  function isStrategyAutoPopulateEnabled() {
+    if (dom.strategyAutoPopulate) {
+      return Boolean(dom.strategyAutoPopulate.checked);
+    }
+    return readPref(STRATEGY_AUTO_POPULATE_KEY, "true") !== "false";
+  }
+
+  function syncStrategyAutoPopulateUI() {
+    if (!dom.strategyAutoPopulate) return;
+    dom.strategyAutoPopulate.checked = readPref(STRATEGY_AUTO_POPULATE_KEY, "true") !== "false";
+  }
+
+  function readPullPrefsMap() {
+    try {
+      var raw = window.localStorage.getItem(PULL_PREFS_KEY);
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      return parsed && typeof parsed === "object" ? parsed : {};
+    } catch (_err) {
+      return {};
+    }
+  }
+
+  function readTickerPullPrefs(ticker) {
+    var key = String(ticker || "").trim().toUpperCase();
+    if (!key) return null;
+    var map = readPullPrefsMap();
+    return map[key] && typeof map[key] === "object" ? map[key] : null;
+  }
+
+  function writeTickerPullPrefs(ticker) {
+    var key = String(ticker || "").trim().toUpperCase();
+    if (!key) return;
+    var map = readPullPrefsMap();
+    map[key] = {
+      range_pct: dom.rangeSelect ? String(dom.rangeSelect.value || "0.20") : "0.20",
+      strike_step: dom.stepSelect ? String(dom.stepSelect.value || "auto") : "auto",
+      dte_max: dom.dteMaxSelect ? String(dom.dteMaxSelect.value || "120") : "120",
+    };
+    try {
+      window.localStorage.setItem(PULL_PREFS_KEY, JSON.stringify(map));
+    } catch (_err) {
+      /* ignore */
+    }
+  }
+
+  function selectHasEnabledOption(selectEl, targetVal) {
+    if (!selectEl || !targetVal) return false;
+    for (var i = 0; i < selectEl.options.length; i++) {
+      var opt = selectEl.options[i];
+      if (opt.value === String(targetVal) && !opt.disabled) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function applyTickerPullPrefsToControls(ticker) {
+    var prefs = readTickerPullPrefs(ticker);
+    if (!prefs) return false;
+    var applied = false;
+    if (dom.rangeSelect && prefs.range_pct && selectHasEnabledOption(dom.rangeSelect, prefs.range_pct)) {
+      dom.rangeSelect.value = String(prefs.range_pct);
+      applied = true;
+    }
+    if (dom.stepSelect && prefs.strike_step && selectHasEnabledOption(dom.stepSelect, prefs.strike_step)) {
+      dom.stepSelect.value = String(prefs.strike_step);
+      applied = true;
+    }
+    if (dom.dteMaxSelect && prefs.dte_max && selectHasEnabledOption(dom.dteMaxSelect, prefs.dte_max)) {
+      dom.dteMaxSelect.value = String(prefs.dte_max);
+      applied = true;
+    }
+    return applied;
+  }
+
+  function parseExpiryDayMs(rawExpiry) {
+    var s = String(rawExpiry || "").trim();
+    if (!/^\d{8}$/.test(s)) return null;
+    var y = parseInt(s.slice(0, 4), 10);
+    var m = parseInt(s.slice(4, 6), 10) - 1;
+    var d = parseInt(s.slice(6, 8), 10);
+    return Date.UTC(y, m, d);
+  }
+
+  function snapDteValueToExpiries(previousVal, expiries, options) {
+    var opts = options || {};
+    var emptyValue = Object.prototype.hasOwnProperty.call(opts, "emptyValue")
+      ? opts.emptyValue
+      : "ALL";
+    var prev = String(previousVal || "");
+    if (!expiries || !expiries.length) return emptyValue;
+    if (!prev || prev === "ALL") return emptyValue;
+
+    if (opts.allowBuckets && prev.indexOf("BUCKET:") === 0) {
+      for (var b = 0; b < expiries.length; b++) {
+        if (matchesDteFilterValue(expiries[b].dte, expiries[b].expiry, prev)) {
+          return prev;
+        }
+      }
+      return emptyValue;
+    }
+
+    for (var i = 0; i < expiries.length; i++) {
+      if (String(expiries[i].expiry) === prev) {
+        return prev;
+      }
+    }
+
+    var targetMs = parseExpiryDayMs(prev);
+    if (targetMs === null) {
+      return emptyValue;
+    }
+    var bestExpiry = expiries[0].expiry;
+    var bestDiff = Infinity;
+    for (var j = 0; j < expiries.length; j++) {
+      var candMs = parseExpiryDayMs(expiries[j].expiry);
+      if (candMs === null) continue;
+      var diff = Math.abs(candMs - targetMs);
+      if (diff < bestDiff) {
+        bestDiff = diff;
+        bestExpiry = expiries[j].expiry;
+      }
+    }
+    return bestExpiry || emptyValue;
+  }
+
+  function buildActivePullScopeText() {
+    var stepTxt =
+      dom.stepSelect && dom.stepSelect.value === "auto"
+        ? "Auto"
+        : dom.stepSelect
+          ? formatStepShort(Number(dom.stepSelect.value))
+          : "Auto";
+    var rangeTxt = dom.rangeSelect ? formatRangeShort(Number(dom.rangeSelect.value || 0.2)) : "\u00B120%";
+    var dteTxt = dom.dteMaxSelect ? "\u2264" + dom.dteMaxSelect.value + "d" : "\u2264120d";
+    return "Step " + stepTxt + " | " + rangeTxt + " | " + dteTxt;
   }
 
   function formatExpiryIso(rawExpiry) {
@@ -316,6 +555,9 @@
   function resetControlCapabilities() {
     resetSelectCapabilities(dom.rangeSelect);
     resetSelectCapabilities(dom.stepSelect);
+    if (dom.stepSelect && !dom.stepSelect.value) {
+      dom.stepSelect.value = "auto";
+    }
   }
 
   function syncControlCapabilities(caps) {
@@ -357,14 +599,21 @@
     selectEl.appendChild(customOpt);
   }
 
-  function syncControlsFromMeta(meta) {
+  function syncControlsFromMeta(meta, options) {
+    var opts = options || {};
     if (!meta) {
       resetControlCapabilities();
       return;
     }
     syncControlCapabilities(meta);
-    syncSelectToNumeric(dom.rangeSelect, meta.range_pct, formatRangeShort);
-    syncSelectToNumeric(dom.stepSelect, meta.strike_step, formatStepShort);
+    var tickerKey = meta.underlying || state.ticker;
+    var savedPrefs = readTickerPullPrefs(tickerKey);
+    if (opts.fromRefresh || !savedPrefs || !savedPrefs.range_pct) {
+      syncSelectToNumeric(dom.rangeSelect, meta.range_pct, formatRangeShort);
+    } else {
+      applyTickerPullPrefsToControls(tickerKey);
+    }
+    // Keep #strike-step-select on Auto unless the user explicitly selected a manual numeric step.
   }
 
   function escapeHtml(raw) {
@@ -375,16 +624,130 @@
       .replace(/"/g, "&quot;");
   }
 
-  function showBanner(kind, message) {
+  function formatBannerClock(dateObj) {
+    var d = dateObj || new Date();
+    var hh = String(d.getHours()).padStart(2, "0");
+    var mm = String(d.getMinutes()).padStart(2, "0");
+    var ss = String(d.getSeconds()).padStart(2, "0");
+    return hh + ":" + mm + ":" + ss;
+  }
+
+  function clearAlertBanner() {
+    if (state.bannerFreshTimer) {
+      window.clearTimeout(state.bannerFreshTimer);
+      state.bannerFreshTimer = null;
+    }
+    state.activeBannerKey = "";
+    state.activeBannerCount = 0;
+    if (!dom.alertBanner) return;
+    dom.alertBanner.hidden = true;
+    dom.alertBanner.className = "alert-banner";
+    dom.alertBanner.innerHTML = "";
+  }
+
+  function showBanner(kind, message, meta) {
     if (!dom.alertBanner) return;
     if (!message) {
-      dom.alertBanner.hidden = true;
-      dom.alertBanner.textContent = "";
+      clearAlertBanner();
       return;
     }
-    dom.alertBanner.className = "alert-banner alert-banner--" + (kind || "info");
-    dom.alertBanner.textContent = message;
+    var tone = kind || "info";
+    var m = meta && typeof meta === "object" ? meta : {};
+    state.bannerSeq += 1;
+    var clockStr = formatBannerClock(new Date());
+    var dedupKey = [
+      tone,
+      String(message),
+      m.phase || "",
+      m.status !== undefined && m.status !== null ? String(m.status) : "",
+      m.ticker || "",
+    ].join("|");
+
+    var wasVisible = !dom.alertBanner.hidden;
+    if (wasVisible && state.activeBannerKey === dedupKey) {
+      state.activeBannerCount += 1;
+    } else {
+      state.activeBannerKey = dedupKey;
+      state.activeBannerCount = 1;
+    }
+
+    var chips = [];
+    var tickerLabel = m.ticker || (tone === "error" || tone === "warn" ? state.ticker : "");
+    if (tickerLabel) chips.push(String(tickerLabel));
+    if (m.pullScope) chips.push(String(m.pullScope));
+    if (m.phase) chips.push(String(m.phase));
+    if (m.status !== undefined && m.status !== null && m.status !== "") {
+      chips.push("HTTP " + String(m.status));
+    }
+    if (m.errorCode) chips.push(String(m.errorCode));
+    if (m.elapsedMs !== undefined && m.elapsedMs !== null && !Number.isNaN(Number(m.elapsedMs))) {
+      chips.push(Math.round(Number(m.elapsedMs)) + " ms");
+    }
+
+    var chipsHtml = "";
+    for (var i = 0; i < chips.length; i++) {
+      chipsHtml += '<span class="alert-banner-chip">' + escapeHtml(chips[i]) + "</span>";
+    }
+    var repeatHtml =
+      state.activeBannerCount > 1
+        ? '<span class="alert-banner-badge">\u00D7' +
+          state.activeBannerCount +
+          " \u2022 last " +
+          clockStr +
+          "</span>"
+        : "";
+
+    var techParts = [];
+    if (m.detail) techParts.push(String(m.detail));
+    if (m.rawBody && String(m.rawBody) !== String(m.detail || "")) {
+      techParts.push("Response snippet: " + String(m.rawBody));
+    }
+    var techText = techParts.join("\n").trim();
+
+    dom.alertBanner.setAttribute("role", tone === "error" || tone === "warn" ? "alert" : "status");
+    dom.alertBanner.className = "alert-banner alert-banner--" + tone;
+    dom.alertBanner.innerHTML =
+      '<div class="alert-banner-main">' +
+      '<div class="alert-banner-head">' +
+      '<span class="alert-banner-badge">#' +
+      state.bannerSeq +
+      " \u2022 " +
+      clockStr +
+      "</span>" +
+      repeatHtml +
+      chipsHtml +
+      "</div>" +
+      '<div class="alert-banner-msg">' +
+      escapeHtml(message) +
+      "</div>" +
+      (m.hint ? '<div class="alert-banner-hint">' + escapeHtml(m.hint) + "</div>" : "") +
+      (techText
+        ? '<details class="alert-banner-details"><summary>Technical details</summary><pre class="alert-banner-tech">' +
+          escapeHtml(techText) +
+          "</pre></details>"
+        : "") +
+      "</div>" +
+      '<div class="alert-banner-actions">' +
+      '<button type="button" id="alert-banner-close" class="alert-banner-close" aria-label="Dismiss alert" title="Dismiss alert">\u00D7</button>' +
+      "</div>";
+
     dom.alertBanner.hidden = false;
+    dom.alertBanner.classList.remove("is-fresh");
+    try {
+      void dom.alertBanner.offsetWidth;
+    } catch (_err) {
+      /* ignore layout read errors in non-DOM test envs */
+    }
+    dom.alertBanner.classList.add("is-fresh");
+    if (state.bannerFreshTimer) {
+      window.clearTimeout(state.bannerFreshTimer);
+    }
+    state.bannerFreshTimer = window.setTimeout(function () {
+      state.bannerFreshTimer = null;
+      if (dom.alertBanner) {
+        dom.alertBanner.classList.remove("is-fresh");
+      }
+    }, 750);
   }
 
   function setActiveTickerUI(ticker) {
@@ -481,7 +844,7 @@
     if (dom.editorialBannerCopy) {
       if (!meta) {
         dom.editorialBannerCopy.textContent =
-          "Immutable CSV Archive \u2022 Delayed Type 3/4 Feed \u2022 Weekly Expirations (30\u201359 DTE)";
+          "Immutable CSV Archive \u2022 Delayed Type 3/4 Feed \u2022 Weekly Expirations (30\u2013120 DTE)";
       } else {
         var dteSpanTxt =
           meta.dtes && meta.dtes.length
@@ -491,7 +854,7 @@
               "d (" +
               meta.dtes.length +
               " wk exp)"
-            : "30\u201359 DTE";
+            : "30\u2013120 DTE";
         var verifiedSuffix =
           meta.exchange_native_verified && meta.exchange_validated_strike_count
             ? " \u2022 " + meta.exchange_validated_strike_count + " IBKR strikes"
@@ -604,15 +967,38 @@
   }
 
   // ------------------------------------------------------------------ Plotly Charts
+  function renderCorridorEmptyPlaceholder() {
+    if (!dom.corridorChartEl) return;
+    if (typeof window.Plotly !== "undefined" && dom.corridorChartEl.data) {
+      window.Plotly.purge(dom.corridorChartEl);
+    }
+    dom.corridorChartEl.classList.add("is-idle");
+    dom.corridorChartEl.innerHTML =
+      '<div class="strategy-empty-state">Load an option snapshot to preview the Put/Call Wall \u00B15 strike corridor, or click <strong>Refresh Corridor Quotes</strong>.</div>';
+  }
+
+  function renderStrategyEmptyPlaceholder() {
+    if (!dom.strategyChartEl) return;
+    if (typeof window.Plotly !== "undefined" && dom.strategyChartEl.data) {
+      window.Plotly.purge(dom.strategyChartEl);
+    }
+    dom.strategyChartEl.classList.add("is-idle");
+    dom.strategyChartEl.innerHTML =
+      '<div class="strategy-empty-state">Click a preset or <strong>Auto-Build from Walls</strong> / <strong>Evaluate / Re-Price</strong> to plot T+0, Midpoint, Expiration &amp; Simulated P&amp;L curves.</div>';
+  }
+
   function purgeCharts() {
-    if (typeof window.Plotly === "undefined") return;
-    for (var i = 0; i < CHART_IDS.length; i++) {
-      var el = document.getElementById(CHART_IDS[i]);
-      if (el) {
-        window.Plotly.purge(el);
-        el.innerHTML = "";
+    if (typeof window.Plotly !== "undefined") {
+      for (var i = 0; i < CHART_IDS.length; i++) {
+        var el = document.getElementById(CHART_IDS[i]);
+        if (el) {
+          window.Plotly.purge(el);
+          el.innerHTML = "";
+        }
       }
     }
+    renderCorridorEmptyPlaceholder();
+    renderStrategyEmptyPlaceholder();
     if (dom.wallsBasisLabel) {
       dom.wallsBasisLabel.textContent = "NO DATA";
     }
@@ -740,11 +1126,61 @@
     };
   }
 
+  var DTE_BUCKET_DEFS = [
+    { key: "BUCKET:30-60", label: "30\u201360d", min: 30, max: 60 },
+    { key: "BUCKET:61-90", label: "61\u201390d", min: 61, max: 90 },
+    { key: "BUCKET:91-120", label: "91\u2013120d", min: 91, max: 120 },
+  ];
+
+  function matchesDteFilterValue(dteVal, expiryStr, filterVal) {
+    if (!filterVal || filterVal === "ALL") return true;
+    for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
+      if (DTE_BUCKET_DEFS[b].key === filterVal) {
+        var nDte = Number(dteVal);
+        return !isNaN(nDte) && nDte >= DTE_BUCKET_DEFS[b].min && nDte <= DTE_BUCKET_DEFS[b].max;
+      }
+    }
+    return String(expiryStr) === String(filterVal);
+  }
+
+  function formatDteBucketLabel(filterVal) {
+    for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
+      if (DTE_BUCKET_DEFS[b].key === filterVal) return DTE_BUCKET_DEFS[b].label;
+    }
+    return String(filterVal || "");
+  }
+
+  function appendDteBucketOptions(selectEl, expiries, previous) {
+    var matchingBuckets = [];
+    for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
+      var def = DTE_BUCKET_DEFS[b];
+      var cnt = 0;
+      for (var e = 0; e < expiries.length; e++) {
+        if (expiries[e].dte >= def.min && expiries[e].dte <= def.max) cnt += 1;
+      }
+      if (cnt > 0) {
+        matchingBuckets.push({ def: def, cnt: cnt });
+      }
+    }
+    if (!matchingBuckets.length) return;
+    var group = document.createElement("optgroup");
+    group.label = "DTE Buckets (30\u2013120d)";
+    for (var m = 0; m < matchingBuckets.length; m++) {
+      var item = matchingBuckets[m];
+      var bOpt = document.createElement("option");
+      bOpt.value = item.def.key;
+      bOpt.textContent = item.def.label + " (" + item.cnt + " exp)";
+      if (bOpt.value === previous) bOpt.selected = true;
+      group.appendChild(bOpt);
+    }
+    selectEl.appendChild(group);
+  }
+
   function syncWallsSplitCheckboxState() {
     if (!dom.wallsSplitDte) return;
     var dteVal = dom.wallsDteSelect ? dom.wallsDteSelect.value : "ALL";
     var metricVal = dom.wallsMetricSelect ? dom.wallsMetricSelect.value : "auto";
-    var canSplit = dteVal === "ALL" && metricVal !== "overlay";
+    var canSplit = (dteVal === "ALL" || dteVal.indexOf("BUCKET:") === 0) && metricVal !== "overlay";
     dom.wallsSplitDte.disabled = !canSplit;
     if (dom.wallsSplitDteWrap) {
       dom.wallsSplitDteWrap.classList.toggle("is-disabled", !canSplit);
@@ -753,7 +1189,7 @@
 
   function populateWallsDteFilter(data) {
     if (!dom.wallsDteSelect) return;
-    var previous = dom.wallsDteSelect.value || "ALL";
+    var rawPrev = dom.wallsDteSelect.value || "ALL";
     dom.wallsDteSelect.innerHTML = "";
 
     var defaultOpt = document.createElement("option");
@@ -772,6 +1208,11 @@
       return;
     }
 
+    var previous = snapDteValueToExpiries(rawPrev, expiries, {
+      allowBuckets: true,
+      emptyValue: "ALL",
+    });
+
     var minDte = expiries[0].dte;
     var maxDte = expiries[expiries.length - 1].dte;
     var dteSpan = minDte === maxDte ? minDte + "d" : minDte + "\u2013" + maxDte + "d";
@@ -779,6 +1220,10 @@
       "All DTEs (" + dteSpan + " \u2022 " + expiries.length + " exp)";
     dom.wallsDteSelect.appendChild(defaultOpt);
 
+    appendDteBucketOptions(dom.wallsDteSelect, expiries, previous);
+
+    var expGroup = document.createElement("optgroup");
+    expGroup.label = "Expirations";
     for (var i = 0; i < expiries.length; i++) {
       var exp = expiries[i];
       var opt = document.createElement("option");
@@ -787,7 +1232,11 @@
       if (opt.value === previous) {
         opt.selected = true;
       }
-      dom.wallsDteSelect.appendChild(opt);
+      expGroup.appendChild(opt);
+    }
+    dom.wallsDteSelect.appendChild(expGroup);
+    if (previous) {
+      dom.wallsDteSelect.value = previous;
     }
     syncWallsSplitCheckboxState();
   }
@@ -933,6 +1382,135 @@
     };
   }
 
+  /**
+   * Derive true strike spacing, per-bar widths/offsets, array ticks, and padded range
+   * from active plotted strikes so `$0.5/$1/$2.5/$5/$10/$25+` and mixed grids scale natively.
+   */
+  function computeStrikeAxisGeometry(strikes, metaStrikeStep, spot, callWall, putWall) {
+    var count = Array.isArray(strikes) ? strikes.length : 0;
+    var fallbackStep = Number(metaStrikeStep) > 0 ? Number(metaStrikeStep) : 5;
+    if (count === 0) {
+      return {
+        minStep: fallbackStep,
+        maxStep: fallbackStep,
+        modalStep: fallbackStep,
+        distinctSteps: [],
+        localSteps: [],
+        localStepByKey: {},
+        tickvals: [],
+        ticktext: [],
+        axisRange: null,
+        stepBadgeText: formatStepShort(metaStrikeStep) + " STEP",
+      };
+    }
+
+    var diffs = [];
+    var minStep = Infinity;
+    var maxStep = 0;
+    var diffCounts = {};
+    for (var i = 1; i < count; i++) {
+      var rawDiff = strikes[i] - strikes[i - 1];
+      if (rawDiff > 1e-6) {
+        var d = Math.round(rawDiff * 10000) / 10000;
+        diffs.push(d);
+        if (d < minStep) minStep = d;
+        if (d > maxStep) maxStep = d;
+        var dKey = d.toFixed(4);
+        if (!diffCounts[dKey]) {
+          diffCounts[dKey] = { step: d, count: 0 };
+        }
+        diffCounts[dKey].count += 1;
+      }
+    }
+
+    var modalStep = fallbackStep;
+    var distinctSteps = [];
+    if (diffs.length > 0) {
+      var bestEntry = null;
+      Object.keys(diffCounts).forEach(function (k) {
+        var entry = diffCounts[k];
+        distinctSteps.push(entry.step);
+        if (
+          !bestEntry ||
+          entry.count > bestEntry.count ||
+          (entry.count === bestEntry.count && entry.step < bestEntry.step)
+        ) {
+          bestEntry = entry;
+        }
+      });
+      distinctSteps.sort(function (a, b) {
+        return a - b;
+      });
+      if (bestEntry) modalStep = bestEntry.step;
+    } else {
+      minStep = fallbackStep;
+      maxStep = fallbackStep;
+    }
+
+    var localSteps = [];
+    var localStepByKey = {};
+    if (count === 1 || diffs.length === 0) {
+      localSteps.push(fallbackStep);
+      localStepByKey[Number(strikes[0]).toFixed(4)] = fallbackStep;
+    } else {
+      var hasMixedSteps = distinctSteps.length > 1;
+      var mixedCap = modalStep * 1.5;
+      for (var sIdx = 0; sIdx < count; sIdx++) {
+        var prevDiff = sIdx > 0 ? diffs[sIdx - 1] : diffs[0];
+        var nextDiff = sIdx < count - 1 ? diffs[sIdx] : diffs[diffs.length - 1];
+        var localGap = Math.min(prevDiff, nextDiff);
+        var effStep = hasMixedSteps ? Math.min(localGap, mixedCap) : localGap;
+        localSteps.push(effStep);
+        localStepByKey[Number(strikes[sIdx]).toFixed(4)] = effStep;
+      }
+    }
+
+    var tickvals = [];
+    var ticktext = [];
+    if (count <= 22) {
+      for (var tIdx = 0; tIdx < count; tIdx++) {
+        tickvals.push(strikes[tIdx]);
+        ticktext.push(formatStrikeShort(strikes[tIdx]));
+      }
+    } else {
+      var stride = Math.ceil(count / 18);
+      for (var kIdx = 0; kIdx < count; kIdx += stride) {
+        tickvals.push(strikes[kIdx]);
+        ticktext.push(formatStrikeShort(strikes[kIdx]));
+      }
+    }
+
+    var coords = [strikes[0], strikes[count - 1]];
+    if (spot > 0 && !Number.isNaN(Number(spot))) coords.push(Number(spot));
+    if (callWall && !Number.isNaN(Number(callWall.strike))) coords.push(Number(callWall.strike));
+    if (putWall && !Number.isNaN(Number(putWall.strike))) coords.push(Number(putWall.strike));
+    var minCoord = Math.min.apply(null, coords);
+    var maxCoord = Math.max.apply(null, coords);
+    var edgeFirst = localSteps[0] || modalStep || fallbackStep;
+    var edgeLast = localSteps[localSteps.length - 1] || modalStep || fallbackStep;
+    var axisRange = [minCoord - 0.6 * edgeFirst, maxCoord + 0.6 * edgeLast];
+
+    var stepBadgeText =
+      distinctSteps.length === 1
+        ? formatStepShort(distinctSteps[0]) + " STEP"
+        : distinctSteps.length > 1
+        ? formatStepShort(minStep) + "\u2013" + formatStepShort(maxStep) + " STEP"
+        : formatStepShort(metaStrikeStep) + " STEP";
+
+    return {
+      minStep: minStep,
+      maxStep: maxStep,
+      modalStep: modalStep,
+      distinctSteps: distinctSteps,
+      localSteps: localSteps,
+      localStepByKey: localStepByKey,
+      tickvals: tickvals,
+      ticktext: ticktext,
+      axisRange: axisRange,
+      stepBadgeText: stepBadgeText,
+    };
+  }
+
   function renderWallsChart(data, t) {
     var el = document.getElementById("chart-walls");
     if (!el || typeof window.Plotly === "undefined") return;
@@ -948,12 +1526,9 @@
     var dteSel = dom.wallsDteSelect ? dom.wallsDteSelect.value : "ALL";
     syncWallsSplitCheckboxState();
 
-    var activeExpiries =
-      dteSel === "ALL"
-        ? allExpiries
-        : allExpiries.filter(function (exp) {
-            return exp.expiry === dteSel;
-          });
+    var activeExpiries = allExpiries.filter(function (exp) {
+      return matchesDteFilterValue(exp.dte, exp.expiry, dteSel);
+    });
 
     if (!activeExpiries.length) {
       window.Plotly.purge(el);
@@ -971,46 +1546,9 @@
     var splitByDte = Boolean(
       dom.wallsSplitDte &&
         dom.wallsSplitDte.checked &&
-        dteSel === "ALL" &&
+        (dteSel === "ALL" || dteSel.indexOf("BUCKET:") === 0) &&
         effectiveMetric !== "overlay"
     );
-
-    var metricBadgeText =
-      effectiveMetric === "overlay"
-        ? "OI + VOLUME"
-        : effectiveMetric === "volume"
-        ? metricSel === "auto"
-          ? "VOLUME [FALLBACK]"
-          : "VOLUME"
-        : "OPEN INTEREST";
-    var viewBadgeText = viewMode === "grouped" ? "GROUPED" : "LADDER";
-    var dteBadgeText = "";
-    if (dteSel === "ALL") {
-      var dteList = activeExpiries
-        .map(function (exp) {
-          return exp.dte + "d";
-        })
-        .join(", ");
-      var firstExp = formatExpiryIso(activeExpiries[0].expiry);
-      var lastExp = formatExpiryIso(activeExpiries[activeExpiries.length - 1].expiry);
-      var expSpan = firstExp === lastExp ? firstExp : firstExp + ".." + lastExp;
-      dteBadgeText = "DTEs: " + dteList + " (" + expSpan + ")";
-    } else {
-      var onlyExp = activeExpiries[0];
-      dteBadgeText = "DTE: " + onlyExp.dte + "d (EXP " + formatExpiryIso(onlyExp.expiry) + ")";
-    }
-    var pullScopeLabel =
-      data.meta && (data.meta.range_pct !== null || data.meta.strike_step !== null)
-        ? " \u2022 " +
-          formatRangeShort(data.meta.range_pct) +
-          " / " +
-          formatStepShort(data.meta.strike_step) +
-          " STEP"
-        : "";
-    if (dom.wallsBasisLabel) {
-      dom.wallsBasisLabel.textContent =
-        viewBadgeText + " \u2022 " + metricBadgeText + pullScopeLabel + " \u2022 " + dteBadgeText;
-    }
 
     var spot = Number(data.meta.underlying_price || 0);
     var strikeMap = {};
@@ -1062,12 +1600,63 @@
       return s.strike;
     });
 
-    var minStep = 5;
-    for (var sIdx = 1; sIdx < strikes.length; sIdx++) {
-      var diff = strikes[sIdx] - strikes[sIdx - 1];
-      if (diff > 0 && diff < minStep) {
-        minStep = diff;
-      }
+    var wallMetricKey =
+      effectiveMetric === "overlay"
+        ? data.walls.primary_basis === "VOLUME"
+          ? "volume"
+          : "oi"
+        : effectiveMetric;
+    var callWall = resolveWallCandidate(data, activeExpiries, dteSel, wallMetricKey, "C");
+    var putWall = resolveWallCandidate(data, activeExpiries, dteSel, wallMetricKey, "P");
+    var sameWallStrike = Boolean(
+      callWall && putWall && Math.abs(callWall.strike - putWall.strike) < 1e-6
+    );
+    var axisGeo = computeStrikeAxisGeometry(
+      strikes,
+      data.meta ? data.meta.strike_step : null,
+      spot,
+      callWall,
+      putWall
+    );
+
+    var metricBadgeText =
+      effectiveMetric === "overlay"
+        ? "OI + VOLUME"
+        : effectiveMetric === "volume"
+        ? metricSel === "auto"
+          ? "VOLUME [FALLBACK]"
+          : "VOLUME"
+        : "OPEN INTEREST";
+    var viewBadgeText = viewMode === "grouped" ? "GROUPED" : "LADDER";
+    var dteBadgeText = "";
+    if (dteSel === "ALL" || dteSel.indexOf("BUCKET:") === 0) {
+      var dteList = activeExpiries
+        .map(function (exp) {
+          return exp.dte + "d";
+        })
+        .join(", ");
+      var firstExp = formatExpiryIso(activeExpiries[0].expiry);
+      var lastExp = formatExpiryIso(activeExpiries[activeExpiries.length - 1].expiry);
+      var expSpan = firstExp === lastExp ? firstExp : firstExp + ".." + lastExp;
+      var bucketPrefix =
+        dteSel.indexOf("BUCKET:") === 0 ? formatDteBucketLabel(dteSel) + ": " : "DTEs: ";
+      dteBadgeText = bucketPrefix + dteList + " (" + expSpan + ")";
+    } else {
+      var onlyExp = activeExpiries[0];
+      dteBadgeText = "DTE: " + onlyExp.dte + "d (EXP " + formatExpiryIso(onlyExp.expiry) + ")";
+    }
+    var rangeBadgePart =
+      data.meta && data.meta.range_pct !== null && data.meta.range_pct !== undefined
+        ? formatRangeShort(data.meta.range_pct)
+        : "";
+    var stepBadgePart = axisGeo.stepBadgeText || "";
+    var scopePieces = [];
+    if (rangeBadgePart) scopePieces.push(rangeBadgePart);
+    if (stepBadgePart && stepBadgePart !== "\u2014 STEP") scopePieces.push(stepBadgePart);
+    var pullScopeLabel = scopePieces.length ? " \u2022 " + scopePieces.join(" / ") : "";
+    if (dom.wallsBasisLabel) {
+      dom.wallsBasisLabel.textContent =
+        viewBadgeText + " \u2022 " + metricBadgeText + pullScopeLabel + " \u2022 " + dteBadgeText;
     }
 
     var strikeMeta = sorted.map(function (s) {
@@ -1151,6 +1740,16 @@
       "%{customdata[6]}" +
       "%{customdata[7]}<extra></extra>";
 
+    function scaleSteps(factor) {
+      return axisGeo.localSteps.map(function (stepVal) {
+        return stepVal * factor;
+      });
+    }
+    var ladderBarWidths = scaleSteps(0.78);
+    var groupedSideWidths = scaleSteps(0.36);
+    var groupedCallOffsets = scaleSteps(-0.38);
+    var groupedPutOffsets = scaleSteps(0.02);
+
     if (effectiveMetric === "overlay") {
       barmode = "overlay";
       var callOiVals = sorted.map(function (s) {
@@ -1180,19 +1779,19 @@
         return [m.strikeStr, m.pctStr, m.callOiStr, m.callVolStr, m.putOiStr, m.putVolStr, m.dteHtml];
       });
 
-      var slot = minStep * 0.4;
+      var groupedVolWidths = scaleSteps(0.2);
       var oiOptsCall = isLadder
-        ? { width: minStep * 0.78, opacity: 0.34 }
-        : { offset: -slot * 0.95, width: slot * 0.9, opacity: 0.34 };
+        ? { width: ladderBarWidths, opacity: 0.34 }
+        : { offset: groupedCallOffsets, width: groupedSideWidths, opacity: 0.34 };
       var volOptsCall = isLadder
-        ? { width: minStep * 0.42, opacity: 1 }
-        : { offset: -slot * 0.75, width: slot * 0.5, opacity: 1 };
+        ? { width: scaleSteps(0.42), opacity: 1 }
+        : { offset: scaleSteps(-0.3), width: groupedVolWidths, opacity: 1 };
       var oiOptsPut = isLadder
-        ? { width: minStep * 0.78, opacity: 0.34 }
-        : { offset: slot * 0.05, width: slot * 0.9, opacity: 0.34 };
+        ? { width: ladderBarWidths, opacity: 0.34 }
+        : { offset: groupedPutOffsets, width: groupedSideWidths, opacity: 0.34 };
       var volOptsPut = isLadder
-        ? { width: minStep * 0.42, opacity: 1 }
-        : { offset: slot * 0.25, width: slot * 0.5, opacity: 1 };
+        ? { width: scaleSteps(0.42), opacity: 1 }
+        : { offset: scaleSteps(0.1), width: groupedVolWidths, opacity: 1 };
 
       function makeOverlayTrace(name, vals, color, opts) {
         var tr = Object.assign(
@@ -1281,28 +1880,35 @@
           ]);
         }
 
-        traces.push({
+        var callSplitTrace = {
           type: "bar",
           orientation: isLadder ? "h" : "v",
           name: "C " + bObj.dte + "d",
           x: isLadder ? callSlice : strikes,
           y: isLadder ? strikes : callSlice,
           offsetgroup: isLadder ? undefined : "calls",
+          width: isLadder ? ladderBarWidths : groupedSideWidths,
           marker: { color: callColor },
           customdata: callCustom,
           hovertemplate: splitHoverTemplate,
-        });
-        traces.push({
+        };
+        var putSplitTrace = {
           type: "bar",
           orientation: isLadder ? "h" : "v",
           name: "P " + bObj.dte + "d",
           x: isLadder ? putSlice : strikes,
           y: isLadder ? strikes : putSlice,
           offsetgroup: isLadder ? undefined : "puts",
+          width: isLadder ? ladderBarWidths : groupedSideWidths,
           marker: { color: putColor },
           customdata: putCustom,
           hovertemplate: splitHoverTemplate,
-        });
+        };
+        if (!isLadder) {
+          callSplitTrace.offset = groupedCallOffsets;
+          putSplitTrace.offset = groupedPutOffsets;
+        }
+        traces.push(callSplitTrace, putSplitTrace);
       }
     } else {
       barmode = isLadder ? "relative" : "group";
@@ -1321,28 +1927,33 @@
       var customC = buildCombinedHover("CALLS", callTitle, effectiveMetric);
       var customP = buildCombinedHover("PUTS", putTitle, effectiveMetric);
 
-      traces.push(
-        {
-          type: "bar",
-          orientation: isLadder ? "h" : "v",
-          name: "Calls",
-          x: isLadder ? callVals : strikes,
-          y: isLadder ? strikes : callVals,
-          marker: { color: t.call },
-          customdata: customC,
-          hovertemplate: combinedHoverTemplate,
-        },
-        {
-          type: "bar",
-          orientation: isLadder ? "h" : "v",
-          name: "Puts",
-          x: isLadder ? putVals : strikes,
-          y: isLadder ? strikes : putVals,
-          marker: { color: t.put },
-          customdata: customP,
-          hovertemplate: combinedHoverTemplate,
-        }
-      );
+      var callStdTrace = {
+        type: "bar",
+        orientation: isLadder ? "h" : "v",
+        name: "Calls",
+        x: isLadder ? callVals : strikes,
+        y: isLadder ? strikes : callVals,
+        width: isLadder ? ladderBarWidths : groupedSideWidths,
+        marker: { color: t.call },
+        customdata: customC,
+        hovertemplate: combinedHoverTemplate,
+      };
+      var putStdTrace = {
+        type: "bar",
+        orientation: isLadder ? "h" : "v",
+        name: "Puts",
+        x: isLadder ? putVals : strikes,
+        y: isLadder ? strikes : putVals,
+        width: isLadder ? ladderBarWidths : groupedSideWidths,
+        marker: { color: t.put },
+        customdata: customP,
+        hovertemplate: combinedHoverTemplate,
+      };
+      if (!isLadder) {
+        callStdTrace.offset = groupedCallOffsets;
+        putStdTrace.offset = groupedPutOffsets;
+      }
+      traces.push(callStdTrace, putStdTrace);
     }
 
     var showAnomalies = Boolean(dom.wallsShowAnomalies && dom.wallsShowAnomalies.checked);
@@ -1440,7 +2051,12 @@
               if (tipVal > maxLeft) maxLeft = tipVal;
             }
           } else {
-            var sideOffset = minStep * 0.2;
+            var anomStrikeKey = Number(grp.strike).toFixed(4);
+            var strikeLocalStep =
+              axisGeo.localStepByKey[anomStrikeKey] !== undefined
+                ? axisGeo.localStepByKey[anomStrikeKey]
+                : axisGeo.modalStep;
+            var sideOffset = strikeLocalStep * 0.2;
             anomX.push(isCall ? grp.strike - sideOffset : grp.strike + sideOffset);
             anomY.push(tipVal);
           }
@@ -1469,18 +2085,6 @@
     if (dom.wallsBasisLabel && showAnomalies) {
       dom.wallsBasisLabel.textContent += " \u2022 ANOMALIES: " + anomTotalCount;
     }
-
-    var wallMetricKey =
-      effectiveMetric === "overlay"
-        ? data.walls.primary_basis === "VOLUME"
-          ? "volume"
-          : "oi"
-        : effectiveMetric;
-    var callWall = resolveWallCandidate(data, activeExpiries, dteSel, wallMetricKey, "C");
-    var putWall = resolveWallCandidate(data, activeExpiries, dteSel, wallMetricKey, "P");
-    var sameWallStrike = Boolean(
-      callWall && putWall && Math.abs(callWall.strike - putWall.strike) < 1e-6
-    );
 
     var markers = [
       makeWallReferenceMarker(
@@ -1535,9 +2139,12 @@
     layout.barmode = barmode;
     layout.hovermode = "closest";
 
+    var hasDecimalStrikeTicks = axisGeo.ticktext.some(function (lbl) {
+      return lbl.indexOf(".") !== -1;
+    });
     if (isLadder) {
       var tickCfg = buildSymmetricPositiveTicks(maxLeft, maxRight);
-      layout.margin.l = 58;
+      layout.margin.l = hasDecimalStrikeTicks ? 68 : 58;
       layout.xaxis.tickmode = "array";
       layout.xaxis.tickvals = tickCfg.tickvals;
       layout.xaxis.ticktext = tickCfg.ticktext;
@@ -1545,9 +2152,21 @@
       layout.xaxis.zeroline = true;
       layout.xaxis.zerolinewidth = 1.5;
       layout.xaxis.zerolinecolor = t.ink;
-      layout.yaxis.tickprefix = "$";
+      layout.yaxis.tickmode = "array";
+      layout.yaxis.tickvals = axisGeo.tickvals;
+      layout.yaxis.ticktext = axisGeo.ticktext;
+      layout.yaxis.tickprefix = "";
+      if (axisGeo.axisRange) {
+        layout.yaxis.range = axisGeo.axisRange;
+      }
     } else {
-      layout.xaxis.tickprefix = "$";
+      layout.xaxis.tickmode = "array";
+      layout.xaxis.tickvals = axisGeo.tickvals;
+      layout.xaxis.ticktext = axisGeo.ticktext;
+      layout.xaxis.tickprefix = "";
+      if (axisGeo.axisRange) {
+        layout.xaxis.range = axisGeo.axisRange;
+      }
       layout.yaxis.rangemode = "nonnegative";
     }
 
@@ -1805,6 +2424,16 @@
     else if (panelId === "iv_smile") renderIvSmileChart(data, theme);
     else if (panelId === "anomalies") renderAnomaliesChart(data, theme);
     else if (panelId === "greeks") renderGreeksChart(data, theme);
+    else if (panelId === "corridor") {
+      var preview = state.corridorFrame || buildLocalCorridorPreview(data);
+      if (preview) renderCorridorChart(preview, theme);
+    } else if (panelId === "strategy") {
+      if (state.strategyEvaluation) {
+        renderStrategyPayoffChart(state.strategyEvaluation, theme);
+      } else if (isStrategyAutoPopulateEnabled() && data) {
+        maybeAutoPopulateStrategy(data);
+      }
+    }
   }
 
   function applyPanelVisibility(nextVis, options) {
@@ -1816,6 +2445,10 @@
           ? nextVis[pid]
           : DEFAULT_PANEL_VISIBILITY[pid];
     });
+
+    if (!normalized.corridor && state.corridorStreaming) {
+      stopCorridorStream({ silent: true });
+    }
 
     var revealed = [];
     Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (pid) {
@@ -1872,33 +2505,480 @@
     if (isPanelVisible("iv_smile")) renderIvSmileChart(data, t);
     if (isPanelVisible("anomalies")) renderAnomaliesChart(data, t);
     if (isPanelVisible("greeks")) renderGreeksChart(data, t);
+    if (isPanelVisible("corridor")) {
+      var cFrame = state.corridorFrame || buildLocalCorridorPreview(data);
+      if (cFrame) renderCorridorChart(cFrame, t);
+    }
+    if (isPanelVisible("strategy") && state.strategyEvaluation) {
+      renderStrategyPayoffChart(state.strategyEvaluation, t);
+    }
   }
 
   // ------------------------------------------------------------------ Option Chain Table
+  var TABLE_COLUMNS = [
+    {
+      key: "expiry",
+      type: "string",
+      defaultDir: "asc",
+      filterType: "select",
+      getValue: function (r) {
+        return r.expiry;
+      },
+    },
+    {
+      key: "dte",
+      type: "number",
+      defaultDir: "asc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.dte;
+      },
+    },
+    {
+      key: "right",
+      type: "string",
+      defaultDir: "asc",
+      filterType: "select",
+      getValue: function (r) {
+        return r.right;
+      },
+    },
+    {
+      key: "strike",
+      type: "number",
+      defaultDir: "asc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.strike;
+      },
+    },
+    {
+      key: "moneyness_pct",
+      type: "number",
+      defaultDir: "asc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.moneyness_pct;
+      },
+    },
+    {
+      key: "bid",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.bid;
+      },
+    },
+    {
+      key: "ask",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.ask;
+      },
+    },
+    {
+      key: "mark_price",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.mark_price;
+      },
+    },
+    {
+      key: "volume",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.volume;
+      },
+    },
+    {
+      key: "open_interest",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.open_interest;
+      },
+    },
+    {
+      key: "vol_oi",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (_r, volOi) {
+        return volOi;
+      },
+    },
+    {
+      key: "iv",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.iv !== null && r.iv !== undefined ? Number(r.iv) * 100 : null;
+      },
+    },
+    {
+      key: "delta",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.delta;
+      },
+    },
+    {
+      key: "gamma",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.gamma;
+      },
+    },
+    {
+      key: "theta",
+      type: "number",
+      defaultDir: "asc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.theta;
+      },
+    },
+    {
+      key: "vega",
+      type: "number",
+      defaultDir: "desc",
+      filterType: "expr",
+      getValue: function (r) {
+        return r.vega;
+      },
+    },
+    {
+      key: "greeks_source",
+      type: "string",
+      defaultDir: "asc",
+      filterType: "select",
+      getValue: function (r) {
+        return r.greeks_source;
+      },
+    },
+  ];
+
+  var TABLE_COLUMN_BY_KEY = {};
+  for (var tci = 0; tci < TABLE_COLUMNS.length; tci++) {
+    TABLE_COLUMN_BY_KEY[TABLE_COLUMNS[tci].key] = TABLE_COLUMNS[tci];
+  }
+
+  function computeContractVolOi(cRow) {
+    var vol = cRow.volume !== null && cRow.volume !== undefined ? Number(cRow.volume) : null;
+    var oi =
+      cRow.open_interest !== null && cRow.open_interest !== undefined
+        ? Number(cRow.open_interest)
+        : null;
+    if (vol !== null && oi !== null && isFinite(vol) && isFinite(oi) && oi > 0) {
+      return vol / oi;
+    }
+    return null;
+  }
+
+  function readTableSortPref() {
+    try {
+      var raw = window.localStorage.getItem(TABLE_SORT_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (
+          parsed &&
+          TABLE_COLUMN_BY_KEY[parsed.col] &&
+          (parsed.dir === "asc" || parsed.dir === "desc")
+        ) {
+          return { col: parsed.col, dir: parsed.dir };
+        }
+      }
+    } catch (_err) {
+      /* ignore storage failure */
+    }
+    return { col: null, dir: null };
+  }
+
+  function writeTableSortPref(sortObj) {
+    try {
+      if (sortObj && sortObj.col && sortObj.dir) {
+        window.localStorage.setItem(TABLE_SORT_KEY, JSON.stringify(sortObj));
+      } else {
+        window.localStorage.removeItem(TABLE_SORT_KEY);
+      }
+    } catch (_err) {
+      /* ignore storage failure */
+    }
+  }
+
+  function syncTableHeaderSortUI() {
+    if (!dom.chainTableHead) return;
+    var buttons = dom.chainTableHead.querySelectorAll(".th-sort-btn[data-sort-col]");
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      var col = btn.getAttribute("data-sort-col");
+      var th = btn.parentElement;
+      var ind = btn.querySelector(".th-sort-ind");
+      var ariaVal = "none";
+      var glyph = "\u21C5";
+      if (state.tableSort && state.tableSort.col === col && state.tableSort.dir) {
+        ariaVal = state.tableSort.dir === "asc" ? "ascending" : "descending";
+        glyph = state.tableSort.dir === "asc" ? "\u25B2" : "\u25BC";
+      }
+      if (th) th.setAttribute("aria-sort", ariaVal);
+      if (ind) ind.textContent = glyph;
+    }
+  }
+
+  function matchesNumericFilterExpr(value, rawExpr) {
+    var trimmed = String(rawExpr || "").trim();
+    if (!trimmed) return true;
+    var clean = trimmed.replace(/%/g, "").trim();
+    if (!clean) return true;
+
+    if (value === null || value === undefined || value === "") return false;
+    var num = Number(value);
+    if (!isFinite(num)) return false;
+
+    var cmpMatch = clean.match(/^(>=|<=|!=|>|<|=)\s*(-?\d+(?:\.\d+)?)$/);
+    if (cmpMatch) {
+      var op = cmpMatch[1];
+      var rhs = Number(cmpMatch[2]);
+      if (!isFinite(rhs)) return true;
+      if (op === ">=") return num >= rhs;
+      if (op === "<=") return num <= rhs;
+      if (op === ">") return num > rhs;
+      if (op === "<") return num < rhs;
+      if (op === "!=") return Math.abs(num - rhs) >= 1e-6;
+      return Math.abs(num - rhs) < 1e-6;
+    }
+
+    var rangeDots = clean.match(/^(-?\d+(?:\.\d+)?)\s*\.\.\s*(-?\d+(?:\.\d+)?)$/);
+    var rangeDash = clean.match(/^(-?\d+(?:\.\d+)?)\s*-\s*(-?\d+(?:\.\d+)?)$/);
+    var rangeMatch = rangeDots || rangeDash;
+    if (rangeMatch) {
+      var lo = Number(rangeMatch[1]);
+      var hi = Number(rangeMatch[2]);
+      if (!isFinite(lo) || !isFinite(hi)) return true;
+      var minVal = Math.min(lo, hi);
+      var maxVal = Math.max(lo, hi);
+      return num >= minVal - 1e-9 && num <= maxVal + 1e-9;
+    }
+
+    var bareMatch = clean.match(/^(-?\d+(?:\.\d+)?)$/);
+    if (bareMatch) {
+      var target = Number(bareMatch[1]);
+      if (Math.abs(num - target) < 1e-6) return true;
+      return String(num).indexOf(clean) !== -1;
+    }
+
+    // Incomplete operator expression mid-keystroke (e.g. ">", "-", "30.."): do not blank table.
+    return true;
+  }
+
+  function applyTableSort(entries) {
+    var sortCfg = state.tableSort || {};
+    if (!sortCfg.col || !sortCfg.dir) return entries;
+    var colDef = TABLE_COLUMN_BY_KEY[sortCfg.col];
+    if (!colDef) return entries;
+    var dirMult = sortCfg.dir === "desc" ? -1 : 1;
+
+    var copy = entries.slice();
+    copy.sort(function (a, b) {
+      var va = colDef.getValue(a.row, a.volOi);
+      var vb = colDef.getValue(b.row, b.volOi);
+      var aMissing =
+        va === null ||
+        va === undefined ||
+        va === "" ||
+        (colDef.type === "number" && !isFinite(Number(va)));
+      var bMissing =
+        vb === null ||
+        vb === undefined ||
+        vb === "" ||
+        (colDef.type === "number" && !isFinite(Number(vb)));
+
+      // Missing values always sink to the bottom regardless of asc/desc.
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+
+      var cmp = 0;
+      if (colDef.type === "number") {
+        cmp = Number(va) - Number(vb);
+      } else {
+        var sa = String(va);
+        var sb = String(vb);
+        cmp = sa < sb ? -1 : sa > sb ? 1 : 0;
+      }
+      if (cmp !== 0) return cmp * dirMult;
+
+      // Deterministic tie-breaker: (dte asc, strike asc, right asc)
+      var dteDiff = (Number(a.row.dte) || 0) - (Number(b.row.dte) || 0);
+      if (dteDiff !== 0) return dteDiff;
+      var strikeDiff = (Number(a.row.strike) || 0) - (Number(b.row.strike) || 0);
+      if (strikeDiff !== 0) return strikeDiff;
+      return a.row.right < b.row.right ? -1 : a.row.right > b.row.right ? 1 : 0;
+    });
+    return copy;
+  }
+
+  function updateHeaderFilterHighlights() {
+    if (!dom.chainTableHead) return;
+    var controls = dom.chainTableHead.querySelectorAll("[data-filter-col]");
+    for (var i = 0; i < controls.length; i++) {
+      var ctrl = controls[i];
+      var col = ctrl.getAttribute("data-filter-col");
+      var active = Boolean(col && state.tableFilters[col]);
+      ctrl.classList.toggle("is-filtered", active);
+    }
+  }
+
+  function populateTableHeaderFilters(data) {
+    if (dom.thFilterExpiry) {
+      var curExp = state.tableFilters.expiry || "";
+      dom.thFilterExpiry.innerHTML = '<option value="">All</option>';
+      var exps =
+        data && data.profiles && data.profiles.expiries ? data.profiles.expiries.slice() : [];
+      exps.sort(function (a, b) {
+        return a.dte - b.dte;
+      });
+      var expMatched = false;
+      for (var i = 0; i < exps.length; i++) {
+        var opt = document.createElement("option");
+        opt.value = exps[i].expiry;
+        opt.textContent = formatExpiryIso(exps[i].expiry) + " (" + exps[i].dte + "d)";
+        if (curExp && curExp === exps[i].expiry) {
+          opt.selected = true;
+          expMatched = true;
+        }
+        dom.thFilterExpiry.appendChild(opt);
+      }
+      if (curExp && !expMatched) {
+        state.tableFilters.expiry = "";
+      }
+    }
+
+    if (dom.thFilterSource) {
+      var curSrc = state.tableFilters.greeks_source || "";
+      var seenSrc = { IBKR_MODEL: true, BSM_FALLBACK: true, NONE: true };
+      if (data && data.contracts) {
+        for (var j = 0; j < data.contracts.length; j++) {
+          var src = data.contracts[j].greeks_source;
+          if (src) seenSrc[src] = true;
+        }
+      }
+      dom.thFilterSource.innerHTML = '<option value="">All</option>';
+      var orderedSources = ["IBKR_MODEL", "BSM_FALLBACK", "NONE"];
+      Object.keys(seenSrc).forEach(function (k) {
+        if (orderedSources.indexOf(k) === -1) orderedSources.push(k);
+      });
+      for (var s = 0; s < orderedSources.length; s++) {
+        var sOpt = document.createElement("option");
+        sOpt.value = orderedSources[s];
+        sOpt.textContent = orderedSources[s];
+        if (curSrc === orderedSources[s]) sOpt.selected = true;
+        dom.thFilterSource.appendChild(sOpt);
+      }
+    }
+    updateHeaderFilterHighlights();
+  }
+
+  function resetAllTableFilters() {
+    state.tableFilters = {};
+    state.tableSort = { col: null, dir: null };
+    writeTableSortPref(state.tableSort);
+    if (dom.chainTableHead) {
+      var ctrls = dom.chainTableHead.querySelectorAll("[data-filter-col]");
+      for (var i = 0; i < ctrls.length; i++) {
+        ctrls[i].value = "";
+        ctrls[i].classList.remove("is-filtered");
+      }
+    }
+    if (dom.filterDte) dom.filterDte.value = "ALL";
+    if (dom.filterRight) dom.filterRight.value = "ALL";
+    if (dom.filterUnusual) dom.filterUnusual.checked = false;
+    syncDteBucketTabs(state.chainData);
+    syncTableHeaderSortUI();
+    renderTable(state.chainData);
+  }
+
+  function syncDteBucketTabs(data) {
+    if (!dom.dteBucketTabs) return;
+    var activeVal = dom.filterDte ? dom.filterDte.value : "ALL";
+    var expiries =
+      data && data.profiles && data.profiles.expiries ? data.profiles.expiries : [];
+    var buttons = dom.dteBucketTabs.querySelectorAll("[data-dte-bucket]");
+    for (var i = 0; i < buttons.length; i++) {
+      var btn = buttons[i];
+      var bucketVal = btn.getAttribute("data-dte-bucket") || "ALL";
+      var hasRows = bucketVal === "ALL";
+      if (!hasRows) {
+        for (var e = 0; e < expiries.length; e++) {
+          if (matchesDteFilterValue(expiries[e].dte, expiries[e].expiry, bucketVal)) {
+            hasRows = true;
+            break;
+          }
+        }
+      }
+      btn.disabled = expiries.length > 0 && !hasRows;
+      var isActive = activeVal === bucketVal;
+      btn.classList.toggle("active", isActive);
+      btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+    }
+  }
+
   function populateDteFilter(data) {
     if (!dom.filterDte) return;
-    var previous = dom.filterDte.value || "ALL";
+    var rawPrev = dom.filterDte.value || "ALL";
     dom.filterDte.innerHTML = '<option value="ALL">All DTEs</option>';
     var expiries =
       data && data.profiles && data.profiles.expiries ? data.profiles.expiries.slice() : [];
     expiries.sort(function (a, b) {
       return a.dte - b.dte;
     });
-    for (var i = 0; i < expiries.length; i++) {
-      var exp = expiries[i];
-      var opt = document.createElement("option");
-      opt.value = exp.expiry;
-      opt.textContent = exp.dte + "d (" + formatExpiryIso(exp.expiry) + ")";
-      if (opt.value === previous) opt.selected = true;
-      dom.filterDte.appendChild(opt);
+    var previous = snapDteValueToExpiries(rawPrev, expiries, {
+      allowBuckets: true,
+      emptyValue: "ALL",
+    });
+    if (expiries.length) {
+      appendDteBucketOptions(dom.filterDte, expiries, previous);
+      var expGroup = document.createElement("optgroup");
+      expGroup.label = "Expirations";
+      for (var i = 0; i < expiries.length; i++) {
+        var exp = expiries[i];
+        var opt = document.createElement("option");
+        opt.value = exp.expiry;
+        opt.textContent = exp.dte + "d (" + formatExpiryIso(exp.expiry) + ")";
+        if (opt.value === previous) opt.selected = true;
+        expGroup.appendChild(opt);
+      }
+      dom.filterDte.appendChild(expGroup);
     }
+    dom.filterDte.value = previous || "ALL";
+    if (dom.thFilterExpiry && previous !== rawPrev) {
+      var syncedExp = previous === "ALL" || previous.indexOf("BUCKET:") === 0 ? "" : previous;
+      dom.thFilterExpiry.value = syncedExp;
+      state.tableFilters.expiry = syncedExp;
+      updateHeaderFilterHighlights();
+    }
+    syncDteBucketTabs(data);
   }
 
   function renderTable(data) {
+    syncTableHeaderSortUI();
     if (!dom.tableBody) return;
     if (!data || !data.contracts || !data.contracts.length) {
       dom.tableBody.innerHTML =
-        '<tr><td colspan="17" class="text-left">No cached contracts available. Click REFRESH FROM IBKR.</td></tr>';
+        '<tr><td colspan="18" class="text-left">No cached contracts available. Click REFRESH FROM IBKR.</td></tr>';
       if (dom.tableRowCount) dom.tableRowCount.textContent = "0 CONTRACTS";
       return;
     }
@@ -1910,21 +2990,46 @@
       anomalyMap[item.expiry + "|" + item.strike + "|" + item.right] = item;
     }
 
-    var dteFilter = dom.filterDte ? dom.filterDte.value : "ALL";
-    var rightFilter = dom.filterRight ? dom.filterRight.value : "ALL";
+    var dteFilter = dom.filterDte && dom.filterDte.value ? dom.filterDte.value : "ALL";
+    var rightFilter = dom.filterRight && dom.filterRight.value ? dom.filterRight.value : "ALL";
     var unusualOnly = Boolean(dom.filterUnusual && dom.filterUnusual.checked);
+    var activeFilterKeys = Object.keys(state.tableFilters).filter(function (k) {
+      return Boolean(state.tableFilters[k]);
+    });
     var spot = data.meta.underlying_price;
 
     var filtered = [];
     for (var i = 0; i < data.contracts.length; i++) {
       var c = data.contracts[i];
-      if (dteFilter !== "ALL" && c.expiry !== dteFilter) continue;
+      if (!matchesDteFilterValue(c.dte, c.expiry, dteFilter)) continue;
       if (rightFilter !== "ALL" && c.right !== rightFilter) continue;
       var aKey = c.expiry + "|" + c.strike + "|" + c.right;
       var flagged = anomalyMap[aKey];
       if (unusualOnly && !flagged) continue;
-      filtered.push({ row: c, anomaly: flagged || null });
+
+      var volOi = computeContractVolOi(c);
+      var headerPass = true;
+      for (var fk = 0; fk < activeFilterKeys.length; fk++) {
+        var fKey = activeFilterKeys[fk];
+        var colDef = TABLE_COLUMN_BY_KEY[fKey];
+        if (!colDef) continue;
+        var fExpr = state.tableFilters[fKey];
+        var cellVal = colDef.getValue(c, volOi);
+        if (colDef.filterType === "select") {
+          if (String(cellVal || "") !== String(fExpr)) {
+            headerPass = false;
+            break;
+          }
+        } else if (!matchesNumericFilterExpr(cellVal, fExpr)) {
+          headerPass = false;
+          break;
+        }
+      }
+      if (!headerPass) continue;
+      filtered.push({ row: c, anomaly: flagged || null, volOi: volOi });
     }
+
+    filtered = applyTableSort(filtered);
 
     if (dom.tableRowCount) {
       dom.tableRowCount.textContent =
@@ -1933,7 +3038,7 @@
 
     if (!filtered.length) {
       dom.tableBody.innerHTML =
-        '<tr><td colspan="17" class="text-left">No contracts match the active table filters.</td></tr>';
+        '<tr><td colspan="18" class="text-left">No contracts match the active table filters.</td></tr>';
       return;
     }
 
@@ -1941,6 +3046,7 @@
     for (var r = 0; r < filtered.length; r++) {
       var cRow = filtered[r].row;
       var flag = filtered[r].anomaly;
+      var ratio = filtered[r].volOi;
       var isAtm = spot > 0 && Math.abs((cRow.strike - spot) / spot) <= 0.015;
       var classes = [];
       if (isAtm) classes.push("row-atm");
@@ -1951,7 +3057,6 @@
         cRow.open_interest !== null && cRow.open_interest !== undefined
           ? Number(cRow.open_interest)
           : null;
-      var ratio = vol !== null && oi !== null && oi > 0 ? vol / oi : null;
       var ratioWidth = ratio !== null ? Math.min(100, Math.round(ratio * 40)) : 0;
       var ratioLabel = ratio !== null ? ratio.toFixed(2) + "x" : "—";
       var flagTags = "";
@@ -2022,6 +3127,13 @@
           '<td class="text-left"><span class="source-tag">' +
           escapeHtml(cRow.greeks_source) +
           "</span></td>" +
+          '<td class="chain-leg-col"><button type="button" class="btn btn-xs chain-add-leg-btn" data-leg-expiry="' +
+          escapeHtml(cRow.expiry) +
+          '" data-leg-right="' +
+          escapeHtml(cRow.right) +
+          '" data-leg-strike="' +
+          escapeHtml(cRow.strike) +
+          '" title="Add this contract to Strategy Lab">+Leg</button></td>' +
           "</tr>"
       );
     }
@@ -2071,16 +3183,2171 @@
     updateExportLink();
   }
 
+  // ------------------------------------------------------------------ Strategy Lab & T+n Payoff
+  function strategySortedExpiries(data) {
+    if (!data || !data.contracts || !data.contracts.length) return [];
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < data.contracts.length; i++) {
+      var c = data.contracts[i];
+      if (!seen[c.expiry]) {
+        seen[c.expiry] = true;
+        out.push({ expiry: c.expiry, dte: Number(c.dte) });
+      }
+    }
+    out.sort(function (a, b) {
+      return a.dte - b.dte || String(a.expiry).localeCompare(String(b.expiry));
+    });
+    return out;
+  }
+
+  function strategyStrikesFor(data, expiry, right) {
+    if (!data || !data.contracts) return [];
+    var seen = {};
+    var strikes = [];
+    for (var i = 0; i < data.contracts.length; i++) {
+      var c = data.contracts[i];
+      if (String(c.expiry) === String(expiry) && String(c.right) === String(right)) {
+        var k = Number(c.strike);
+        if (!seen[k]) {
+          seen[k] = true;
+          strikes.push(k);
+        }
+      }
+    }
+    strikes.sort(function (a, b) {
+      return a - b;
+    });
+    return strikes;
+  }
+
+  function findLocalChainContract(data, expiry, right, strike) {
+    if (!data || !data.contracts) return null;
+    var targetK = Number(strike);
+    for (var i = 0; i < data.contracts.length; i++) {
+      var c = data.contracts[i];
+      if (
+        String(c.expiry) === String(expiry) &&
+        String(c.right) === String(right) &&
+        Math.abs(Number(c.strike) - targetK) < 1e-4
+      ) {
+        return c;
+      }
+    }
+    return null;
+  }
+
+  function nearestStrikeFromList(strikes, targetStrike) {
+    if (!strikes || !strikes.length) return null;
+    var best = strikes[0];
+    var bestDist = Math.abs(best - targetStrike);
+    for (var i = 1; i < strikes.length; i++) {
+      var d = Math.abs(strikes[i] - targetStrike);
+      if (d < bestDist) {
+        best = strikes[i];
+        bestDist = d;
+      }
+    }
+    return best;
+  }
+
+  function setActiveStrategyPresetUI(kind) {
+    state.strategyKind = kind;
+    if (!dom.strategyPresetPills) return;
+    var btns = dom.strategyPresetPills.querySelectorAll("[data-strategy-preset]");
+    for (var i = 0; i < btns.length; i++) {
+      var btn = btns[i];
+      var isMatch = btn.getAttribute("data-strategy-preset") === kind;
+      btn.classList.toggle("active", isMatch);
+      btn.setAttribute("aria-pressed", isMatch ? "true" : "false");
+    }
+  }
+
+  function buildSeedLegsFromChain(data) {
+    var exps = strategySortedExpiries(data);
+    if (!exps.length) return [];
+    var chosenExp = exps[0].expiry;
+    if (dom.strategyExpirySelect && dom.strategyExpirySelect.value) {
+      for (var i = 0; i < exps.length; i++) {
+        if (exps[i].expiry === dom.strategyExpirySelect.value) {
+          chosenExp = exps[i].expiry;
+          break;
+        }
+      }
+    }
+    var puts = strategyStrikesFor(data, chosenExp, "P");
+    if (!puts.length) {
+      var calls = strategyStrikesFor(data, chosenExp, "C");
+      if (!calls.length) return [];
+      return [
+        { side: "BUY", right: "C", expiry: chosenExp, strike: calls[0], qty: 1 },
+      ];
+    }
+    var spot = Number(data.meta.underlying_price || 100);
+    var pw =
+      data.walls && data.walls.aggregate_primary_put_wall
+        ? Number(data.walls.aggregate_primary_put_wall.strike)
+        : spot * 0.95;
+    var shortK = nearestStrikeFromList(puts, pw);
+    var lowerPuts = puts.filter(function (k) {
+      return k < shortK - 1e-6;
+    });
+    var longK = lowerPuts.length ? lowerPuts[lowerPuts.length - 1] : shortK;
+    if (Math.abs(longK - shortK) < 1e-6) {
+      return [{ side: "SELL", right: "P", expiry: chosenExp, strike: shortK, qty: 1 }];
+    }
+    return [
+      { side: "SELL", right: "P", expiry: chosenExp, strike: shortK, qty: 1 },
+      { side: "BUY", right: "P", expiry: chosenExp, strike: longK, qty: 1 },
+    ];
+  }
+
+  function renderStrategySlidersMax(maxDays) {
+    if (dom.strategyDaysSlider) {
+      var cap = Math.max(1, Number(maxDays || 120));
+      dom.strategyDaysSlider.max = String(cap);
+      if (Number(dom.strategyDaysSlider.value) > cap) {
+        dom.strategyDaysSlider.value = String(cap);
+      }
+      if (dom.strategyDaysReadout) {
+        dom.strategyDaysReadout.textContent = "T+" + dom.strategyDaysSlider.value + "d";
+      }
+    }
+    if (dom.strategyIvSlider && dom.strategyIvReadout) {
+      var ivVal = Number(dom.strategyIvSlider.value || 0);
+      dom.strategyIvReadout.textContent = (ivVal >= 0 ? "+" : "") + ivVal + "%";
+    }
+  }
+
+  function resolveLocalContractMid(contract) {
+    if (!contract) return null;
+    var bidVal = contract.bid;
+    var askVal = contract.ask;
+    if (
+      bidVal !== null &&
+      bidVal !== undefined &&
+      askVal !== null &&
+      askVal !== undefined &&
+      Number(bidVal) > 0 &&
+      Number(askVal) >= Number(bidVal)
+    ) {
+      return (Number(bidVal) + Number(askVal)) / 2.0;
+    }
+    var keys = ["mid", "mark_price", "last", "close"];
+    for (var i = 0; i < keys.length; i++) {
+      var val = contract[keys[i]];
+      if (val !== null && val !== undefined && Number(val) > 0) {
+        return Number(val);
+      }
+    }
+    if (contract.mid !== null && contract.mid !== undefined) {
+      return Number(contract.mid);
+    }
+    return null;
+  }
+
+  function findExactEvaluatedLeg(leg, evaluatedLegs) {
+    if (!leg || !Array.isArray(evaluatedLegs)) return null;
+    for (var i = 0; i < evaluatedLegs.length; i++) {
+      var evLeg = evaluatedLegs[i];
+      if (
+        String(evLeg.expiry) === String(leg.expiry) &&
+        String(evLeg.right) === String(leg.right) &&
+        Math.abs(Number(evLeg.strike) - Number(leg.strike)) < 1e-4
+      ) {
+        return evLeg;
+      }
+    }
+    return null;
+  }
+
+  function formatLegQuoteCells(localMatch, evalFallback) {
+    var srcBid =
+      localMatch && localMatch.bid !== null && localMatch.bid !== undefined
+        ? localMatch.bid
+        : evalFallback
+          ? evalFallback.bid
+          : null;
+    var srcAsk =
+      localMatch && localMatch.ask !== null && localMatch.ask !== undefined
+        ? localMatch.ask
+        : evalFallback
+          ? evalFallback.ask
+          : null;
+    var localMid = resolveLocalContractMid(localMatch);
+    var srcMid =
+      localMid !== null && localMid !== undefined
+        ? localMid
+        : evalFallback
+          ? evalFallback.mid
+          : null;
+    var srcDelta =
+      localMatch && localMatch.delta !== null && localMatch.delta !== undefined
+        ? localMatch.delta
+        : evalFallback
+          ? evalFallback.delta
+          : null;
+    var srcIv =
+      localMatch && localMatch.iv !== null && localMatch.iv !== undefined
+        ? localMatch.iv
+        : evalFallback
+          ? evalFallback.iv
+          : null;
+
+    var bidAskText =
+      (srcBid !== null && srcBid !== undefined ? fmtNum(srcBid, 2) : "\u2014") +
+      " / " +
+      (srcAsk !== null && srcAsk !== undefined ? fmtNum(srcAsk, 2) : "\u2014");
+    var midText = srcMid !== null && srcMid !== undefined ? fmtMoney(srcMid) : "\u2014";
+    var dTxt = srcDelta !== null && srcDelta !== undefined ? fmtNum(srcDelta, 2) : "\u2014";
+    var ivTxt =
+      srcIv !== null && srcIv !== undefined ? fmtNum(Number(srcIv) * 100, 1) + "%" : "\u2014";
+    return {
+      bidAskText: bidAskText,
+      midText: midText,
+      greeksText: dTxt + " \u2022 " + ivTxt,
+    };
+  }
+
+  function snapLegToValidContract(data, leg, preferAxis) {
+    if (!data || !leg) return true;
+    var directStrikes = strategyStrikesFor(data, leg.expiry, leg.right);
+    if (directStrikes.length) {
+      leg.strike = nearestStrikeFromList(directStrikes, leg.strike);
+      return true;
+    }
+    if (preferAxis === "expiry") {
+      var oppRight = leg.right === "C" ? "P" : "C";
+      var oppStrikes = strategyStrikesFor(data, leg.expiry, oppRight);
+      if (oppStrikes.length) {
+        leg.right = oppRight;
+        leg.strike = nearestStrikeFromList(oppStrikes, leg.strike);
+        return true;
+      }
+    }
+    var exps = strategySortedExpiries(data);
+    for (var i = 0; i < exps.length; i++) {
+      var candStrikes = strategyStrikesFor(data, exps[i].expiry, leg.right);
+      if (candStrikes.length) {
+        leg.expiry = exps[i].expiry;
+        leg.strike = nearestStrikeFromList(candStrikes, leg.strike);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function syncStrategyActionButtons() {
+    var hasChain = Boolean(state.chainData);
+    var hasLegs = Boolean(state.strategyLegs && state.strategyLegs.length > 0);
+    if (dom.strategyAutoBuildBtn) {
+      dom.strategyAutoBuildBtn.disabled = Boolean(state.strategyBusy || !hasChain);
+    }
+    if (dom.strategyEvaluateBtn) {
+      dom.strategyEvaluateBtn.disabled = Boolean(state.strategyBusy || !hasChain || !hasLegs);
+      dom.strategyEvaluateBtn.title = !hasLegs
+        ? "Add at least one option leg first (+ Leg or Auto-Build)"
+        : "Evaluate or re-price exact current legs table using cached or live Corridor quotes";
+    }
+    if (dom.strategyAddLegBtn) {
+      dom.strategyAddLegBtn.disabled = Boolean(!hasChain);
+    }
+  }
+
+  function clearStrategyKpis(subHint, basisText, rationaleText) {
+    if (dom.strategyBasisBadge && basisText) {
+      dom.strategyBasisBadge.textContent = basisText;
+    }
+    if (dom.strategyKpiPrice) {
+      dom.strategyKpiPrice.textContent = "\u2014";
+      dom.strategyKpiPrice.classList.remove("is-credit", "is-debit");
+    }
+    if (dom.strategyKpiPriceSub) {
+      dom.strategyKpiPriceSub.textContent = subHint || "Click a preset or Auto-Build";
+    }
+    if (dom.strategyKpiSlip) dom.strategyKpiSlip.textContent = "\u2014";
+    if (dom.strategyKpiSlipSub) dom.strategyKpiSlipSub.textContent = "Nat \u2192 Fair \u2192 Mid";
+    if (dom.strategyKpiRisk) dom.strategyKpiRisk.textContent = "\u2014";
+    if (dom.strategyKpiRiskSub) dom.strategyKpiRiskSub.textContent = "RoR %";
+    if (dom.strategyKpiPop) dom.strategyKpiPop.textContent = "\u2014";
+    if (dom.strategyKpiPopSub) dom.strategyKpiPopSub.textContent = "1\u03c3 expected move";
+    if (dom.strategyKpiGreeks) dom.strategyKpiGreeks.textContent = "\u2014";
+    if (dom.strategyKpiGreeksSub) {
+      dom.strategyKpiGreeksSub.textContent = "\u0394 / \u0393 / \u0398 / V";
+    }
+    if (dom.strategyRationale && rationaleText !== undefined) {
+      dom.strategyRationale.textContent = rationaleText;
+    }
+  }
+
+  function markStrategyEvaluationDirty() {
+    state.strategyEvaluationDirty = true;
+    if (dom.strategyBasisBadge && state.chainData && state.strategyLegs.length) {
+      dom.strategyBasisBadge.textContent = state.strategyEvaluation
+        ? "CUSTOM EDITS \u2022 CLICK EVALUATE / RE-PRICE"
+        : "READY \u2022 CLICK EVALUATE / RE-PRICE";
+    }
+    syncStrategyActionButtons();
+  }
+
+  function resetStrategyEvaluationUI(keepChainLegs) {
+    state.strategyEvaluation = null;
+    state.strategyEvaluationDirty = false;
+    state.strategyPendingEvaluate = null;
+    if (dom.strategyDaysSlider) dom.strategyDaysSlider.value = "0";
+    if (dom.strategyIvSlider) dom.strategyIvSlider.value = "0";
+    renderStrategySlidersMax(120);
+
+    var basisTxt = state.chainData
+      ? "IDLE \u2022 CLICK TO BUILD"
+      : "NO SNAPSHOT LOADED";
+    var ratTxt = state.chainData
+      ? "Cached snapshot ready. Click any strategy preset or Auto-Build from Walls, or edit legs below and click Evaluate / Re-Price."
+      : "Load or refresh a ticker snapshot first to build option strategies.";
+    clearStrategyKpis("Click a preset or Auto-Build", basisTxt, ratTxt);
+
+    if (!state.chainData) {
+      state.strategyLegs = [];
+    } else if (!keepChainLegs) {
+      state.strategyLegs = buildSeedLegsFromChain(state.chainData);
+    }
+    if (keepChainLegs && state.chainData && !state.strategyLegs.length) {
+      clearStrategyKpis(
+        "Add a leg or click Auto-Build",
+        "NO LEGS \u2022 CLICK + LEG",
+        "No legs configured. Click + Leg or Auto-Build from Walls."
+      );
+    }
+    renderStrategyLegsTable();
+    renderStrategyEmptyPlaceholder();
+  }
+
+  function syncStrategySelectors(data) {
+    var nextTicker = data && data.meta ? String(data.meta.underlying || "") : "";
+    var sameTicker = Boolean(nextTicker && state.strategyLoadedTicker === nextTicker);
+    state.strategyLoadedTicker = nextTicker;
+
+    if (dom.strategyExpirySelect) {
+      var prev = dom.strategyExpirySelect.value;
+      dom.strategyExpirySelect.innerHTML = "";
+      var autoOpt = document.createElement("option");
+      autoOpt.value = "";
+      autoOpt.textContent = "Auto (Front)";
+      dom.strategyExpirySelect.appendChild(autoOpt);
+      var exps = strategySortedExpiries(data);
+      var snappedExp = snapDteValueToExpiries(prev, exps, {
+        allowBuckets: false,
+        emptyValue: "",
+      });
+      for (var i = 0; i < exps.length; i++) {
+        var opt = document.createElement("option");
+        opt.value = exps[i].expiry;
+        opt.textContent = formatExpiryIso(exps[i].expiry) + " (" + exps[i].dte + "d)";
+        if (snappedExp && snappedExp === exps[i].expiry) {
+          opt.selected = true;
+        }
+        dom.strategyExpirySelect.appendChild(opt);
+      }
+      if (snappedExp) {
+        dom.strategyExpirySelect.value = snappedExp;
+      }
+    }
+
+    if (sameTicker && data && state.strategyKind === "CUSTOM" && state.strategyLegs.length) {
+      var kept = [];
+      for (var j = 0; j < state.strategyLegs.length; j++) {
+        var leg = state.strategyLegs[j];
+        if (
+          findLocalChainContract(data, leg.expiry, leg.right, leg.strike) ||
+          snapLegToValidContract(data, leg, "expiry")
+        ) {
+          kept.push(leg);
+        }
+      }
+      state.strategyLegs = kept;
+      if (state.strategyLegs.length) {
+        markStrategyEvaluationDirty();
+        renderStrategyLegsTable();
+        renderStrategyEmptyPlaceholder();
+        return;
+      }
+    }
+
+    if (!sameTicker && state.strategyKind === "CUSTOM") {
+      setActiveStrategyPresetUI("BULL_PUT_SPREAD");
+    }
+    resetStrategyEvaluationUI(false);
+  }
+
+  function renderStrategyLegsTable() {
+    var tbody = dom.strategyLegsTbody;
+    if (!tbody) return;
+    tbody.innerHTML = "";
+    syncStrategyActionButtons();
+    if (!state.strategyLegs.length) {
+      var emptyTr = document.createElement("tr");
+      var emptyTd = document.createElement("td");
+      emptyTd.colSpan = 9;
+      emptyTd.textContent = state.chainData
+        ? "No legs configured. Click + Leg or Auto-Build from Walls."
+        : "Waiting for cached option snapshot.";
+      emptyTr.appendChild(emptyTd);
+      tbody.appendChild(emptyTr);
+      return;
+    }
+
+    var exps = strategySortedExpiries(state.chainData);
+    var evaluatedLegs =
+      state.strategyEvaluation && state.strategyEvaluation.legs
+        ? state.strategyEvaluation.legs
+        : null;
+
+    for (var i = 0; i < state.strategyLegs.length; i++) {
+      (function (idx) {
+        var leg = state.strategyLegs[idx];
+        var localMatch = findLocalChainContract(
+          state.chainData,
+          leg.expiry,
+          leg.right,
+          leg.strike
+        );
+        var evalMatch = findExactEvaluatedLeg(leg, evaluatedLegs);
+        var tr = document.createElement("tr");
+
+        // 1. Side
+        var tdSide = document.createElement("td");
+        var selSide = document.createElement("select");
+        selSide.className =
+          "select-control strategy-leg-side " + (leg.side === "SELL" ? "is-sell" : "is-buy");
+        selSide.setAttribute("aria-label", "Leg " + (idx + 1) + " side");
+        ["BUY", "SELL"].forEach(function (sv) {
+          var o = document.createElement("option");
+          o.value = sv;
+          o.textContent = sv;
+          o.selected = leg.side === sv;
+          selSide.appendChild(o);
+        });
+        selSide.addEventListener("change", function () {
+          state.strategyLegs[idx].side = selSide.value;
+          setActiveStrategyPresetUI("CUSTOM");
+          markStrategyEvaluationDirty();
+          renderStrategyLegsTable();
+        });
+        tdSide.appendChild(selSide);
+        tr.appendChild(tdSide);
+
+        // 2. Right
+        var tdRight = document.createElement("td");
+        var selRight = document.createElement("select");
+        selRight.className = "select-control";
+        selRight.setAttribute("aria-label", "Leg " + (idx + 1) + " right");
+        ["P", "C"].forEach(function (rv) {
+          var o = document.createElement("option");
+          o.value = rv;
+          o.textContent = rv === "C" ? "CALL" : "PUT";
+          o.selected = leg.right === rv;
+          selRight.appendChild(o);
+        });
+        selRight.addEventListener("change", function () {
+          var prevRight = state.strategyLegs[idx].right;
+          state.strategyLegs[idx].right = selRight.value;
+          if (!snapLegToValidContract(state.chainData, state.strategyLegs[idx], "right")) {
+            state.strategyLegs[idx].right = prevRight;
+            showBanner("warn", "No " + (selRight.value === "C" ? "CALL" : "PUT") + " contracts found in snapshot.");
+          }
+          setActiveStrategyPresetUI("CUSTOM");
+          markStrategyEvaluationDirty();
+          renderStrategyLegsTable();
+        });
+        tdRight.appendChild(selRight);
+        tr.appendChild(tdRight);
+
+        // 3. Expiry
+        var tdExp = document.createElement("td");
+        var selExp = document.createElement("select");
+        selExp.className = "select-control";
+        selExp.setAttribute("aria-label", "Leg " + (idx + 1) + " expiry");
+        var expList = exps.length ? exps : [{ expiry: leg.expiry, dte: 0 }];
+        for (var e = 0; e < expList.length; e++) {
+          var oe = document.createElement("option");
+          oe.value = expList[e].expiry;
+          oe.textContent = formatExpiryIso(expList[e].expiry) + " (" + expList[e].dte + "d)";
+          oe.selected = expList[e].expiry === leg.expiry;
+          selExp.appendChild(oe);
+        }
+        selExp.addEventListener("change", function () {
+          state.strategyLegs[idx].expiry = selExp.value;
+          snapLegToValidContract(state.chainData, state.strategyLegs[idx], "expiry");
+          setActiveStrategyPresetUI("CUSTOM");
+          markStrategyEvaluationDirty();
+          renderStrategyLegsTable();
+        });
+        tdExp.appendChild(selExp);
+        tr.appendChild(tdExp);
+
+        // 4. Strike
+        var tdStrike = document.createElement("td");
+        var selStrike = document.createElement("select");
+        selStrike.className = "select-control";
+        selStrike.setAttribute("aria-label", "Leg " + (idx + 1) + " strike");
+        var strikes = strategyStrikesFor(state.chainData, leg.expiry, leg.right);
+        if (!strikes.length && leg.strike) {
+          strikes = [Number(leg.strike)];
+        }
+        for (var k = 0; k < strikes.length; k++) {
+          var ok = document.createElement("option");
+          ok.value = String(strikes[k]);
+          ok.textContent = formatStrikeShort(strikes[k]);
+          ok.selected = Math.abs(strikes[k] - Number(leg.strike)) < 1e-4;
+          selStrike.appendChild(ok);
+        }
+        selStrike.addEventListener("change", function () {
+          state.strategyLegs[idx].strike = Number(selStrike.value);
+          setActiveStrategyPresetUI("CUSTOM");
+          markStrategyEvaluationDirty();
+          renderStrategyLegsTable();
+        });
+        tdStrike.appendChild(selStrike);
+        tr.appendChild(tdStrike);
+
+        // 5. Qty
+        var tdQty = document.createElement("td");
+        tdQty.className = "num";
+        var inpQty = document.createElement("input");
+        inpQty.type = "number";
+        inpQty.min = "1";
+        inpQty.max = "100";
+        inpQty.value = String(leg.qty || 1);
+        inpQty.className = "select-control strategy-leg-qty";
+        inpQty.setAttribute("aria-label", "Leg " + (idx + 1) + " qty");
+        inpQty.addEventListener("input", function () {
+          var parsed = parseInt(inpQty.value, 10);
+          if (!Number.isNaN(parsed) && parsed >= 1) {
+            state.strategyLegs[idx].qty = Math.min(100, parsed);
+            setActiveStrategyPresetUI("CUSTOM");
+            markStrategyEvaluationDirty();
+          }
+        });
+        inpQty.addEventListener("change", function () {
+          var v = Math.max(1, Math.min(100, parseInt(inpQty.value, 10) || 1));
+          inpQty.value = String(v);
+          state.strategyLegs[idx].qty = v;
+          setActiveStrategyPresetUI("CUSTOM");
+          markStrategyEvaluationDirty();
+        });
+        tdQty.appendChild(inpQty);
+        tr.appendChild(tdQty);
+
+        // 6-8. Live/Local-Preferred Quote Cells
+        var qCells = formatLegQuoteCells(localMatch, evalMatch);
+
+        var tdBa = document.createElement("td");
+        tdBa.className = "num";
+        tdBa.setAttribute("data-leg-idx", String(idx));
+        tdBa.setAttribute("data-leg-cell", "bidask");
+        tdBa.textContent = qCells.bidAskText;
+        tr.appendChild(tdBa);
+
+        var tdMid = document.createElement("td");
+        tdMid.className = "num";
+        tdMid.setAttribute("data-leg-idx", String(idx));
+        tdMid.setAttribute("data-leg-cell", "mid");
+        tdMid.textContent = qCells.midText;
+        tr.appendChild(tdMid);
+
+        var tdGreeks = document.createElement("td");
+        tdGreeks.className = "num";
+        tdGreeks.setAttribute("data-leg-idx", String(idx));
+        tdGreeks.setAttribute("data-leg-cell", "greeks");
+        tdGreeks.textContent = qCells.greeksText;
+        tr.appendChild(tdGreeks);
+
+        // 9. Remove (allowed down to 0 legs)
+        var tdDel = document.createElement("td");
+        var delBtn = document.createElement("button");
+        delBtn.type = "button";
+        delBtn.className = "btn strategy-leg-del-btn";
+        delBtn.textContent = "\u00D7";
+        delBtn.title = "Remove leg";
+        delBtn.addEventListener("click", function () {
+          state.strategyLegs.splice(idx, 1);
+          setActiveStrategyPresetUI("CUSTOM");
+          if (!state.strategyLegs.length) {
+            state.strategyEvaluation = null;
+            state.strategyEvaluationDirty = false;
+            clearStrategyKpis(
+              "Add a leg or click Auto-Build",
+              "NO LEGS \u2022 CLICK + LEG",
+              "No legs configured. Click + Leg or Auto-Build from Walls."
+            );
+            renderStrategyEmptyPlaceholder();
+          } else {
+            markStrategyEvaluationDirty();
+          }
+          renderStrategyLegsTable();
+        });
+        tdDel.appendChild(delBtn);
+        tr.appendChild(tdDel);
+
+        tbody.appendChild(tr);
+      })(i);
+    }
+  }
+
+  function refreshStrategyLegsQuotesOnly() {
+    if (!dom.strategyLegsTbody || !state.chainData || !state.strategyLegs.length) return;
+    var evaluatedLegs =
+      state.strategyEvaluation && state.strategyEvaluation.legs
+        ? state.strategyEvaluation.legs
+        : null;
+    for (var i = 0; i < state.strategyLegs.length; i++) {
+      var leg = state.strategyLegs[i];
+      var match = findLocalChainContract(state.chainData, leg.expiry, leg.right, leg.strike);
+      if (!match) continue;
+      var qCells = formatLegQuoteCells(match, findExactEvaluatedLeg(leg, evaluatedLegs));
+      var baCell = dom.strategyLegsTbody.querySelector(
+        '[data-leg-idx="' + i + '"][data-leg-cell="bidask"]'
+      );
+      var midCell = dom.strategyLegsTbody.querySelector(
+        '[data-leg-idx="' + i + '"][data-leg-cell="mid"]'
+      );
+      var greeksCell = dom.strategyLegsTbody.querySelector(
+        '[data-leg-idx="' + i + '"][data-leg-cell="greeks"]'
+      );
+      if (baCell) baCell.textContent = qCells.bidAskText;
+      if (midCell) midCell.textContent = qCells.midText;
+      if (greeksCell) greeksCell.textContent = qCells.greeksText;
+    }
+  }
+
+  function renderStrategyEvaluation(ev) {
+    if (!ev) return;
+    state.strategyEvaluation = ev;
+    state.strategyEvaluationDirty = false;
+    setActiveStrategyPresetUI(ev.strategy_kind);
+    state.strategyLegs = ev.legs.map(function (l) {
+      var perLegQty = ev.qty_multiplier > 0 ? Math.max(1, Math.round(l.qty / ev.qty_multiplier)) : l.qty;
+      return {
+        side: l.side,
+        right: l.right,
+        expiry: l.expiry,
+        strike: l.strike,
+        qty: perLegQty,
+      };
+    });
+    renderStrategySlidersMax(ev.short_dte);
+    renderStrategyLegsTable();
+
+    if (dom.strategyBasisBadge) {
+      dom.strategyBasisBadge.textContent =
+        ev.strategy_kind.replace(/_/g, " ") + " \u2022 " + ev.short_dte + "d SHORT DTE";
+    }
+
+    var pr = ev.pricing;
+    if (dom.strategyKpiPrice) {
+      dom.strategyKpiPrice.classList.remove("is-credit", "is-debit");
+      dom.strategyKpiPrice.classList.add(pr.is_credit ? "is-credit" : "is-debit");
+      var cashAbs = Math.abs(pr.mid_cash_total);
+      dom.strategyKpiPrice.textContent =
+        (pr.is_credit ? "+" : "-") +
+        fmtMoney(cashAbs) +
+        (pr.is_credit ? " CR" : " DB") +
+        " (" +
+        fmtMoney(Math.abs(pr.net_mid_per_share)) +
+        "/sh)";
+    }
+    if (dom.strategyKpiPriceSub) {
+      dom.strategyKpiPriceSub.textContent =
+        "Natural fill: " +
+        (pr.natural_cash_total >= 0 ? "+" : "-") +
+        fmtMoney(Math.abs(pr.natural_cash_total)) +
+        " (" +
+        fmtMoney(Math.abs(pr.net_natural_per_share)) +
+        "/sh)";
+    }
+
+    if (dom.strategyKpiSlip) {
+      var slipPctStr =
+        pr.slippage_pct !== null && pr.slippage_pct !== undefined
+          ? " (" + fmtNum(pr.slippage_pct, 1) + "%)"
+          : "";
+      dom.strategyKpiSlip.textContent = fmtMoney(pr.slippage_dollars) + slipPctStr;
+    }
+    if (dom.strategyKpiSlipSub) {
+      dom.strategyKpiSlipSub.textContent =
+        "Ladder: " +
+        (pr.limit_ladder && pr.limit_ladder.length
+          ? pr.limit_ladder
+              .map(function (v) {
+                return (v >= 0 ? "+" : "-") + "$" + Math.abs(v).toFixed(2);
+              })
+              .join(" \u2192 ")
+          : "\u2014");
+    }
+
+    var rk = ev.risk;
+    if (dom.strategyKpiRisk) {
+      var lossTxt = rk.max_loss_unbounded ? "UNBOUNDED" : fmtMoney(rk.max_loss);
+      dom.strategyKpiRisk.textContent = "+" + fmtMoney(rk.max_profit) + " / -" + lossTxt;
+    }
+    if (dom.strategyKpiRiskSub) {
+      dom.strategyKpiRiskSub.textContent =
+        rk.return_on_risk_pct !== null && rk.return_on_risk_pct !== undefined
+          ? "RoR: " + fmtNum(rk.return_on_risk_pct, 1) + "% on max risk"
+          : rk.max_loss_unbounded
+            ? "Defined upside cap / Naked risk"
+            : "Risk envelope computed";
+    }
+
+    if (dom.strategyKpiPop) {
+      var beTxt =
+        rk.breakevens && rk.breakevens.length
+          ? rk.breakevens
+              .map(function (b) {
+                return "$" + fmtNum(b, 2);
+              })
+              .join(" & ")
+          : "None";
+      var popTxt =
+        rk.prob_of_profit_pct !== null && rk.prob_of_profit_pct !== undefined
+          ? fmtNum(rk.prob_of_profit_pct, 1) + "% POP"
+          : "\u2014";
+      dom.strategyKpiPop.textContent = "BE " + beTxt + " \u2022 " + popTxt;
+    }
+    if (dom.strategyKpiPopSub) {
+      dom.strategyKpiPopSub.textContent =
+        rk.expected_move_1sigma_low !== null && rk.expected_move_1sigma_high !== null
+          ? "\u00B11\u03c3 Move (" +
+            fmtNum(rk.expected_move_1sigma_pct, 1) +
+            "%): $" +
+            fmtNum(rk.expected_move_1sigma_low, 2) +
+            " \u2013 $" +
+            fmtNum(rk.expected_move_1sigma_high, 2)
+          : "\u00B11\u03c3 expected move unavailable";
+    }
+
+    var gr = ev.net_greeks;
+    if (dom.strategyKpiGreeks) {
+      dom.strategyKpiGreeks.textContent =
+        "\u0394 " +
+        fmtNum(gr.delta_shares, 1) +
+        "sh \u2022 \u0398 " +
+        (gr.theta_daily_dollars >= 0 ? "+" : "-") +
+        fmtMoney(Math.abs(gr.theta_daily_dollars)) +
+        "/d";
+    }
+    if (dom.strategyKpiGreeksSub) {
+      dom.strategyKpiGreeksSub.textContent =
+        "\u0393 " +
+        fmtNum(gr.gamma_shares, 2) +
+        " \u2022 Vega " +
+        (gr.vega_per_1pct_dollars >= 0 ? "+" : "-") +
+        fmtMoney(Math.abs(gr.vega_per_1pct_dollars)) +
+        "/1%IV";
+    }
+
+    if (dom.strategyRationale) {
+      dom.strategyRationale.textContent =
+        ev.rationale && ev.rationale.length
+          ? ev.rationale.join(" ")
+          : "Strategy evaluated.";
+    }
+
+    if (isPanelVisible("strategy")) {
+      renderStrategyPayoffChart(ev, themeVars());
+    }
+  }
+
+  function renderStrategyPayoffChart(ev, t) {
+    var el = dom.strategyChartEl;
+    if (!el || typeof window.Plotly === "undefined") return;
+    if (!ev || !ev.curves || !ev.curves.length || !ev.price_grid || !ev.price_grid.length) {
+      renderStrategyEmptyPlaceholder();
+      return;
+    }
+
+    el.classList.remove("is-idle");
+    if (!el.data) {
+      el.innerHTML = "";
+    }
+    var xs = ev.price_grid;
+    var traces = [
+      {
+        type: "scatter",
+        mode: "lines",
+        name: "Zero P&L",
+        x: [xs[0], xs[xs.length - 1]],
+        y: [0, 0],
+        line: { color: t.muted, width: 1, dash: "dot" },
+        hoverinfo: "skip",
+        showlegend: false,
+      },
+    ];
+
+    for (var i = 0; i < ev.curves.length; i++) {
+      var curve = ev.curves[i];
+      var isExp = curve.label.indexOf("At ") === 0;
+      var isSim = curve.label.indexOf("Simulated") === 0;
+      var isMid = curve.label.indexOf("Midpoint") === 0;
+      var lineColor = isExp
+        ? t.call
+        : isSim
+          ? t.anomaly
+          : isMid
+            ? t.warn
+            : t.dtePalette[0];
+      traces.push({
+        type: "scatter",
+        mode: "lines",
+        name: curve.label,
+        x: xs,
+        y: curve.pnl_values,
+        line: {
+          color: lineColor,
+          width: isExp || isSim ? 2.5 : 1.75,
+          dash: isMid ? "dot" : curve.days_elapsed === 0 && !isSim ? "dash" : "solid",
+        },
+        hovertemplate: curve.label + ": $%{y:,.2f}<extra></extra>",
+      });
+    }
+
+    var markers = [
+      makeVerticalMarker(ev.underlying_price, "SPOT $" + fmtNum(ev.underlying_price, 2), t.ink, 0.99, "dash", t),
+    ];
+    if (ev.primary_call_wall) {
+      markers.push(
+        makeVerticalMarker(
+          ev.primary_call_wall,
+          "CW $" + fmtNum(ev.primary_call_wall, 0),
+          t.call,
+          0.90,
+          "dot",
+          t
+        )
+      );
+    }
+    if (ev.primary_put_wall) {
+      markers.push(
+        makeVerticalMarker(
+          ev.primary_put_wall,
+          "PW $" + fmtNum(ev.primary_put_wall, 0),
+          t.put,
+          0.80,
+          "dot",
+          t
+        )
+      );
+    }
+    if (ev.risk && ev.risk.breakevens) {
+      for (var b = 0; b < ev.risk.breakevens.length; b++) {
+        markers.push(
+          makeVerticalMarker(
+            ev.risk.breakevens[b],
+            "BE $" + fmtNum(ev.risk.breakevens[b], 2),
+            t.warn,
+            0.10 + b * 0.09,
+            "dashdot",
+            t
+          )
+        );
+      }
+    }
+
+    var layout = baseLayout(t, "Underlying Price at Horizon ($)", "Net Strategy P&L ($)", markers);
+    if (
+      ev.risk &&
+      ev.risk.expected_move_1sigma_low !== null &&
+      ev.risk.expected_move_1sigma_high !== null
+    ) {
+      layout.shapes.unshift({
+        type: "rect",
+        xref: "x",
+        yref: "paper",
+        x0: ev.risk.expected_move_1sigma_low,
+        x1: ev.risk.expected_move_1sigma_high,
+        y0: 0,
+        y1: 1,
+        fillcolor: t.isTerminal ? "rgba(56, 189, 248, 0.06)" : "rgba(29, 78, 216, 0.05)",
+        line: { width: 0 },
+        layer: "below",
+      });
+    }
+    layout.legend = {
+      orientation: "h",
+      y: 1.14,
+      x: 0.5,
+      xanchor: "center",
+      font: { size: 10, color: t.ink },
+    };
+    layout.xaxis.tickprefix = "$";
+    layout.yaxis.tickprefix = "$";
+    layout.yaxis.zeroline = true;
+    layout.yaxis.zerolinecolor = t.grid;
+    layout.margin = { t: 48, r: 22, b: 44, l: 64 };
+    window.Plotly.react(el, traces, layout, { responsive: true, displayModeBar: false });
+    window.requestAnimationFrame(function () {
+      if (window.Plotly && window.Plotly.Plots && el.data) {
+        window.Plotly.Plots.resize(el);
+      }
+    });
+    window.setTimeout(function () {
+      if (window.Plotly && window.Plotly.Plots && el.data) {
+        window.Plotly.Plots.resize(el);
+      }
+    }, 60);
+  }
+
+  function strategyControlParams() {
+    var qty = dom.strategyQtyInput
+      ? Math.max(1, Math.min(100, parseInt(dom.strategyQtyInput.value, 10) || 1))
+      : 1;
+    var days = dom.strategyDaysSlider ? Math.max(0, parseInt(dom.strategyDaysSlider.value, 10) || 0) : 0;
+    var ivPct = dom.strategyIvSlider ? parseInt(dom.strategyIvSlider.value, 10) || 0 : 0;
+    var targetExp = dom.strategyExpirySelect && dom.strategyExpirySelect.value
+      ? dom.strategyExpirySelect.value
+      : null;
+    return {
+      qty: qty,
+      daysForward: days,
+      ivShift: ivPct / 100.0,
+      targetExpiry: targetExp,
+    };
+  }
+
+  function setStrategyButtonsBusy(busy) {
+    state.strategyBusy = Boolean(busy);
+    syncStrategyActionButtons();
+  }
+
+  async function autoBuildStrategy(presetKind, callOptions) {
+    var cOpts = callOptions || {};
+    var silent = Boolean(cOpts.silent);
+    if (!state.chainData || state.strategyBusy) {
+      if (!state.chainData && !silent) {
+        showBanner("warn", "Load or refresh an option snapshot before auto-building strategies.", {
+          phase: "STRATEGY_BUILD",
+        });
+      }
+      return;
+    }
+    var kind = presetKind && presetKind !== "CUSTOM" ? presetKind : "BULL_PUT_SPREAD";
+    setActiveStrategyPresetUI(kind);
+    var opts = strategyControlParams();
+    setStrategyButtonsBusy(true);
+    try {
+      var res = await apiJson("/api/strategy/suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: state.ticker,
+          snapshot_id: state.snapshotId || null,
+          strategy_kind: kind,
+          target_expiry: opts.targetExpiry,
+          days_forward: opts.daysForward,
+          iv_shift: opts.ivShift,
+          qty_multiplier: opts.qty,
+        }),
+      });
+      if (res.ok && res.body && res.body.evaluations && res.body.evaluations.length) {
+        renderStrategyEvaluation(res.body.evaluations[0]);
+      } else if (!silent) {
+        showBanner(
+          "warn",
+          extractApiErrorMessage(res.body, res.textSnippet || "Unable to auto-build strategy."),
+          {
+            ticker: state.ticker,
+            phase: "STRATEGY_BUILD",
+            status: res.status,
+            elapsedMs: res.elapsedMs,
+            rawBody: res.textSnippet,
+          }
+        );
+      }
+    } catch (err) {
+      if (!silent) {
+        showBanner("error", "Strategy auto-build request failed.", {
+          ticker: state.ticker,
+          phase: "STRATEGY_BUILD",
+          elapsedMs: err && err.elapsedMs,
+          detail: err && err.message ? err.message : String(err || ""),
+        });
+      }
+    } finally {
+      setStrategyButtonsBusy(false);
+    }
+  }
+
+  async function evaluateStrategyRequest(options) {
+    var silent = Boolean(options && options.silent);
+    if (!state.chainData) {
+      if (!silent) {
+        showBanner("warn", "Load or refresh an option snapshot before evaluating legs.");
+      }
+      return;
+    }
+    if (state.strategyBusy) {
+      if (!state.strategyPendingEvaluate || !silent) {
+        state.strategyPendingEvaluate = { silent: silent };
+      }
+      return;
+    }
+    if (!state.strategyLegs.length) {
+      if (!silent) {
+        showBanner("warn", "Add at least one option leg first.");
+      }
+      return;
+    }
+
+    var snappedAny = false;
+    for (var i = 0; i < state.strategyLegs.length; i++) {
+      var leg = state.strategyLegs[i];
+      if (!findLocalChainContract(state.chainData, leg.expiry, leg.right, leg.strike)) {
+        if (snapLegToValidContract(state.chainData, leg, "expiry")) {
+          snappedAny = true;
+        } else {
+          if (!silent) {
+            showBanner("warn", "Leg " + (i + 1) + " does not match any contract in the loaded snapshot.");
+          }
+          return;
+        }
+      }
+    }
+    if (snappedAny) {
+      renderStrategyLegsTable();
+    }
+
+    var opts = strategyControlParams();
+    setStrategyButtonsBusy(true);
+    try {
+      var res = await apiJson("/api/strategy/evaluate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: state.ticker,
+          snapshot_id: state.snapshotId || null,
+          strategy_kind: state.strategyKind || "CUSTOM",
+          target_expiry: opts.targetExpiry,
+          legs: state.strategyLegs.map(function (l) {
+            return {
+              side: l.side,
+              right: l.right,
+              expiry: l.expiry,
+              strike: Number(l.strike),
+              qty: Math.max(1, Math.min(100, parseInt(l.qty, 10) || 1)),
+            };
+          }),
+          days_forward: opts.daysForward,
+          iv_shift: opts.ivShift,
+          qty_multiplier: opts.qty,
+        }),
+      });
+      if (res.ok && res.body) {
+        state.corridorLastRepriceAt = Date.now();
+        renderStrategyEvaluation(res.body);
+      } else if (!silent) {
+        showBanner(
+          "warn",
+          extractApiErrorMessage(res.body, res.textSnippet || "Strategy evaluation failed."),
+          {
+            ticker: state.ticker,
+            phase: "STRATEGY_EVAL",
+            status: res.status,
+            elapsedMs: res.elapsedMs,
+            rawBody: res.textSnippet,
+          }
+        );
+      }
+    } catch (err) {
+      if (!silent) {
+        showBanner("error", "Strategy evaluation request failed.", {
+          ticker: state.ticker,
+          phase: "STRATEGY_EVAL",
+          elapsedMs: err && err.elapsedMs,
+          detail: err && err.message ? err.message : String(err || ""),
+        });
+      }
+    } finally {
+      setStrategyButtonsBusy(false);
+      if (state.strategyPendingEvaluate) {
+        var pending = state.strategyPendingEvaluate;
+        state.strategyPendingEvaluate = null;
+        evaluateStrategyRequest(pending);
+      }
+    }
+  }
+
+  function addCustomStrategyLegRow() {
+    if (!state.chainData) return;
+    if (state.strategyLegs.length >= 6) {
+      showBanner("warn", "Maximum 6 option legs supported per strategy.");
+      return;
+    }
+    var exps = strategySortedExpiries(state.chainData);
+    var exp =
+      (dom.strategyExpirySelect && dom.strategyExpirySelect.value) ||
+      (state.strategyLegs.length ? state.strategyLegs[0].expiry : exps.length ? exps[0].expiry : "");
+    var chosenRight = "C";
+    var strikes = strategyStrikesFor(state.chainData, exp, chosenRight);
+    if (!strikes.length) {
+      chosenRight = "P";
+      strikes = strategyStrikesFor(state.chainData, exp, chosenRight);
+    }
+    if (!strikes.length && state.chainData.contracts && state.chainData.contracts.length) {
+      var fallbackC = state.chainData.contracts[0];
+      exp = fallbackC.expiry;
+      chosenRight = fallbackC.right;
+      strikes = strategyStrikesFor(state.chainData, exp, chosenRight);
+    }
+    if (!strikes.length) {
+      showBanner("warn", "No eligible option contracts found to add a leg.");
+      return;
+    }
+    var spot = Number(state.chainData.meta.underlying_price || 100);
+    var strike = nearestStrikeFromList(strikes, spot);
+    state.strategyLegs.push({ side: "BUY", right: chosenRight, expiry: exp, strike: strike, qty: 1 });
+    setActiveStrategyPresetUI("CUSTOM");
+    markStrategyEvaluationDirty();
+    renderStrategyLegsTable();
+  }
+
+  function addSpecificStrategyLeg(expiry, right, strike) {
+    if (!state.chainData) return;
+    if (state.strategyLegs.length >= 6) {
+      showBanner("warn", "Maximum 6 option legs supported per strategy.", {
+        ticker: state.ticker,
+        phase: "STRATEGY_LEG",
+      });
+      return;
+    }
+    var expStr = String(expiry || "");
+    var rightNorm = String(right || "C").toUpperCase();
+    var numStrike = Number(strike);
+    if (!expStr || Number.isNaN(numStrike)) return;
+
+    if (!isPanelVisible("strategy")) {
+      var nextVis = Object.assign({}, state.panelVisibility, { strategy: true });
+      applyPanelVisibility(nextVis, { persist: true, skipRender: true });
+    }
+    state.strategyLegs.push({
+      side: "BUY",
+      right: rightNorm,
+      expiry: expStr,
+      strike: numStrike,
+      qty: 1,
+    });
+    setActiveStrategyPresetUI("CUSTOM");
+    markStrategyEvaluationDirty();
+    renderStrategyLegsTable();
+    if (state.corridorFrame && state.corridorFrame.source === "CACHED_PREVIEW") {
+      applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+    }
+    if (state.strategyEvaluation || isStrategyAutoPopulateEnabled()) {
+      evaluateStrategyRequest({ silent: true });
+    }
+  }
+
+  function maybeAutoPopulateStrategy(data) {
+    if (!data || !data.contracts || !data.contracts.length) return;
+    if (!isStrategyAutoPopulateEnabled() || !isPanelVisible("strategy")) return;
+    if (state.strategyKind === "CUSTOM" && state.strategyLegs.length) {
+      evaluateStrategyRequest({ silent: true });
+      return;
+    }
+    var preset = state.strategyKind && state.strategyKind !== "CUSTOM"
+      ? state.strategyKind
+      : "BULL_PUT_SPREAD";
+    autoBuildStrategy(preset, { silent: true, autoTriggered: true });
+  }
+
+  // ------------------------------------------------------------------ Wall Strike Corridor (+-5 Strikes & Live Streaming)
+  function corridorKey(expiry, strike, right) {
+    return String(expiry) + "|" + Number(strike) + "|" + String(right).toUpperCase();
+  }
+
+  function corridorPriorityLegsList() {
+    if (!state.strategyLegs || !state.strategyLegs.length) return [];
+    return state.strategyLegs.map(function (l) {
+      return {
+        expiry: String(l.expiry),
+        strike: Number(l.strike),
+        right: String(l.right).toUpperCase(),
+      };
+    });
+  }
+
+  function corridorPriorityLegsParam() {
+    return corridorPriorityLegsList()
+      .map(function (l) {
+        return l.expiry + "|" + l.strike + "|" + l.right;
+      })
+      .join(",");
+  }
+
+  function corridorWallsForExpiry(data, targetExp) {
+    if (!data || !data.walls) return { putWall: null, callWall: null, basis: "VOLUME" };
+    var basis = data.walls.primary_basis || "VOLUME";
+    var byDte = data.walls.by_dte || [];
+    for (var i = 0; i < byDte.length; i++) {
+      if (String(byDte[i].expiry) === String(targetExp)) {
+        return {
+          putWall: byDte[i].primary_put_wall ? Number(byDte[i].primary_put_wall.strike) : null,
+          callWall: byDte[i].primary_call_wall ? Number(byDte[i].primary_call_wall.strike) : null,
+          basis: basis,
+        };
+      }
+    }
+    return {
+      putWall: data.walls.aggregate_primary_put_wall
+        ? Number(data.walls.aggregate_primary_put_wall.strike)
+        : null,
+      callWall: data.walls.aggregate_primary_call_wall
+        ? Number(data.walls.aggregate_primary_call_wall.strike)
+        : null,
+      basis: basis,
+    };
+  }
+
+  function buildLocalCorridorPreview(data) {
+    if (!data || !data.contracts || !data.contracts.length) return null;
+    var exps = strategySortedExpiries(data);
+    if (!exps.length) return null;
+    var win = dom.corridorWindowSelect ? Math.max(1, parseInt(dom.corridorWindowSelect.value, 10) || 5) : 5;
+    state.corridorWindow = win;
+    var maxCap = 56;
+    var chosenExp =
+      dom.corridorExpirySelect && dom.corridorExpirySelect.value
+        ? dom.corridorExpirySelect.value
+        : exps[0].expiry;
+    var chosenDte = exps[0].dte;
+    var foundExp = false;
+    for (var i = 0; i < exps.length; i++) {
+      if (exps[i].expiry === chosenExp) {
+        chosenDte = exps[i].dte;
+        foundExp = true;
+        break;
+      }
+    }
+    if (!foundExp) {
+      chosenExp = exps[0].expiry;
+      chosenDte = exps[0].dte;
+    }
+    state.corridorExpiry = chosenExp;
+
+    var spot = Number(data.meta.underlying_price || 0);
+    var wInfo = corridorWallsForExpiry(data, chosenExp);
+    var expRows = data.contracts.filter(function (c) {
+      return String(c.expiry) === String(chosenExp);
+    });
+    if (!expRows.length) return null;
+
+    var strikeMap = {};
+    for (var r = 0; r < expRows.length; r++) {
+      strikeMap[Number(expRows[r].strike)] = true;
+    }
+    var strikes = Object.keys(strikeMap)
+      .map(function (s) {
+        return Number(s);
+      })
+      .sort(function (a, b) {
+        return a - b;
+      });
+    if (!strikes.length) return null;
+
+    function nearestIdx(targetVal) {
+      var bestI = 0;
+      var bestD = Math.abs(strikes[0] - targetVal);
+      for (var k = 1; k < strikes.length; k++) {
+        var d = Math.abs(strikes[k] - targetVal);
+        if (d < bestD) {
+          bestI = k;
+          bestD = d;
+        }
+      }
+      return bestI;
+    }
+
+    var pwIdx = nearestIdx(wInfo.putWall !== null ? wInfo.putWall : spot);
+    var cwIdx = nearestIdx(wInfo.callWall !== null ? wInfo.callWall : spot);
+    var atmIdx = nearestIdx(spot);
+    var idxLookup = {};
+    for (var si = 0; si < strikes.length; si++) {
+      idxLookup[strikes[si].toFixed(6)] = si;
+    }
+
+    var legKeys = {};
+    var legs = corridorPriorityLegsList();
+    for (var l = 0; l < legs.length; l++) {
+      legKeys[corridorKey(legs[l].expiry, legs[l].strike, legs[l].right)] = true;
+    }
+
+    function inBand(idx, anchorIdx) {
+      return idx >= anchorIdx - win && idx <= anchorIdx + win;
+    }
+
+    var candidates = [];
+    var seen = {};
+    for (var a = 0; a < data.contracts.length; a++) {
+      var row = data.contracts[a];
+      var rk = corridorKey(row.expiry, row.strike, row.right);
+      var isExpMatch = String(row.expiry) === String(chosenExp);
+      var sIdx = isExpMatch ? idxLookup[Number(row.strike).toFixed(6)] : undefined;
+      var inPw = sIdx !== undefined && inBand(sIdx, pwIdx);
+      var inCw = sIdx !== undefined && inBand(sIdx, cwIdx);
+      var inAtm = sIdx !== undefined && inBand(sIdx, atmIdx);
+      var isLeg = Boolean(legKeys[rk]);
+      if (!isLeg && !(inPw || inCw || inAtm)) continue;
+      if (seen[rk]) continue;
+      seen[rk] = true;
+
+      var tier = 3;
+      var dist = sIdx !== undefined ? Math.abs(sIdx - atmIdx) : 0;
+      if (isLeg) {
+        tier = 0;
+        dist = 0;
+      } else if ((inPw && row.right === "P") || (inCw && row.right === "C")) {
+        tier = 1;
+        dist = inPw && row.right === "P" ? Math.abs(sIdx - pwIdx) : Math.abs(sIdx - cwIdx);
+      } else if (inPw || inCw) {
+        tier = 2;
+        dist = Math.min(
+          inPw ? Math.abs(sIdx - pwIdx) : 999,
+          inCw ? Math.abs(sIdx - cwIdx) : 999
+        );
+      }
+
+      var zone = "ATM";
+      if (sIdx === undefined) zone = "STRATEGY_LEG";
+      else if (inPw && inCw) zone = "BOTH_WALLS";
+      else if (inPw) zone = "PUT_WALL";
+      else if (inCw) zone = "CALL_WALL";
+      else if (isLeg) zone = "STRATEGY_LEG";
+
+      var bid = row.bid !== null && row.bid !== undefined ? Number(row.bid) : null;
+      var ask = row.ask !== null && row.ask !== undefined ? Number(row.ask) : null;
+      var mid =
+        bid !== null && ask !== null && bid > 0 && ask >= bid
+          ? (bid + ask) / 2.0
+          : row.mid !== null && row.mid !== undefined
+            ? Number(row.mid)
+            : row.last !== null && row.last !== undefined
+              ? Number(row.last)
+              : row.close !== null && row.close !== undefined
+                ? Number(row.close)
+                : null;
+      var spreadPct =
+        bid !== null && ask !== null && mid && bid > 0 && ask >= bid
+          ? ((ask - bid) / mid) * 100.0
+          : null;
+
+      candidates.push({
+        sortRank: [tier, dist, Math.abs(Number(row.strike) - spot), Number(row.strike)],
+        quote: {
+          option_conid: row.option_conid || 0,
+          expiry: String(row.expiry),
+          dte: Number(row.dte),
+          strike: Number(row.strike),
+          right: String(row.right),
+          zone: zone,
+          is_put_wall:
+            wInfo.putWall !== null &&
+            Math.abs(Number(row.strike) - wInfo.putWall) < 1e-4 &&
+            row.right === "P",
+          is_call_wall:
+            wInfo.callWall !== null &&
+            Math.abs(Number(row.strike) - wInfo.callWall) < 1e-4 &&
+            row.right === "C",
+          is_strategy_leg: isLeg,
+          bid: bid,
+          ask: ask,
+          mid: mid,
+          last: row.last !== null && row.last !== undefined ? Number(row.last) : null,
+          close: row.close !== null && row.close !== undefined ? Number(row.close) : null,
+          spread_pct: spreadPct,
+          volume: row.volume,
+          open_interest: row.open_interest,
+          iv: row.iv,
+          delta: row.delta,
+          gamma: row.gamma,
+          theta: row.theta,
+          vega: row.vega,
+          greeks_source: row.greeks_source || "NONE",
+          updated_ts_utc: data.meta.snapshot_ts_utc || "",
+        },
+      });
+    }
+
+    candidates.sort(function (a, b) {
+      for (var tIdx = 0; tIdx < a.sortRank.length; tIdx++) {
+        if (a.sortRank[tIdx] !== b.sortRank[tIdx]) return a.sortRank[tIdx] - b.sortRank[tIdx];
+      }
+      return 0;
+    });
+    var selected = candidates.slice(0, maxCap).map(function (x) {
+      return x.quote;
+    });
+    selected.sort(function (a, b) {
+      if (a.dte !== b.dte) return a.dte - b.dte;
+      if (a.strike !== b.strike) return a.strike - b.strike;
+      return a.right < b.right ? -1 : a.right > b.right ? 1 : 0;
+    });
+
+    return {
+      ticker: data.meta.underlying,
+      snapshot_id: data.meta.snapshot_id,
+      target_expiry: chosenExp,
+      target_dte: chosenDte,
+      window_strikes: win,
+      max_contracts: maxCap,
+      subscribed_count: Math.min(60, selected.length + (selected.length < 60 ? 1 : 0)),
+      subscription_cap: 60,
+      underlying_price: spot,
+      market_data_type: data.meta.market_data_type || 3,
+      primary_call_wall: wInfo.callWall,
+      primary_put_wall: wInfo.putWall,
+      wall_basis: wInfo.basis,
+      updated_ts_utc: data.meta.snapshot_ts_utc || "",
+      sequence: 0,
+      mode: "PREVIEW",
+      elapsed_ms: null,
+      changed_keys: [],
+      quotes: selected,
+      notices: [],
+    };
+  }
+
+  function updateCorridorStatusUI(frame, modeLabel) {
+    var count = frame ? frame.subscribed_count : 0;
+    var cap = frame && frame.subscription_cap ? frame.subscription_cap : 60;
+    if (dom.corridorSubsBadge) {
+      dom.corridorSubsBadge.textContent = count + " / " + cap + " SUBS";
+      dom.corridorSubsBadge.className =
+        "badge " + (state.corridorStreaming ? "badge--live" : "badge--info");
+    }
+    if (dom.corridorStatusBadge) {
+      if (modeLabel) {
+        dom.corridorStatusBadge.textContent = modeLabel;
+      } else if (!frame) {
+        dom.corridorStatusBadge.textContent = "IDLE \u2022 MANUAL";
+      } else if (frame.mode === "STREAM") {
+        dom.corridorStatusBadge.textContent =
+          "STREAMING LIVE \u2022 #" + frame.sequence + " \u2022 " + frame.target_dte + "d EXP";
+      } else if (frame.mode === "ONE_SHOT") {
+        dom.corridorStatusBadge.textContent =
+          "ONE-SHOT UPDATED \u2022 " + frame.target_dte + "d EXP";
+      } else {
+        dom.corridorStatusBadge.textContent =
+          "IDLE \u2022 PREVIEW (" + frame.quotes.length + " OPT \u2022 " + frame.target_dte + "d)";
+      }
+    }
+  }
+
+  function renderCorridorKpis(frame) {
+    if (!frame || !frame.quotes || !frame.quotes.length) {
+      if (dom.corridorKpiPw) dom.corridorKpiPw.textContent = "\u2014";
+      if (dom.corridorKpiPwSub) dom.corridorKpiPwSub.textContent = "Put corridor avg mid / spread";
+      if (dom.corridorKpiCw) dom.corridorKpiCw.textContent = "\u2014";
+      if (dom.corridorKpiCwSub) dom.corridorKpiCwSub.textContent = "Call corridor avg mid / spread";
+      if (dom.corridorKpiSpot) dom.corridorKpiSpot.textContent = "\u2014";
+      if (dom.corridorKpiSpotSub) dom.corridorKpiSpotSub.textContent = "Cached baseline (manual)";
+      if (dom.corridorKpiSync) dom.corridorKpiSync.textContent = "IDLE";
+      if (dom.corridorKpiSyncSub) dom.corridorKpiSyncSub.textContent = "Click Refresh or toggle Streaming ON";
+      return;
+    }
+
+    var pwQ = null;
+    var cwQ = null;
+    var spreadSum = 0;
+    var spreadCnt = 0;
+    for (var i = 0; i < frame.quotes.length; i++) {
+      var q = frame.quotes[i];
+      if (q.is_put_wall && !pwQ) pwQ = q;
+      if (q.is_call_wall && !cwQ) cwQ = q;
+      if (q.spread_pct !== null && q.spread_pct !== undefined) {
+        spreadSum += Number(q.spread_pct);
+        spreadCnt += 1;
+      }
+    }
+
+    if (dom.corridorKpiPw) {
+      dom.corridorKpiPw.textContent =
+        frame.primary_put_wall !== null && frame.primary_put_wall !== undefined
+          ? "$" + fmtNum(frame.primary_put_wall, 2) + (pwQ && pwQ.mid ? " \u2022 " + fmtMoney(pwQ.mid) : "")
+          : "\u2014";
+    }
+    if (dom.corridorKpiPwSub) {
+      dom.corridorKpiPwSub.textContent = pwQ
+        ? "Bid/Ask " +
+          (pwQ.bid !== null ? fmtNum(pwQ.bid, 2) : "\u2014") +
+          "/" +
+          (pwQ.ask !== null ? fmtNum(pwQ.ask, 2) : "\u2014") +
+          (pwQ.delta !== null ? " \u2022 \u0394 " + fmtNum(pwQ.delta, 2) : "")
+        : "Put Wall window \u00B1" + frame.window_strikes;
+    }
+
+    if (dom.corridorKpiCw) {
+      dom.corridorKpiCw.textContent =
+        frame.primary_call_wall !== null && frame.primary_call_wall !== undefined
+          ? "$" + fmtNum(frame.primary_call_wall, 2) + (cwQ && cwQ.mid ? " \u2022 " + fmtMoney(cwQ.mid) : "")
+          : "\u2014";
+    }
+    if (dom.corridorKpiCwSub) {
+      dom.corridorKpiCwSub.textContent = cwQ
+        ? "Bid/Ask " +
+          (cwQ.bid !== null ? fmtNum(cwQ.bid, 2) : "\u2014") +
+          "/" +
+          (cwQ.ask !== null ? fmtNum(cwQ.ask, 2) : "\u2014") +
+          (cwQ.delta !== null ? " \u2022 \u0394 " + fmtNum(cwQ.delta, 2) : "")
+        : "Call Wall window \u00B1" + frame.window_strikes;
+    }
+
+    if (dom.corridorKpiSpot) {
+      dom.corridorKpiSpot.textContent =
+        "$" + fmtNum(frame.underlying_price, 2) + " \u2022 " + frame.target_dte + "d";
+    }
+    if (dom.corridorKpiSpotSub) {
+      var avgSpreadTxt = spreadCnt ? "Avg Sprd " + fmtNum(spreadSum / spreadCnt, 1) + "%" : "Spread n/a";
+      dom.corridorKpiSpotSub.textContent = "Type " + frame.market_data_type + " \u2022 " + avgSpreadTxt;
+    }
+
+    if (dom.corridorKpiSync) {
+      dom.corridorKpiSync.textContent =
+        frame.mode === "STREAM"
+          ? "LIVE #" + frame.sequence
+          : frame.mode === "ONE_SHOT"
+            ? (frame.elapsed_ms ? Math.round(frame.elapsed_ms) + " ms" : "UPDATED")
+            : "PREVIEW";
+    }
+    if (dom.corridorKpiSyncSub) {
+      var tsShort = frame.updated_ts_utc ? frame.updated_ts_utc.replace("T", " ").replace("Z", " UTC") : "Cached snapshot";
+      dom.corridorKpiSyncSub.textContent = tsShort;
+    }
+  }
+
+  function renderCorridorLadder(frame) {
+    var tbody = dom.corridorLadderTbody;
+    if (!tbody) return;
+    tbody.innerHTML = "";
+    if (!frame || !frame.quotes || !frame.quotes.length) {
+      var trEmpty = document.createElement("tr");
+      var tdEmpty = document.createElement("td");
+      tdEmpty.colSpan = 9;
+      tdEmpty.className = "text-left";
+      tdEmpty.textContent = "Load or refresh a ticker snapshot to view the Wall Corridor.";
+      trEmpty.appendChild(tdEmpty);
+      tbody.appendChild(trEmpty);
+      return;
+    }
+
+    var changedSet = {};
+    if (frame.changed_keys) {
+      for (var c = 0; c < frame.changed_keys.length; c++) {
+        changedSet[frame.changed_keys[c]] = true;
+      }
+    }
+    var nextPrevMids = {};
+
+    for (var i = 0; i < frame.quotes.length; i++) {
+      var q = frame.quotes[i];
+      var qKey = corridorKey(q.expiry, q.strike, q.right);
+      var prevMid = state.corridorPrevMids[qKey];
+      var curMid = q.mid !== null && q.mid !== undefined ? Number(q.mid) : null;
+      if (curMid !== null) nextPrevMids[qKey] = curMid;
+
+      var flashClass = "";
+      if (
+        frame.mode === "STREAM" &&
+        changedSet[qKey] &&
+        prevMid !== undefined &&
+        curMid !== null
+      ) {
+        if (curMid > prevMid + 1e-4) flashClass = " flash-up";
+        else if (curMid < prevMid - 1e-4) flashClass = " flash-down";
+      }
+
+      var tr = document.createElement("tr");
+      var classes = [];
+      if (q.is_put_wall) classes.push("row-wall-put");
+      if (q.is_call_wall) classes.push("row-wall-call");
+      if (q.is_strategy_leg) classes.push("row-strategy-leg");
+      tr.className = classes.join(" ");
+
+      var tdZone = document.createElement("td");
+      tdZone.className = "text-left";
+      var zSpan = document.createElement("span");
+      var zLabel =
+        q.zone === "PUT_WALL"
+          ? "PW"
+          : q.zone === "CALL_WALL"
+            ? "CW"
+            : q.zone === "BOTH_WALLS"
+              ? "PW/CW"
+              : q.zone === "STRATEGY_LEG"
+                ? "LEG"
+                : "ATM";
+      zSpan.className =
+        "corridor-zone-pill" +
+        (q.is_put_wall
+          ? " corridor-zone-pill--pw"
+          : q.is_call_wall
+            ? " corridor-zone-pill--cw"
+            : "");
+      zSpan.textContent = zLabel;
+      tdZone.appendChild(zSpan);
+      if (q.is_strategy_leg && zLabel !== "LEG") {
+        var legSpan = document.createElement("span");
+        legSpan.className = "corridor-zone-pill corridor-zone-pill--leg";
+        legSpan.textContent = "LEG";
+        tdZone.appendChild(legSpan);
+      }
+      tr.appendChild(tdZone);
+
+      var tdRight = document.createElement("td");
+      tdRight.className = "text-left";
+      var rPill = document.createElement("span");
+      rPill.className = "right-pill right-pill--" + q.right;
+      rPill.textContent = q.right;
+      tdRight.appendChild(rPill);
+      tr.appendChild(tdRight);
+
+      var tdStrike = document.createElement("td");
+      tdStrike.className = "num";
+      tdStrike.textContent =
+        formatStrikeShort(q.strike) +
+        (q.expiry !== frame.target_expiry ? " (" + q.dte + "d)" : "");
+      tr.appendChild(tdStrike);
+
+      var tdBid = document.createElement("td");
+      tdBid.className = "num" + flashClass;
+      tdBid.textContent = q.bid !== null && q.bid !== undefined ? fmtNum(q.bid, 2) : "\u2014";
+      tr.appendChild(tdBid);
+
+      var tdAsk = document.createElement("td");
+      tdAsk.className = "num" + flashClass;
+      tdAsk.textContent = q.ask !== null && q.ask !== undefined ? fmtNum(q.ask, 2) : "\u2014";
+      tr.appendChild(tdAsk);
+
+      var tdMid = document.createElement("td");
+      tdMid.className = "num" + flashClass;
+      tdMid.textContent = q.mid !== null && q.mid !== undefined ? fmtMoney(q.mid) : "\u2014";
+      tr.appendChild(tdMid);
+
+      var tdSpread = document.createElement("td");
+      tdSpread.className = "num";
+      tdSpread.textContent =
+        q.spread_pct !== null && q.spread_pct !== undefined
+          ? fmtNum(q.spread_pct, 1) + "%"
+          : "\u2014";
+      tr.appendChild(tdSpread);
+
+      var tdVolOi = document.createElement("td");
+      tdVolOi.className = "num";
+      var vTxt = q.volume !== null && q.volume !== undefined ? fmtInt(q.volume) : "\u2014";
+      var oiTxt =
+        q.open_interest !== null && q.open_interest !== undefined
+          ? fmtInt(q.open_interest)
+          : "\u2014";
+      tdVolOi.textContent = vTxt + " / " + oiTxt;
+      tr.appendChild(tdVolOi);
+
+      var tdGreeks = document.createElement("td");
+      tdGreeks.className = "num";
+      var gD = q.delta !== null && q.delta !== undefined ? fmtNum(q.delta, 2) : "\u2014";
+      var gIv =
+        q.iv !== null && q.iv !== undefined ? fmtNum(Number(q.iv) * 100, 1) + "%" : "\u2014";
+      tdGreeks.textContent = gD + " \u2022 " + gIv;
+      tr.appendChild(tdGreeks);
+
+      tbody.appendChild(tr);
+    }
+
+    state.corridorPrevMids = nextPrevMids;
+  }
+
+  function renderCorridorChart(frame, t) {
+    var el = dom.corridorChartEl;
+    if (!el || typeof window.Plotly === "undefined") return;
+    if (!frame || !frame.quotes || !frame.quotes.length) {
+      renderCorridorEmptyPlaceholder();
+      return;
+    }
+
+    var callX = [];
+    var callY = [];
+    var callUp = [];
+    var callDn = [];
+    var callHover = [];
+    var putX = [];
+    var putY = [];
+    var putUp = [];
+    var putDn = [];
+    var putHover = [];
+
+    for (var i = 0; i < frame.quotes.length; i++) {
+      var q = frame.quotes[i];
+      if (q.expiry !== frame.target_expiry) continue;
+      if (q.mid === null || q.mid === undefined) continue;
+      var midVal = Number(q.mid);
+      var bidVal = q.bid !== null && q.bid !== undefined ? Number(q.bid) : midVal;
+      var askVal = q.ask !== null && q.ask !== undefined ? Number(q.ask) : midVal;
+      var upErr = Math.max(0, askVal - midVal);
+      var dnErr = Math.max(0, midVal - bidVal);
+      var label =
+        "$" +
+        fmtNum(q.strike, 2) +
+        " " +
+        q.right +
+        "<br>Bid/Ask: " +
+        fmtNum(bidVal, 2) +
+        " / " +
+        fmtNum(askVal, 2) +
+        "<br>Mid: $" +
+        fmtNum(midVal, 2) +
+        (q.delta !== null && q.delta !== undefined ? "<br>\u0394: " + fmtNum(q.delta, 2) : "");
+      if (q.right === "C") {
+        callX.push(q.strike);
+        callY.push(midVal);
+        callUp.push(upErr);
+        callDn.push(dnErr);
+        callHover.push(label);
+      } else {
+        putX.push(q.strike);
+        putY.push(midVal);
+        putUp.push(upErr);
+        putDn.push(dnErr);
+        putHover.push(label);
+      }
+    }
+
+    if (!callX.length && !putX.length) {
+      renderCorridorEmptyPlaceholder();
+      return;
+    }
+
+    el.classList.remove("is-idle");
+    if (!el.data) {
+      el.innerHTML = "";
+    }
+
+    var traces = [];
+    if (callX.length) {
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: "Call Mid (Bid-Ask)",
+        x: callX,
+        y: callY,
+        error_y: {
+          type: "data",
+          symmetric: false,
+          array: callUp,
+          arrayminus: callDn,
+          color: t.call,
+          thickness: 1.5,
+          width: 4,
+        },
+        line: { color: t.call, width: 2 },
+        marker: { color: t.call, size: 7 },
+        text: callHover,
+        hovertemplate: "%{text}<extra></extra>",
+      });
+    }
+    if (putX.length) {
+      traces.push({
+        type: "scatter",
+        mode: "lines+markers",
+        name: "Put Mid (Bid-Ask)",
+        x: putX,
+        y: putY,
+        error_y: {
+          type: "data",
+          symmetric: false,
+          array: putUp,
+          arrayminus: putDn,
+          color: t.put,
+          thickness: 1.5,
+          width: 4,
+        },
+        line: { color: t.put, width: 2 },
+        marker: { color: t.put, size: 7, symbol: "diamond" },
+        text: putHover,
+        hovertemplate: "%{text}<extra></extra>",
+      });
+    }
+
+    var markers = [
+      makeVerticalMarker(frame.underlying_price, "SPOT $" + fmtNum(frame.underlying_price, 2), t.ink, 0.99, "dash", t),
+    ];
+    if (frame.primary_put_wall) {
+      markers.push(
+        makeVerticalMarker(frame.primary_put_wall, "PW $" + fmtNum(frame.primary_put_wall, 0), t.put, 0.87, "dot", t)
+      );
+    }
+    if (frame.primary_call_wall) {
+      markers.push(
+        makeVerticalMarker(frame.primary_call_wall, "CW $" + fmtNum(frame.primary_call_wall, 0), t.call, 0.75, "dot", t)
+      );
+    }
+
+    var layout = baseLayout(t, "Corridor Strike ($)", "Option Mid & Bid-Ask ($)", markers);
+    layout.xaxis.tickprefix = "$";
+    layout.yaxis.tickprefix = "$";
+    layout.legend = {
+      orientation: "h",
+      y: 1.13,
+      x: 0.5,
+      xanchor: "center",
+      font: { size: 10, color: t.ink },
+    };
+    layout.margin = { t: 46, r: 20, b: 44, l: 58 };
+    window.Plotly.react(el, traces, layout, { responsive: true, displayModeBar: false });
+    schedulePlotlyResize(el);
+    window.setTimeout(function () {
+      schedulePlotlyResize(el);
+    }, 60);
+  }
+
+  function mergeCorridorQuotesIntoChain(frame, options) {
+    if (!state.chainData || !state.chainData.contracts || !frame || !frame.quotes) return false;
+    var opts = options || {};
+    var bypassThrottle = Boolean(opts.bypassAutoThrottle);
+    if (frame.underlying_price && frame.underlying_price > 0) {
+      state.chainData.meta.underlying_price = frame.underlying_price;
+      if (dom.kpiSpot) {
+        var spotValEl = dom.kpiSpot.querySelector(".kpi-value");
+        if (spotValEl) spotValEl.textContent = fmtMoney(frame.underlying_price);
+      }
+    }
+
+    var byKey = {};
+    for (var i = 0; i < frame.quotes.length; i++) {
+      var q = frame.quotes[i];
+      byKey[corridorKey(q.expiry, q.strike, q.right)] = q;
+    }
+
+    var touched = false;
+    for (var c = 0; c < state.chainData.contracts.length; c++) {
+      var row = state.chainData.contracts[c];
+      var match = byKey[corridorKey(row.expiry, row.strike, row.right)];
+      if (!match) continue;
+      touched = true;
+      row.bid = match.bid;
+      row.ask = match.ask;
+      row.mid = match.mid;
+      if (match.mid !== null && match.mid !== undefined) row.mark_price = match.mid;
+      row.last = match.last;
+      row.close = match.close;
+      if (match.volume !== null && match.volume !== undefined) row.volume = match.volume;
+      if (match.open_interest !== null && match.open_interest !== undefined) {
+        row.open_interest = match.open_interest;
+      }
+      if (match.iv !== null && match.iv !== undefined) row.iv = match.iv;
+      if (match.delta !== null && match.delta !== undefined) row.delta = match.delta;
+      if (match.gamma !== null && match.gamma !== undefined) row.gamma = match.gamma;
+      if (match.theta !== null && match.theta !== undefined) row.theta = match.theta;
+      if (match.vega !== null && match.vega !== undefined) row.vega = match.vega;
+      if (match.greeks_source && match.greeks_source !== "NONE") {
+        row.greeks_source = match.greeks_source;
+      }
+    }
+
+    if (touched) {
+      refreshStrategyLegsQuotesOnly();
+      renderTable(state.chainData);
+    }
+
+    if (
+      dom.corridorAutoReprice &&
+      dom.corridorAutoReprice.checked &&
+      state.strategyLegs.length &&
+      (bypassThrottle || (!state.strategyBusy && Date.now() - state.corridorLastRepriceAt >= 2000))
+    ) {
+      evaluateStrategyRequest({ silent: true });
+    }
+    return touched;
+  }
+
+  function applyCorridorFrame(frame, options) {
+    var opts = options || {};
+    state.corridorFrame = frame;
+    updateCorridorStatusUI(frame, opts.modeLabel);
+    renderCorridorKpis(frame);
+    renderCorridorLadder(frame);
+    if (isPanelVisible("corridor")) {
+      renderCorridorChart(frame, themeVars());
+    }
+    if (opts.mergeIntoChain) {
+      mergeCorridorQuotesIntoChain(frame, opts);
+    }
+  }
+
+  function syncCorridorFromChain(data) {
+    if (state.corridorStreaming || state.corridorStreamSource) {
+      stopCorridorStream({ silent: true });
+    }
+    state.corridorPrevMids = {};
+    if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = false;
+
+    if (dom.corridorExpirySelect) {
+      var prev = dom.corridorExpirySelect.value;
+      dom.corridorExpirySelect.innerHTML = "";
+      var exps = strategySortedExpiries(data);
+      if (!exps.length) {
+        var opt0 = document.createElement("option");
+        opt0.value = "";
+        opt0.textContent = "Front DTE";
+        dom.corridorExpirySelect.appendChild(opt0);
+      } else {
+        var snappedCorridorExp = snapDteValueToExpiries(prev, exps, {
+          allowBuckets: false,
+          emptyValue: exps[0].expiry,
+        });
+        for (var i = 0; i < exps.length; i++) {
+          var opt = document.createElement("option");
+          opt.value = exps[i].expiry;
+          opt.textContent = formatExpiryIso(exps[i].expiry) + " (" + exps[i].dte + "d)";
+          if (snappedCorridorExp && snappedCorridorExp === exps[i].expiry) opt.selected = true;
+          dom.corridorExpirySelect.appendChild(opt);
+        }
+        if (snappedCorridorExp) {
+          dom.corridorExpirySelect.value = snappedCorridorExp;
+        }
+      }
+    }
+
+    var preview = buildLocalCorridorPreview(data);
+    applyCorridorFrame(preview, { mergeIntoChain: false });
+  }
+
+  async function refreshCorridorQuotesOneShot() {
+    if (!state.chainData || state.corridorBusy) {
+      if (!state.chainData) {
+        showBanner("warn", "Load or refresh an option snapshot before fetching Corridor quotes.");
+      }
+      return;
+    }
+    state.corridorBusy = true;
+    if (dom.corridorRefreshBtn) {
+      dom.corridorRefreshBtn.disabled = true;
+      dom.corridorRefreshBtn.textContent = "FETCHING CORRIDOR...";
+    }
+    var winVal = dom.corridorWindowSelect ? parseInt(dom.corridorWindowSelect.value, 10) || 5 : 5;
+    var expVal = dom.corridorExpirySelect && dom.corridorExpirySelect.value ? dom.corridorExpirySelect.value : null;
+    try {
+      var res = await apiJson("/api/corridor/quotes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ticker: state.ticker,
+          snapshot_id: state.snapshotId || null,
+          target_expiry: expVal,
+          window_strikes: winVal,
+          max_contracts: 56,
+          priority_legs: corridorPriorityLegsList(),
+        }),
+      });
+      if (res.ok && res.body) {
+        applyCorridorFrame(res.body, { mergeIntoChain: true, bypassAutoThrottle: true });
+        await fetchStatus();
+        if (res.body.notices && res.body.notices.length) {
+          showBanner("info", res.body.notices.join(" "));
+        }
+      } else if (res.status === 503) {
+        await fetchStatus();
+        showBanner(
+          "warn",
+          extractApiErrorMessage(
+            res.body,
+            res.textSnippet || "IBKR Gateway is offline. Preserving cached corridor view."
+          ),
+          {
+            ticker: state.ticker,
+            phase: "CORRIDOR",
+            status: res.status,
+            elapsedMs: res.elapsedMs,
+            rawBody: res.textSnippet,
+          }
+        );
+      } else {
+        showBanner(
+          "warn",
+          extractApiErrorMessage(res.body, res.textSnippet || "Corridor quotes pull failed."),
+          {
+            ticker: state.ticker,
+            phase: "CORRIDOR",
+            status: res.status,
+            elapsedMs: res.elapsedMs,
+            rawBody: res.textSnippet,
+          }
+        );
+      }
+    } catch (err) {
+      showBanner("error", "Corridor quote request failed.", {
+        ticker: state.ticker,
+        phase: "CORRIDOR",
+        elapsedMs: err && err.elapsedMs,
+        detail: err && err.message ? err.message : String(err || ""),
+      });
+    } finally {
+      state.corridorBusy = false;
+      if (dom.corridorRefreshBtn) {
+        dom.corridorRefreshBtn.disabled = false;
+        dom.corridorRefreshBtn.textContent = "Refresh Corridor Quotes";
+      }
+    }
+  }
+
+  function stopCorridorStream(options) {
+    var opts = options || {};
+    var wasActive = Boolean(state.corridorStreaming || state.corridorStreamSource);
+    state.corridorStreaming = false;
+    if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = false;
+    if (state.corridorStreamSource) {
+      try {
+        state.corridorStreamSource.close();
+      } catch (_err) {
+        /* ignore */
+      }
+      state.corridorStreamSource = null;
+    }
+    if (wasActive && !opts.skipRemoteStop) {
+      try {
+        window.fetch("/api/corridor/stop", { method: "POST", keepalive: true }).catch(function () {});
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+    updateCorridorStatusUI(state.corridorFrame, opts.modeLabel || null);
+    if (!opts.silent && wasActive) {
+      showBanner("info", "Live Wall Corridor streaming stopped; IBKR subscriptions cancelled.");
+    }
+  }
+
+  function startCorridorStream() {
+    if (!state.chainData) {
+      if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = false;
+      showBanner("warn", "Load or refresh an option snapshot before enabling Live Streaming.");
+      return;
+    }
+    stopCorridorStream({ silent: true });
+
+    var winVal = dom.corridorWindowSelect ? parseInt(dom.corridorWindowSelect.value, 10) || 5 : 5;
+    var expVal = dom.corridorExpirySelect && dom.corridorExpirySelect.value ? dom.corridorExpirySelect.value : "";
+    var params = new URLSearchParams();
+    if (state.snapshotId) params.set("snapshot_id", state.snapshotId);
+    if (expVal) params.set("target_expiry", expVal);
+    params.set("window_strikes", String(winVal));
+    params.set("max_contracts", "56");
+    var legParam = corridorPriorityLegsParam();
+    if (legParam) params.set("priority_legs", legParam);
+
+    var url = "/api/corridor/stream/" + encodeURIComponent(state.ticker) + "?" + params.toString();
+    state.corridorStreaming = true;
+    if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = true;
+    updateCorridorStatusUI(state.corridorFrame, "CONNECTING STREAM...");
+
+    var es = new window.EventSource(url);
+    state.corridorStreamSource = es;
+
+    es.addEventListener("frame", function (ev) {
+      if (!state.corridorStreaming) return;
+      try {
+        var frame = JSON.parse(ev.data);
+        applyCorridorFrame(frame, { mergeIntoChain: true });
+      } catch (_err) {
+        /* ignore malformed tick */
+      }
+    });
+
+    es.addEventListener("error", function (ev) {
+      if (ev && ev.data) {
+        var msg = "IBKR Gateway error during live corridor stream.";
+        try {
+          var errObj = JSON.parse(ev.data);
+          if (errObj && errObj.message) msg = errObj.message;
+        } catch (_err) {
+          /* ignore */
+        }
+        stopCorridorStream({ silent: true, skipRemoteStop: true, modeLabel: "STREAM OFFLINE" });
+        fetchStatus();
+        showBanner("warn", msg);
+      }
+    });
+
+    es.onerror = function () {
+      if (!state.corridorStreaming) return;
+      stopCorridorStream({ silent: true, modeLabel: "STREAM DISCONNECTED" });
+      fetchStatus();
+      showBanner(
+        "warn",
+        "Live corridor stream interrupted or IBKR Gateway unreachable (Port 4001). Subscriptions cancelled."
+      );
+    };
+  }
+
   // ------------------------------------------------------------------ Network Requests
   async function apiJson(url, options) {
-    var resp = await window.fetch(url, options);
-    var body = null;
-    try {
-      body = await resp.json();
-    } catch (_err) {
-      body = null;
+    var opts = options ? Object.assign({}, options) : {};
+    var timeoutMs = Number(opts.timeoutMs || 0);
+    delete opts.timeoutMs;
+
+    var timerId = null;
+    var timedOut = false;
+    var controller = null;
+    if (timeoutMs > 0 && typeof AbortController !== "undefined" && !opts.signal) {
+      controller = new AbortController();
+      opts.signal = controller.signal;
+      timerId = window.setTimeout(function () {
+        timedOut = true;
+        try {
+          controller.abort();
+        } catch (_abortErr) {
+          /* ignore */
+        }
+      }, timeoutMs);
     }
-    return { ok: resp.ok, status: resp.status, body: body };
+
+    var startedAt = Date.now();
+    try {
+      var resp = await window.fetch(url, opts);
+      var elapsedMs = Date.now() - startedAt;
+      var rawText = "";
+      var body = null;
+      if (typeof resp.text === "function") {
+        try {
+          rawText = await resp.text();
+          if (rawText && rawText.trim()) {
+            body = JSON.parse(rawText);
+          }
+        } catch (_parseErr) {
+          body = null;
+        }
+      } else if (typeof resp.json === "function") {
+        try {
+          body = await resp.json();
+        } catch (_jsonErr) {
+          body = null;
+        }
+      }
+      var snippet = rawText && body === null ? rawText.trim().slice(0, 280) : "";
+      return {
+        ok: resp.ok,
+        status: resp.status,
+        body: body,
+        textSnippet: snippet,
+        elapsedMs: elapsedMs,
+        timedOut: timedOut,
+      };
+    } catch (err) {
+      if (err && typeof err === "object") {
+        err.elapsedMs = Date.now() - startedAt;
+        err.timedOut = timedOut || err.name === "AbortError";
+      }
+      throw err;
+    } finally {
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+      }
+    }
   }
 
   async function fetchStatus(tickerOverride) {
@@ -2109,9 +5376,16 @@
   }
 
   async function loadChain(ticker, snapshotId) {
+    if (state.corridorStreaming || state.corridorStreamSource) {
+      stopCorridorStream({ silent: true });
+    }
+    var prevTicker = state.ticker;
     state.ticker = ticker;
     state.snapshotId = snapshotId || "";
     setActiveTickerUI(ticker);
+    if (ticker !== prevTicker) {
+      applyTickerPullPrefsToControls(ticker);
+    }
 
     await fetchSnapshots(ticker);
     var url = "/api/chain/" + encodeURIComponent(ticker);
@@ -2119,53 +5393,106 @@
       url += "?snapshot_id=" + encodeURIComponent(snapshotId);
     }
 
-    var res = await apiJson(url);
-    if (res.ok && res.body) {
-      state.chainData = res.body;
-      state.snapshotId = res.body.meta.snapshot_id;
-      updateExportLink();
-      syncControlsFromMeta(res.body.meta);
-      renderChainBadges(res.body.meta);
-      renderKpis(res.body);
-      populateDteFilter(res.body);
-      populateWallsDteFilter(res.body);
-      renderAllCharts(res.body);
-      renderTable(res.body);
+    var res;
+    try {
+      res = await apiJson(url);
+    } catch (err) {
+      showBanner("error", "Unable to load option chain for " + ticker + ".", {
+        ticker: ticker,
+        phase: "CHAIN_LOAD",
+        elapsedMs: err && err.elapsedMs,
+        detail: err && err.message ? err.message : String(err || ""),
+      });
+      return;
+    }
 
-      if (res.body.meta.notices && res.body.meta.notices.length) {
-        showBanner("info", res.body.meta.notices.join(" "));
-      } else {
-        showBanner("", "");
+    if (res.ok && res.body) {
+      try {
+        state.chainData = res.body;
+        state.snapshotId = res.body.meta.snapshot_id;
+        updateExportLink();
+        syncControlsFromMeta(res.body.meta);
+        renderChainBadges(res.body.meta);
+        renderKpis(res.body);
+        populateDteFilter(res.body);
+        populateTableHeaderFilters(res.body);
+        populateWallsDteFilter(res.body);
+        syncStrategySelectors(res.body);
+        syncCorridorFromChain(res.body);
+        renderAllCharts(res.body);
+        renderTable(res.body);
+        maybeAutoPopulateStrategy(res.body);
+
+        if (res.body.meta.notices && res.body.meta.notices.length) {
+          showBanner("info", res.body.meta.notices.join(" "), {
+            ticker: ticker,
+            phase: "CHAIN_LOAD",
+            elapsedMs: res.elapsedMs,
+          });
+        } else {
+          showBanner("", "");
+        }
+      } catch (renderErr) {
+        if (window.console && window.console.error) {
+          window.console.error(renderErr);
+        }
+        var renderMsg =
+          renderErr && renderErr.message ? renderErr.message : String(renderErr || "Render error");
+        showBanner("warn", "Snapshot loaded, UI render warning: " + renderMsg, {
+          ticker: ticker,
+          phase: "UI_RENDER",
+          elapsedMs: res.elapsedMs,
+          detail: renderErr && renderErr.stack ? String(renderErr.stack).slice(0, 400) : renderMsg,
+        });
       }
       return;
     }
 
     if (res.status === 404) {
       state.chainData = null;
+      state.strategyLoadedTicker = "";
       resetControlCapabilities();
+      applyTickerPullPrefsToControls(ticker);
       await fetchStatus(ticker);
       purgeCharts();
       renderChainBadges(null);
       renderKpis(null);
       populateDteFilter(null);
+      populateTableHeaderFilters(null);
       populateWallsDteFilter(null);
+      syncStrategySelectors(null);
+      syncCorridorFromChain(null);
       renderTable(null);
       showBanner(
         "info",
         "No cached snapshot exists for " +
           ticker +
-          ". Click REFRESH FROM IBKR to pull and archive live/delayed chain data."
+          ". Click REFRESH FROM IBKR to pull and archive live/delayed chain data.",
+        { ticker: ticker, phase: "CHAIN_LOAD", status: 404, elapsedMs: res.elapsedMs }
       );
       return;
     }
 
-    var errMsg =
-      (res.body && res.body.message) || "Unable to load option chain for " + ticker + ".";
-    showBanner("error", errMsg);
+    var errMsg = extractApiErrorMessage(
+      res.body,
+      res.textSnippet || "Unable to load option chain for " + ticker + "."
+    );
+    showBanner("error", errMsg, {
+      ticker: ticker,
+      phase: "CHAIN_LOAD",
+      status: res.status,
+      errorCode: res.body && res.body.error_code,
+      elapsedMs: res.elapsedMs,
+      detail: res.body && res.body.detail ? String(res.body.detail) : "",
+      rawBody: res.textSnippet,
+    });
   }
 
   async function refreshFromIBKR() {
     if (state.loading) return;
+    if (state.corridorStreaming || state.corridorStreamSource) {
+      stopCorridorStream({ silent: true });
+    }
     state.loading = true;
     if (dom.refreshBtn) {
       dom.refreshBtn.disabled = true;
@@ -2173,32 +5500,93 @@
     }
 
     var rangeVal = dom.rangeSelect ? Number(dom.rangeSelect.value) : 0.2;
-    var stepRaw = dom.stepSelect ? dom.stepSelect.value : "5.0";
+    var stepRaw = dom.stepSelect ? dom.stepSelect.value : "auto";
     var stepVal = stepRaw === "auto" ? null : Number(stepRaw);
+    var dteMaxVal = dom.dteMaxSelect ? Number(dom.dteMaxSelect.value) : 120;
+    var pullScope = buildActivePullScopeText();
+    writeTickerPullPrefs(state.ticker);
 
     try {
-      var res = await apiJson("/api/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
+      // Stage 1: HTTP / IBKR Gateway Pull
+      var res;
+      try {
+        res = await apiJson("/api/refresh", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          timeoutMs: 120000,
+          body: JSON.stringify({
+            ticker: state.ticker,
+            range_pct: rangeVal,
+            strike_step: stepVal,
+            dte_min: 30,
+            dte_max: dteMaxVal,
+          }),
+        });
+      } catch (httpErr) {
+        await fetchStatus();
+        var rawErrMsg =
+          httpErr && httpErr.message ? httpErr.message : String(httpErr || "Request aborted");
+        var isTimeout = Boolean(httpErr && httpErr.timedOut);
+        var bannerTitle = isTimeout
+          ? "IBKR refresh timed out after 120s. Preserving cached snapshot view."
+          : "Network or gateway interruption during refresh (" +
+            rawErrMsg +
+            "). Preserving cached snapshot view.";
+        showBanner("warn", bannerTitle, {
           ticker: state.ticker,
-          range_pct: rangeVal,
-          strike_step: stepVal,
-        }),
-      });
+          pullScope: pullScope,
+          phase: isTimeout ? "TIMEOUT" : "REFRESH_HTTP",
+          elapsedMs: httpErr && httpErr.elapsedMs,
+          detail: rawErrMsg,
+          hint: isTimeout
+            ? "Try narrowing Range %, raising Strike Step ($5/$10), or lowering Max DTE before retrying."
+            : "Verify IBKR Gateway Port 4001 and FastAPI server availability; cached snapshot remains active.",
+        });
+        return;
+      }
 
-      if (res.ok && res.body) {
+      if (!res.ok || !res.body) {
+        await fetchStatus();
+        var fallbackMsg =
+          res.status === 503
+            ? "IBKR Gateway is offline or unreachable. Preserving cached snapshot view."
+            : "Refresh failed (HTTP " + res.status + "). Preserving cached snapshot view.";
+        var apiMsg = extractApiErrorMessage(res.body, res.textSnippet || fallbackMsg);
+        showBanner(res.status === 503 ? "warn" : "error", apiMsg, {
+          ticker: state.ticker,
+          pullScope: pullScope,
+          phase: res.status === 503 ? "GATEWAY" : "REFRESH_HTTP",
+          status: res.status,
+          errorCode: res.body && res.body.error_code,
+          elapsedMs: res.elapsedMs,
+          detail: res.body && res.body.detail ? String(res.body.detail) : "",
+          rawBody: res.textSnippet,
+          hint:
+            res.status === 503
+              ? "Check IBKR Gateway connection on Port 4001; cached view preserved."
+              : "Preserving previous cached snapshot view.",
+        });
+        return;
+      }
+
+      // Stage 2: Post-Refresh DOM / Plotly Render
+      try {
         state.chainData = res.body;
         state.snapshotId = res.body.meta.snapshot_id;
+        updateExportLink();
         await fetchSnapshots(state.ticker);
         await fetchStatus();
-        syncControlsFromMeta(res.body.meta);
+        syncControlsFromMeta(res.body.meta, { fromRefresh: true });
         renderChainBadges(res.body.meta);
         renderKpis(res.body);
         populateDteFilter(res.body);
+        populateTableHeaderFilters(res.body);
         populateWallsDteFilter(res.body);
+        syncStrategySelectors(res.body);
+        syncCorridorFromChain(res.body);
         renderAllCharts(res.body);
         renderTable(res.body);
+        maybeAutoPopulateStrategy(res.body);
         var msg =
           res.body.meta.notices && res.body.meta.notices.length
             ? res.body.meta.notices.join(" ")
@@ -2210,24 +5598,28 @@
                 res.body.meta.exchange_validated_strike_count +
                 " exchange-validated strikes)."
               : "Archived new IBKR snapshot " + res.body.meta.snapshot_id + ".";
-        showBanner("info", msg);
-      } else if (res.status === 503) {
-        await fetchStatus();
-        var offlineMsg =
-          (res.body && res.body.message) ||
-          "IBKR Gateway is offline or unreachable. Preserving cached snapshot view.";
-        showBanner("warn", offlineMsg);
-      } else {
-        await fetchStatus();
-        var errMsg = (res.body && res.body.message) || "Refresh failed.";
-        showBanner("error", errMsg);
+        showBanner("info", msg, {
+          ticker: state.ticker,
+          pullScope: pullScope,
+          phase: "REFRESH_OK",
+          elapsedMs: res.elapsedMs,
+        });
+      } catch (renderErr) {
+        if (window.console && window.console.error) {
+          window.console.error(renderErr);
+        }
+        var renderErrMsg =
+          renderErr && renderErr.message ? renderErr.message : String(renderErr || "Render error");
+        showBanner("warn", "Snapshot saved, UI render warning: " + renderErrMsg, {
+          ticker: state.ticker,
+          pullScope: pullScope,
+          phase: "UI_RENDER",
+          elapsedMs: res.elapsedMs,
+          detail:
+            renderErr && renderErr.stack ? String(renderErr.stack).slice(0, 400) : renderErrMsg,
+          hint: "The CSV snapshot was archived on disk; reload or adjust panel view if charts look stale.",
+        });
       }
-    } catch (_err) {
-      await fetchStatus();
-      showBanner(
-        "warn",
-        "Network or gateway interruption during refresh. Preserving cached snapshot view."
-      );
     } finally {
       state.loading = false;
       if (dom.refreshBtn) {
@@ -2287,6 +5679,24 @@
     if (dom.refreshBtn) {
       dom.refreshBtn.addEventListener("click", refreshFromIBKR);
     }
+
+    if (dom.alertBanner) {
+      dom.alertBanner.addEventListener("click", function (ev) {
+        var closeBtn =
+          ev.target && ev.target.closest ? ev.target.closest("#alert-banner-close, .alert-banner-close") : null;
+        if (closeBtn) {
+          clearAlertBanner();
+        }
+      });
+    }
+
+    [dom.rangeSelect, dom.stepSelect, dom.dteMaxSelect].forEach(function (ctrl) {
+      if (ctrl) {
+        ctrl.addEventListener("change", function () {
+          writeTickerPullPrefs(state.ticker);
+        });
+      }
+    });
 
     if (dom.wallsCopyAiBtn) {
       dom.wallsCopyAiBtn.addEventListener("click", copyWallsAiPrompt);
@@ -2349,8 +5759,250 @@
     [dom.filterDte, dom.filterRight, dom.filterUnusual].forEach(function (ctrl) {
       if (ctrl) {
         ctrl.addEventListener("change", function () {
+          if (ctrl === dom.filterDte && dom.thFilterExpiry) {
+            var dVal = dom.filterDte.value || "ALL";
+            var expVal = dVal === "ALL" || dVal.indexOf("BUCKET:") === 0 ? "" : dVal;
+            dom.thFilterExpiry.value = expVal;
+            state.tableFilters.expiry = expVal;
+          }
+          if (ctrl === dom.filterRight && dom.thFilterRight) {
+            var rVal = dom.filterRight.value === "ALL" ? "" : dom.filterRight.value;
+            dom.thFilterRight.value = rVal;
+            state.tableFilters.right = rVal;
+          }
+          updateHeaderFilterHighlights();
+          syncDteBucketTabs(state.chainData);
           renderTable(state.chainData);
         });
+      }
+    });
+
+    if (dom.dteBucketTabs) {
+      dom.dteBucketTabs.addEventListener("click", function (ev) {
+        var btn =
+          ev.target && ev.target.closest ? ev.target.closest("[data-dte-bucket]") : null;
+        if (!btn || btn.disabled) return;
+        var bucketVal = btn.getAttribute("data-dte-bucket") || "ALL";
+        if (dom.filterDte) {
+          dom.filterDte.value = bucketVal;
+        }
+        if (dom.thFilterExpiry) {
+          dom.thFilterExpiry.value = "";
+          state.tableFilters.expiry = "";
+          updateHeaderFilterHighlights();
+        }
+        syncDteBucketTabs(state.chainData);
+        renderTable(state.chainData);
+      });
+    }
+
+    if (dom.tableResetFiltersBtn) {
+      dom.tableResetFiltersBtn.addEventListener("click", resetAllTableFilters);
+    }
+
+    if (dom.tableBody) {
+      dom.tableBody.addEventListener("click", function (ev) {
+        var legBtn =
+          ev.target && ev.target.closest ? ev.target.closest(".chain-add-leg-btn") : null;
+        if (!legBtn) return;
+        addSpecificStrategyLeg(
+          legBtn.getAttribute("data-leg-expiry"),
+          legBtn.getAttribute("data-leg-right"),
+          legBtn.getAttribute("data-leg-strike")
+        );
+      });
+    }
+
+    if (dom.chainTableHead) {
+      dom.chainTableHead.addEventListener("click", function (ev) {
+        var sortBtn =
+          ev.target && ev.target.closest ? ev.target.closest(".th-sort-btn[data-sort-col]") : null;
+        if (!sortBtn) return;
+        var col = sortBtn.getAttribute("data-sort-col");
+        var colDef = col ? TABLE_COLUMN_BY_KEY[col] : null;
+        if (!colDef) return;
+
+        var firstDir = colDef.defaultDir || "asc";
+        var secondDir = firstDir === "asc" ? "desc" : "asc";
+        if (!state.tableSort || state.tableSort.col !== col) {
+          state.tableSort = { col: col, dir: firstDir };
+        } else if (state.tableSort.dir === firstDir) {
+          state.tableSort = { col: col, dir: secondDir };
+        } else {
+          state.tableSort = { col: null, dir: null };
+        }
+        writeTableSortPref(state.tableSort);
+        syncTableHeaderSortUI();
+        renderTable(state.chainData);
+      });
+
+      function onHeaderFilterChange(ev) {
+        var target = ev.target;
+        if (!target || !target.getAttribute) return;
+        var col = target.getAttribute("data-filter-col");
+        if (!col || !TABLE_COLUMN_BY_KEY[col]) return;
+
+        var val = String(target.value || "").trim();
+        state.tableFilters[col] = val;
+
+        if (col === "expiry" && dom.filterDte) {
+          dom.filterDte.value = val || "ALL";
+          syncDteBucketTabs(state.chainData);
+        } else if (col === "right" && dom.filterRight) {
+          dom.filterRight.value = val || "ALL";
+        }
+
+        updateHeaderFilterHighlights();
+        renderTable(state.chainData);
+      }
+
+      dom.chainTableHead.addEventListener("input", function (ev) {
+        if (ev.target && ev.target.classList && ev.target.classList.contains("th-filter-input")) {
+          onHeaderFilterChange(ev);
+        }
+      });
+
+      dom.chainTableHead.addEventListener("change", function (ev) {
+        if (ev.target && ev.target.classList && ev.target.classList.contains("th-filter-select")) {
+          onHeaderFilterChange(ev);
+        }
+      });
+    }
+
+    if (dom.strategyPresetPills) {
+      dom.strategyPresetPills.addEventListener("click", function (ev) {
+        var btn =
+          ev.target && ev.target.closest ? ev.target.closest("[data-strategy-preset]") : null;
+        if (!btn) return;
+        var preset = btn.getAttribute("data-strategy-preset") || "BULL_PUT_SPREAD";
+        setActiveStrategyPresetUI(preset);
+        if (preset === "CUSTOM") {
+          if (!state.strategyLegs.length && state.chainData) {
+            state.strategyLegs = buildSeedLegsFromChain(state.chainData);
+            renderStrategyLegsTable();
+          }
+          if (dom.strategyRationale) {
+            dom.strategyRationale.textContent =
+              "Custom leg builder active. Edit strikes/rights below and click Evaluate / Re-Price.";
+          }
+          return;
+        }
+        autoBuildStrategy(preset);
+      });
+    }
+
+    if (dom.strategyAutoBuildBtn) {
+      dom.strategyAutoBuildBtn.addEventListener("click", function () {
+        autoBuildStrategy(state.strategyKind);
+      });
+    }
+
+    if (dom.strategyEvaluateBtn) {
+      dom.strategyEvaluateBtn.addEventListener("click", function () {
+        evaluateStrategyRequest();
+      });
+    }
+
+    if (dom.strategyAddLegBtn) {
+      dom.strategyAddLegBtn.addEventListener("click", function () {
+        addCustomStrategyLegRow();
+      });
+    }
+
+    if (dom.strategyAutoPopulate) {
+      dom.strategyAutoPopulate.addEventListener("change", function () {
+        writePref(
+          STRATEGY_AUTO_POPULATE_KEY,
+          dom.strategyAutoPopulate.checked ? "true" : "false"
+        );
+        if (
+          dom.strategyAutoPopulate.checked &&
+          state.chainData &&
+          !state.strategyEvaluation &&
+          !state.strategyBusy
+        ) {
+          maybeAutoPopulateStrategy(state.chainData);
+        }
+      });
+    }
+
+    if (dom.strategyResetBtn) {
+      dom.strategyResetBtn.addEventListener("click", function () {
+        resetStrategyEvaluationUI(true);
+      });
+    }
+
+    if (dom.strategyDaysSlider) {
+      dom.strategyDaysSlider.addEventListener("input", function () {
+        renderStrategySlidersMax(dom.strategyDaysSlider.max);
+      });
+      dom.strategyDaysSlider.addEventListener("change", function () {
+        renderStrategySlidersMax(dom.strategyDaysSlider.max);
+        if (state.chainData && state.strategyLegs.length) {
+          evaluateStrategyRequest();
+        }
+      });
+    }
+
+    if (dom.strategyIvSlider) {
+      dom.strategyIvSlider.addEventListener("input", function () {
+        renderStrategySlidersMax(dom.strategyDaysSlider ? dom.strategyDaysSlider.max : 120);
+      });
+      dom.strategyIvSlider.addEventListener("change", function () {
+        renderStrategySlidersMax(dom.strategyDaysSlider ? dom.strategyDaysSlider.max : 120);
+        if (state.chainData && state.strategyLegs.length) {
+          evaluateStrategyRequest();
+        }
+      });
+    }
+
+    function onCorridorControlChange() {
+      if (state.corridorStreaming || state.corridorStreamSource) {
+        stopCorridorStream({ silent: true });
+      }
+      if (state.chainData) {
+        applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+      }
+    }
+
+    if (dom.corridorExpirySelect) {
+      dom.corridorExpirySelect.addEventListener("change", onCorridorControlChange);
+    }
+    if (dom.corridorWindowSelect) {
+      dom.corridorWindowSelect.addEventListener("change", onCorridorControlChange);
+    }
+    if (dom.corridorRefreshBtn) {
+      dom.corridorRefreshBtn.addEventListener("click", refreshCorridorQuotesOneShot);
+    }
+    if (dom.corridorStreamToggle) {
+      dom.corridorStreamToggle.addEventListener("change", function () {
+        if (dom.corridorStreamToggle.checked) {
+          startCorridorStream();
+        } else {
+          stopCorridorStream();
+        }
+      });
+    }
+    if (dom.corridorAutoReprice) {
+      dom.corridorAutoReprice.addEventListener("change", function () {
+        if (
+          dom.corridorAutoReprice.checked &&
+          state.chainData &&
+          state.strategyLegs.length &&
+          state.corridorFrame &&
+          (state.corridorStreaming || state.corridorFrame.source !== "CACHED_PREVIEW")
+        ) {
+          evaluateStrategyRequest({ silent: true });
+        }
+      });
+    }
+
+    window.addEventListener("pagehide", function () {
+      if (state.corridorStreaming || state.corridorStreamSource) {
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon("/api/corridor/stop");
+        }
+        stopCorridorStream({ silent: true, skipRemoteStop: true });
       }
     });
   }
@@ -2667,7 +6319,7 @@
         " DTE (" +
         promptExpiryIso(activeExpiries[0].expiry) +
         ")"
-      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (30\u201359 DTE): " +
+      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (30\u2013120 DTE): " +
         activeExpiries
           .map(function (ex) {
             return ex.dte + "d (" + promptExpiryIso(ex.expiry) + ")";
@@ -3128,7 +6780,7 @@
       showBanner("warn", "No option strikes available in the active DTE scope.");
       return;
     }
-    var dteScope = "all weekly expirations (30\u201359 DTE)";
+    var dteScope = "all weekly expirations (30\u2013120 DTE)";
     copyTextToClipboard(promptText)
       .then(function () {
         if (dom.wallsCopyAiBtn) {
@@ -3174,7 +6826,7 @@
   }
 
   var SNAP_COLS = [4, 6, 8, 12];
-  var SNAP_HEIGHTS = [290, 350, 410, 470, 530, 590, 650, 720, 800, 880];
+  var SNAP_HEIGHTS = [290, 350, 410, 470, 530, 590, 650, 720, 800, 880, 960, 1080];
   var GRID_LAYOUT_KEY = "ibkr_chart_grid_layout_v1";
 
   function readGridLayoutPrefs() {
@@ -3241,30 +6893,30 @@
     return { span: bestSpan, height: bestHeight };
   }
 
+  var rafByCanvasId = {};
+  function schedulePlotlyResize(canvasEl) {
+    if (!canvasEl || typeof window.Plotly === "undefined" || !canvasEl.data) return;
+    var cardEl = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
+    if (cardEl && cardEl.classList.contains("is-hidden")) return;
+    var cid = canvasEl.id || "chart";
+    if (rafByCanvasId[cid]) {
+      window.cancelAnimationFrame(rafByCanvasId[cid]);
+    }
+    rafByCanvasId[cid] = window.requestAnimationFrame(function () {
+      var cardNow = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
+      if (cardNow && cardNow.classList.contains("is-hidden")) return;
+      var rect = canvasEl.getBoundingClientRect ? canvasEl.getBoundingClientRect() : null;
+      if (rect && (rect.width <= 0 || rect.height <= 0)) return;
+      if (window.Plotly && window.Plotly.Plots && canvasEl.data) {
+        window.Plotly.Plots.resize(canvasEl);
+      }
+    });
+  }
+
   function initChartResizeHandling() {
     var gridEl = document.querySelector(".chart-grid");
     var cards = document.querySelectorAll(".chart-grid .panel-card");
     if (!cards.length) return;
-
-    var rafByCanvasId = {};
-    function schedulePlotlyResize(canvasEl) {
-      if (!canvasEl || typeof window.Plotly === "undefined" || !canvasEl.data) return;
-      var cardEl = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
-      if (cardEl && cardEl.classList.contains("is-hidden")) return;
-      var cid = canvasEl.id || "chart";
-      if (rafByCanvasId[cid]) {
-        window.cancelAnimationFrame(rafByCanvasId[cid]);
-      }
-      rafByCanvasId[cid] = window.requestAnimationFrame(function () {
-        var cardNow = canvasEl.closest ? canvasEl.closest(".panel-card") : null;
-        if (cardNow && cardNow.classList.contains("is-hidden")) return;
-        var rect = canvasEl.getBoundingClientRect ? canvasEl.getBoundingClientRect() : null;
-        if (rect && (rect.width <= 0 || rect.height <= 0)) return;
-        if (window.Plotly && window.Plotly.Plots && canvasEl.data) {
-          window.Plotly.Plots.resize(canvasEl);
-        }
-      });
-    }
 
     function cardKey(card, idx) {
       if (card.id) return card.id;
@@ -3341,7 +6993,16 @@
             applyCardSpanClass(card, Number(pref.span));
           }
           if (pref.height && !isNaN(Number(pref.height))) {
-            card.style.height = Number(pref.height) + "px";
+            var restoredH = Number(pref.height);
+            var minGuard =
+              key === "strategy-lab-card"
+                ? 530
+                : key === "wall-corridor-card"
+                  ? 460
+                  : 0;
+            if (restoredH >= minGuard) {
+              card.style.height = restoredH + "px";
+            }
           }
         }
 
@@ -3370,10 +7031,15 @@
             var curHeight = Math.round(card.getBoundingClientRect().height) || 410;
             card.style.width = "";
             card.style.maxWidth = "";
-            card.style.height = curHeight + "px";
+            if (key === "strategy-lab-card") {
+              card.style.height = "";
+              savedLayout[key] = { span: nextSpan };
+            } else {
+              card.style.height = curHeight + "px";
+              savedLayout[key] = { span: nextSpan, height: curHeight };
+            }
             applyCardSpanClass(card, nextSpan);
             updateCardSpanButton(card);
-            savedLayout[key] = { span: nextSpan, height: curHeight };
             writeGridLayoutPrefs(savedLayout);
             if (canvasEl) {
               schedulePlotlyResize(canvasEl);
@@ -3442,7 +7108,7 @@
             nextW = Math.max(260, Math.min(dragState.maxW, dragState.startW + dx));
             card.style.width = Math.round(nextW) + "px";
           }
-          var nextH = Math.max(290, Math.min(920, dragState.startH + dy));
+          var nextH = Math.max(290, Math.min(1200, dragState.startH + dy));
           card.style.height = Math.round(nextH) + "px";
           var preview = computeTargetSnap(gridEl, nextW, nextH);
           card.setAttribute(
@@ -3520,6 +7186,10 @@
   function init() {
     updateThemeToggleLabel();
     restoreWallsPreferences();
+    syncStrategyAutoPopulateUI();
+    applyTickerPullPrefsToControls(state.ticker);
+    state.tableSort = readTableSortPref();
+    syncTableHeaderSortUI();
     applyPanelVisibility(readPanelVisibility(), { skipRender: true });
     bindEvents();
     initChartResizeHandling();

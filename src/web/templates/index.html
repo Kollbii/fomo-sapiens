@@ -30,7 +30,7 @@
 >
   <span class="editorial-banner-kicker">OPTIONS INTELLIGENCE DISPATCH</span>
   <span id="editorial-banner-copy" class="editorial-banner-copy">
-    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (30&ndash;59 DTE)
+    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (30&ndash;120 DTE)
   </span>
 </section>
 
@@ -78,13 +78,22 @@
 
     <label class="field-group">
       <span class="field-label">Step</span>
-      <select id="strike-step-select" class="select-control" aria-label="Strike stride" title="Strike step ($) adapted to IBKR exchange-native option chains">
-        <option value="auto">Auto</option>
+      <select id="strike-step-select" class="select-control" aria-label="Strike stride" title="Strike step ($) adapted to IBKR exchange-native option chains (defaults to Auto)">
+        <option value="auto"{% if default_strike_step is none %} selected{% endif %}>Auto</option>
         {% for step in allowed_strike_steps %}
-        <option value="{{ step }}"{% if step == default_strike_step %} selected{% endif %}>
+        <option value="{{ step }}"{% if default_strike_step is not none and step == default_strike_step %} selected{% endif %}>
           ${{ step | int if step == (step | int) else step }}
         </option>
         {% endfor %}
+      </select>
+    </label>
+
+    <label class="field-group">
+      <span class="field-label">DTE</span>
+      <select id="dte-max-select" class="select-control" aria-label="DTE upper bound" title="Upper DTE bound for live IBKR chain pulls (30 to 120 DTE)">
+        <option value="60">30&ndash;60d</option>
+        <option value="90">30&ndash;90d</option>
+        <option value="120" selected>30&ndash;120d</option>
       </select>
     </label>
 
@@ -147,6 +156,24 @@
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Greeks Structure</span>
       </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="corridor"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Wall Corridor</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="strategy"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Strategy Lab</span>
+      </button>
     </div>
     <button
       id="panel-visibility-reset"
@@ -160,7 +187,7 @@
 </section>
 
 <!-- Status / Alert Banner -->
-<div id="alert-banner" class="alert-banner alert-banner--info" role="status" hidden></div>
+<div id="alert-banner" class="alert-banner alert-banner--info" role="status" aria-live="polite" hidden></div>
 
 <!-- Row 4: Headline KPI Strip -->
 <section class="kpi-strip" aria-label="Headline Analytics Summary">
@@ -216,7 +243,7 @@
         </label>
         <label class="field-group">
           <span class="field-label">DTE</span>
-          <select id="walls-dte-select" class="select-control" aria-label="Walls DTE and expiry filter">
+          <select id="walls-dte-select" class="select-control" aria-label="Walls DTE and expiry filter" title="Filter walls by DTE bucket (30-60d, 61-90d, 91-120d) or individual expiry up to 120 DTE">
             <option value="ALL" selected>All DTEs</option>
           </select>
         </label>
@@ -236,8 +263,8 @@
           id="walls-copy-ai-btn"
           class="btn btn-icon-copy"
           type="button"
-          title="Copy AI analysis prompt (Polish output) for active DTE Call/Put Walls"
-          aria-label="Copy AI analysis prompt for active DTE"
+          title="Copy multi-expiration AI analysis prompt (Polish output, 30-120 DTE)"
+          aria-label="Copy multi-expiration AI analysis prompt (30-120 DTE)"
         >
           <svg
             width="13"
@@ -263,7 +290,7 @@
   <article class="panel-card is-hidden" data-panel-id="iv_smile">
     <header class="panel-header">
       <h2 class="panel-title">Multi-DTE Implied Volatility Smile</h2>
-      <span class="panel-meta">30&ndash;59 DTE WEEKLY EXPIRATIONS</span>
+      <span class="panel-meta">30&ndash;120 DTE WEEKLY EXPIRATIONS</span>
     </header>
     <div id="chart-iv-smile" class="chart-canvas" aria-label="Multi-DTE IV Smile Chart"></div>
   </article>
@@ -291,6 +318,323 @@
     </header>
     <div id="chart-greeks" class="chart-canvas" aria-label="Multi-DTE Greeks Chart"></div>
   </article>
+
+  <!-- Targeted Wall Strike Corridor (+-5 Strikes, <= 60 Contracts) & Live Streaming -->
+  <article
+    id="wall-corridor-card"
+    class="panel-card panel-card--span-12 panel-card--corridor"
+    data-panel-id="corridor"
+    data-default-span="12"
+  >
+    <header class="panel-header panel-header--corridor">
+      <div class="panel-title-stack">
+        <h2 class="panel-title">Wall Strike Corridor &mdash; &plusmn;5 Strikes Live Quotes</h2>
+        <span id="corridor-status-badge" class="panel-meta">IDLE &bull; MANUAL</span>
+      </div>
+      <div class="panel-controls panel-controls--corridor">
+        <span
+          id="corridor-subs-badge"
+          class="badge badge--info"
+          title="Planned/active IBKR subscriptions inside 60-contract hard ceiling"
+        >
+          0 / 60 SUBS
+        </span>
+        <label class="field-group">
+          <span class="field-label">DTE / Exp</span>
+          <select
+            id="corridor-expiry-select"
+            class="select-control"
+            aria-label="Corridor target expiration"
+          >
+            <option value="">Front DTE</option>
+          </select>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Window</span>
+          <select
+            id="corridor-window-select"
+            class="select-control"
+            aria-label="Corridor strike window around Put and Call Walls"
+          >
+            <option value="3">&plusmn;3 Strikes</option>
+            <option value="5" selected>&plusmn;5 Strikes</option>
+            <option value="7">&plusmn;7 Strikes</option>
+          </select>
+        </label>
+        <button
+          id="corridor-refresh-btn"
+          type="button"
+          class="btn btn-primary btn-xs"
+          title="Fetch one-shot IBKR quotes for Wall Corridor contracts (&le; 60 subs)"
+        >
+          Refresh Corridor Quotes
+        </button>
+        <label
+          class="corridor-stream-switch"
+          title="Opt-in Live Constant Streaming (<= 60 IBKR subscriptions; auto-cancels on toggle off or navigation)"
+        >
+          <input
+            id="corridor-stream-toggle"
+            type="checkbox"
+            role="switch"
+            aria-label="Enable Live Constant Streaming"
+          />
+          <span class="corridor-switch-track" aria-hidden="true"></span>
+          <span class="corridor-switch-text">Enable Live Constant Streaming</span>
+        </label>
+        <label
+          class="field-group field-group--checkbox"
+          title="When checked, live Corridor ticks and quote refreshes automatically re-price active Strategy Lab legs"
+        >
+          <input id="corridor-auto-reprice" type="checkbox" />
+          <span class="field-label">Auto Re-Price Strategy</span>
+        </label>
+      </div>
+    </header>
+
+    <div class="corridor-workspace">
+      <div class="corridor-kpi-strip">
+        <div class="corridor-kpi-card corridor-kpi-card--put">
+          <span class="strategy-kpi-label">Put Wall Anchor</span>
+          <strong id="corridor-kpi-pw" class="strategy-kpi-value">&mdash;</strong>
+          <span id="corridor-kpi-pw-sub" class="strategy-kpi-sub">Put corridor avg mid / spread</span>
+        </div>
+        <div class="corridor-kpi-card corridor-kpi-card--call">
+          <span class="strategy-kpi-label">Call Wall Anchor</span>
+          <strong id="corridor-kpi-cw" class="strategy-kpi-value">&mdash;</strong>
+          <span id="corridor-kpi-cw-sub" class="strategy-kpi-sub">Call corridor avg mid / spread</span>
+        </div>
+        <div class="corridor-kpi-card">
+          <span class="strategy-kpi-label">Corridor Spot &amp; Feed</span>
+          <strong id="corridor-kpi-spot" class="strategy-kpi-value">&mdash;</strong>
+          <span id="corridor-kpi-spot-sub" class="strategy-kpi-sub">Cached baseline (manual)</span>
+        </div>
+        <div class="corridor-kpi-card">
+          <span class="strategy-kpi-label">Corridor Latency / Sync</span>
+          <strong id="corridor-kpi-sync" class="strategy-kpi-value">IDLE</strong>
+          <span id="corridor-kpi-sync-sub" class="strategy-kpi-sub">Click Refresh or toggle Streaming ON</span>
+        </div>
+      </div>
+
+      <div class="corridor-split">
+        <section class="corridor-ladder-pane" aria-label="Wall Corridor Quote Ladder">
+          <div class="corridor-table-wrap">
+            <table class="corridor-ladder-table">
+              <thead>
+                <tr>
+                  <th class="text-left">Zone</th>
+                  <th class="text-left">Rgt</th>
+                  <th class="num">Strike</th>
+                  <th class="num">Bid</th>
+                  <th class="num">Ask</th>
+                  <th class="num">Mid</th>
+                  <th class="num">Sprd%</th>
+                  <th class="num">Vol / OI</th>
+                  <th class="num">&Delta; / IV</th>
+                </tr>
+              </thead>
+              <tbody id="corridor-ladder-tbody">
+                <tr>
+                  <td colspan="9" class="text-left">Waiting for cached option snapshot...</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="corridor-chart-pane" aria-label="Wall Corridor Bid-Ask and Mid Ladder Chart">
+          <div
+            id="chart-corridor-ladder"
+            class="chart-canvas chart-canvas--corridor is-idle"
+            aria-label="Wall Strike Corridor Chart"
+          >
+            <div class="strategy-empty-state">
+              Load an option snapshot to preview the Put/Call Wall &plusmn;5 strike corridor, or click <strong>Refresh Corridor Quotes</strong>.
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </article>
+
+  <!-- Big Strategy Builder, Wall Auto-Constructor & T+n Payoff Lab -->
+  <article
+    id="strategy-lab-card"
+    class="panel-card panel-card--span-12 panel-card--strategy"
+    data-panel-id="strategy"
+    data-default-span="12"
+  >
+    <header class="panel-header panel-header--strategy">
+      <div class="panel-title-stack">
+        <h2 class="panel-title">Strategy Lab &mdash; Wall Auto-Builder &amp; T+n Payoff</h2>
+        <span id="strategy-basis-badge" class="panel-meta">IDLE &bull; CLICK TO BUILD</span>
+      </div>
+      <div class="panel-controls panel-controls--strategy">
+        <div
+          id="strategy-preset-pills"
+          class="watchlist-pills strategy-preset-pills"
+          role="group"
+          aria-label="Strategy Presets"
+        >
+          <button type="button" class="pill-btn strategy-preset-btn active" data-strategy-preset="BULL_PUT_SPREAD" title="Credit Put Spread anchored near Put Wall">Bull Put</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BULL_CALL_SPREAD" title="Debit Call Spread capped near Call Wall">Bull Call</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="DIAGONAL_SPREAD" title="Calendar Diagonal Spread across DTEs">Diagonal</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="IRON_CONDOR" title="4-leg Iron Condor anchored between Put &amp; Call Walls">Iron Condor</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="CUSTOM" title="Evaluate custom hand-picked legs">Custom</button>
+        </div>
+        <label class="field-group">
+          <span class="field-label">Expiry</span>
+          <select id="strategy-expiry-select" class="select-control" aria-label="Strategy target expiry">
+            <option value="">Auto (Front)</option>
+          </select>
+        </label>
+        <label class="field-group">
+          <span class="field-label">Qty</span>
+          <input
+            id="strategy-qty-input"
+            type="number"
+            min="1"
+            max="100"
+            value="1"
+            class="select-control strategy-qty-input"
+            aria-label="Strategy contracts multiplier"
+          />
+        </label>
+        <button
+          id="strategy-autobuild-btn"
+          type="button"
+          class="btn btn-primary btn-xs"
+          title="Select optimal option legs anchored to Put/Call Walls, Greeks &amp; liquidity"
+        >
+          Auto-Build from Walls
+        </button>
+        <button
+          id="strategy-evaluate-btn"
+          type="button"
+          class="btn btn-xs"
+          title="Evaluate or re-price exact current legs table using cached or live Corridor quotes"
+        >
+          Evaluate / Re-Price
+        </button>
+        <button
+          id="strategy-add-leg-btn"
+          type="button"
+          class="btn btn-xs"
+          title="Add a pickable custom option leg row"
+        >
+          + Leg
+        </button>
+        <button
+          id="strategy-reset-btn"
+          type="button"
+          class="btn btn-xs"
+          title="Clear calculated payoff curves"
+        >
+          Clear
+        </button>
+        <label
+          class="field-group field-group--checkbox"
+          title="Automatically evaluate a default Wall-anchored strategy from cached CSV when loading or downloading data (zero IBKR calls)"
+        >
+          <input id="strategy-auto-populate" type="checkbox" checked />
+          <span class="field-label">Auto-Build on Load</span>
+        </label>
+      </div>
+    </header>
+
+    <div class="strategy-workspace">
+      <div id="strategy-kpi-grid" class="strategy-kpi-grid">
+        <div class="strategy-kpi-card">
+          <div class="strategy-kpi-label">Net Mid / Natural</div>
+          <div id="strategy-kpi-price" class="strategy-kpi-value">&mdash;</div>
+          <div id="strategy-kpi-price-sub" class="strategy-kpi-sub">Click a preset or Auto-Build</div>
+        </div>
+        <div class="strategy-kpi-card">
+          <div class="strategy-kpi-label">Slippage &amp; Limit Ladder</div>
+          <div id="strategy-kpi-slip" class="strategy-kpi-value">&mdash;</div>
+          <div id="strategy-kpi-slip-sub" class="strategy-kpi-sub">Nat &rarr; Fair &rarr; Mid</div>
+        </div>
+        <div class="strategy-kpi-card">
+          <div class="strategy-kpi-label">Max Profit / Max Loss</div>
+          <div id="strategy-kpi-risk" class="strategy-kpi-value">&mdash;</div>
+          <div id="strategy-kpi-risk-sub" class="strategy-kpi-sub">RoR %</div>
+        </div>
+        <div class="strategy-kpi-card">
+          <div class="strategy-kpi-label">Breakevens / POP / &plusmn;1&sigma;</div>
+          <div id="strategy-kpi-pop" class="strategy-kpi-value">&mdash;</div>
+          <div id="strategy-kpi-pop-sub" class="strategy-kpi-sub">1&sigma; expected move</div>
+        </div>
+        <div class="strategy-kpi-card">
+          <div class="strategy-kpi-label">Net Position Greeks</div>
+          <div id="strategy-kpi-greeks" class="strategy-kpi-value">&mdash;</div>
+          <div id="strategy-kpi-greeks-sub" class="strategy-kpi-sub">&Delta; / &Gamma; / &Theta; / V</div>
+        </div>
+      </div>
+
+      <div id="strategy-rationale" class="strategy-rationale">
+        Cached snapshot ready. Click any strategy preset or <strong>Auto-Build from Walls</strong>, or edit custom legs below and click <strong>Evaluate / Re-Price</strong>.
+      </div>
+
+      <div class="strategy-split">
+        <section class="strategy-legs-pane" aria-label="Interactive Option Legs">
+          <div class="strategy-table-wrap">
+            <table class="chain-table strategy-legs-table">
+              <thead>
+                <tr>
+                  <th>Side</th>
+                  <th>Rgt</th>
+                  <th>Expiry</th>
+                  <th>Strike</th>
+                  <th class="num">Qty</th>
+                  <th class="num">Bid/Ask</th>
+                  <th class="num">Mid</th>
+                  <th class="num">&Delta; / IV</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="strategy-legs-tbody"></tbody>
+            </table>
+          </div>
+          <div class="strategy-sim-bar">
+            <label class="strategy-slider-label">
+              <span>Time Forward: <strong id="strategy-days-readout">T+0d</strong></span>
+              <input
+                id="strategy-days-slider"
+                type="range"
+                min="0"
+                max="120"
+                step="1"
+                value="0"
+              />
+            </label>
+            <label class="strategy-slider-label">
+              <span>IV Shock: <strong id="strategy-iv-readout">0%</strong></span>
+              <input
+                id="strategy-iv-slider"
+                type="range"
+                min="-30"
+                max="50"
+                step="5"
+                value="0"
+              />
+            </label>
+          </div>
+        </section>
+
+        <section class="strategy-chart-pane" aria-label="Strategy T+n Payoff Chart">
+          <div
+            id="chart-strategy-payoff"
+            class="chart-canvas chart-canvas--strategy is-idle"
+            aria-label="Strategy Payoff Diagram"
+          >
+            <div class="strategy-empty-state">
+              Click a preset or <strong>Auto-Build from Walls</strong> / <strong>Evaluate Legs</strong> to plot T+0, Midpoint, Expiration &amp; Simulated P&amp;L curves.
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </article>
 </section>
 
 <!-- Row 6: High-Density Option Chain Table -->
@@ -301,9 +645,23 @@
       <span id="table-row-count" class="panel-meta">0 CONTRACTS</span>
     </div>
     <div class="control-group">
+      <div id="dte-bucket-tabs" class="dte-bucket-tabs" role="group" aria-label="DTE Quick Range Filters">
+        <button type="button" class="dte-tab-btn active" data-dte-bucket="ALL" aria-pressed="true">
+          All (30&ndash;120d)
+        </button>
+        <button type="button" class="dte-tab-btn" data-dte-bucket="BUCKET:30-60" aria-pressed="false">
+          30&ndash;60d
+        </button>
+        <button type="button" class="dte-tab-btn" data-dte-bucket="BUCKET:61-90" aria-pressed="false">
+          61&ndash;90d
+        </button>
+        <button type="button" class="dte-tab-btn" data-dte-bucket="BUCKET:91-120" aria-pressed="false">
+          91&ndash;120d
+        </button>
+      </div>
       <label class="field-group">
         <span class="field-label">DTE / Expiry</span>
-        <select id="filter-dte" class="select-control" aria-label="Filter by DTE and Expiry">
+        <select id="filter-dte" class="select-control" aria-label="Filter by DTE and Expiry" title="Filter option chain rows by DTE bucket or expiration date up to 120 DTE">
           <option value="ALL">All DTEs</option>
         </select>
       </label>
@@ -319,6 +677,14 @@
         <input id="filter-unusual" type="checkbox" />
         <span class="field-label">Unusual Only</span>
       </label>
+      <button
+        id="table-reset-filters-btn"
+        type="button"
+        class="btn btn-xs"
+        title="Clear all column header filters, toolbar filters, and sort order"
+      >
+        Reset Filters
+      </button>
     </div>
   </header>
 
@@ -326,28 +692,94 @@
     <table id="chain-table">
       <thead>
         <tr>
-          <th class="text-left">Expiry</th>
-          <th>DTE</th>
-          <th class="text-left">Right</th>
-          <th>Strike</th>
-          <th>Moneyness %</th>
-          <th>Bid</th>
-          <th>Ask</th>
-          <th>Mark</th>
-          <th>Volume</th>
-          <th>Open Int</th>
-          <th>Vol/OI</th>
-          <th>IV %</th>
-          <th>Delta</th>
-          <th>Gamma</th>
-          <th>Theta</th>
-          <th>Vega</th>
-          <th class="text-left">Source</th>
+          <th class="text-left" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="expiry">Expiry<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="dte">DTE<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th class="text-left" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="right">Right<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="strike">Strike<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="moneyness_pct">Moneyness %<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="bid">Bid<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="ask">Ask<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="mark_price">Mark<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="volume">Volume<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="open_interest">Open Int<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="vol_oi">Vol/OI<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="iv">IV %<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="delta">Delta<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="gamma">Gamma<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="theta">Theta<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="vega">Vega<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th class="text-left" aria-sort="none"><button type="button" class="th-sort-btn" data-sort-col="greeks_source">Source<span class="th-sort-ind" aria-hidden="true">&#8645;</span></button></th>
+          <th class="chain-leg-col">Leg</th>
+        </tr>
+        <tr class="table-filter-row">
+          <th class="text-left">
+            <select id="th-filter-expiry" class="th-filter-select" data-filter-col="expiry" aria-label="Filter Expiry">
+              <option value="">All</option>
+            </select>
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="dte" placeholder="30..60" title="Numeric filter: e.g. >30, <=60, 30..90" aria-label="Filter DTE" />
+          </th>
+          <th class="text-left">
+            <select id="th-filter-right" class="th-filter-select" data-filter-col="right" aria-label="Filter Right">
+              <option value="">All</option>
+              <option value="C">C</option>
+              <option value="P">P</option>
+            </select>
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="strike" placeholder=">100" title="Numeric filter: e.g. >100, 90..120" aria-label="Filter Strike" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="moneyness_pct" placeholder="-10..10" title="Moneyness % filter: e.g. >=-10, -10..10" aria-label="Filter Moneyness %" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="bid" placeholder=">0" title="Bid filter: e.g. >0, >=1.5, 1..5" aria-label="Filter Bid" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="ask" placeholder=">0" title="Ask filter: e.g. >0, <=10" aria-label="Filter Ask" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="mark_price" placeholder=">0" title="Mark filter: e.g. >=1" aria-label="Filter Mark" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="volume" placeholder=">=100" title="Volume filter: e.g. >0, >=500" aria-label="Filter Volume" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="open_interest" placeholder=">=100" title="Open Interest filter: e.g. >0, >=1000" aria-label="Filter Open Int" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="vol_oi" placeholder=">=1" title="Vol/OI ratio filter: e.g. >1, >=0.5" aria-label="Filter Vol/OI" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="iv" placeholder=">30" title="IV % filter: e.g. >40, 30..65" aria-label="Filter IV %" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="delta" placeholder="-0.4..0.5" title="Delta filter: e.g. >=0.2, -0.4..-0.15" aria-label="Filter Delta" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="gamma" placeholder=">0" title="Gamma filter: e.g. >=0.01" aria-label="Filter Gamma" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="theta" placeholder="<0" title="Theta filter: e.g. <=-0.05" aria-label="Filter Theta" />
+          </th>
+          <th>
+            <input type="text" class="th-filter-input" data-filter-col="vega" placeholder=">0" title="Vega filter: e.g. >=0.1" aria-label="Filter Vega" />
+          </th>
+          <th class="text-left">
+            <select id="th-filter-source" class="th-filter-select" data-filter-col="greeks_source" aria-label="Filter Source">
+              <option value="">All</option>
+              <option value="IBKR_MODEL">IBKR_MODEL</option>
+              <option value="BSM_FALLBACK">BSM_FALLBACK</option>
+              <option value="NONE">NONE</option>
+            </select>
+          </th>
+          <th class="chain-leg-col"></th>
         </tr>
       </thead>
       <tbody id="chain-table-body">
         <tr>
-          <td colspan="17" class="text-left">Loading cached snapshot...</td>
+          <td colspan="18" class="text-left">Loading cached snapshot...</td>
         </tr>
       </tbody>
     </table>
@@ -366,5 +798,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/dashboard.js?v=20261111f" defer></script>
+<script src="/static/js/dashboard.js?v=20261111p" defer></script>
 {% endblock %}

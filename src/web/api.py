@@ -2,20 +2,40 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import logging
 from collections import Counter
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
-from fastapi import APIRouter, Depends, FastAPI, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.analytics.anomalies import AnomaliesReport, scan_anomalies
 from src.analytics.bsm_fallback import BSMFallbackEngine
+from src.analytics.strategies import (
+    PRESET_STRATEGIES,
+    PresetStrategyKind,
+    StrategyEvaluationResponse,
+    StrategyKind,
+    StrategyLegInput,
+)
+from src.analytics.strategies import (
+    evaluate_strategy as evaluate_strategy_engine,
+)
 from src.analytics.term_greeks import MultiDTEProfilesReport, build_multi_dte_profiles
 from src.analytics.walls import ChainWallsReport, compute_walls
 from src.broker.client import IBKRBrokerClient
+from src.broker.corridor import (
+    CorridorLegRef,
+    CorridorQuoteFrame,
+    CorridorQuoteRow,
+    CorridorQuoteService,
+)
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
@@ -33,6 +53,7 @@ from src.storage.csv_repository import CSVRepository
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SnapshotMeta, infer_chain_step_and_range
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
+logger = logging.getLogger(__name__)
 
 
 # ------------------------------------------------------------------ API schemas
@@ -53,8 +74,10 @@ class GatewayStatusResponse(BaseModel):
     allow_custom_ticker: bool
     default_range_pct: float
     allowed_range_pcts: list[float]
-    default_strike_step: float
+    default_strike_step: float | None = None
     allowed_strike_steps: list[float]
+    dte_min: int = 30
+    dte_max: int = 120
     available_strike_steps: list[float] = Field(default_factory=list)
     available_range_pcts: list[float] = Field(default_factory=list)
     active_capabilities_ticker: str | None = None
@@ -119,7 +142,113 @@ class RefreshRequest(BaseModel):
 
     ticker: str
     range_pct: float = Field(default=0.20, gt=0.0, le=1.0)
-    strike_step: float | None = Field(default=5.0, gt=0.0)
+    strike_step: float | None = Field(default=None, gt=0.0)
+    dte_min: int | None = Field(default=None, ge=0, le=120)
+    dte_max: int | None = Field(default=None, ge=1, le=120)
+
+    @model_validator(mode="after")
+    def _validate_dte_bounds(self) -> RefreshRequest:
+        if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
+            raise ValueError("dte_min must be <= dte_max")
+        return self
+
+
+class StrategySuggestRequest(BaseModel):
+    """Request body for `POST /api/strategy/suggest`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    snapshot_id: str | None = None
+    strategy_kind: PresetStrategyKind | None = None
+    target_expiry: str | None = None
+    days_forward: int = Field(default=0, ge=0, le=365)
+    iv_shift: float = Field(default=0.0, ge=-0.80, le=2.00)
+    qty_multiplier: int = Field(default=1, ge=1, le=100)
+
+
+class StrategyEvaluateRequest(BaseModel):
+    """Request body for `POST /api/strategy/evaluate`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    snapshot_id: str | None = None
+    strategy_kind: StrategyKind = "BULL_PUT_SPREAD"
+    target_expiry: str | None = None
+    legs: list[StrategyLegInput] | None = None
+    days_forward: int = Field(default=0, ge=0, le=365)
+    iv_shift: float = Field(default=0.0, ge=-0.80, le=2.00)
+    qty_multiplier: int = Field(default=1, ge=1, le=100)
+
+
+class StrategySuggestResponse(BaseModel):
+    """Response body for `POST /api/strategy/suggest`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    snapshot_id: str
+    evaluations: list[StrategyEvaluationResponse]
+
+
+class CorridorQuotesRequest(BaseModel):
+    """Request body for `POST /api/corridor/quotes`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    snapshot_id: str | None = None
+    target_expiry: str | None = None
+    window_strikes: int = Field(default=5, ge=1, le=12)
+    max_contracts: int = Field(default=56, ge=1, le=60)
+    priority_legs: list[CorridorLegRef] = Field(default_factory=list)
+
+
+class CorridorStopResponse(BaseModel):
+    """Response body for `POST /api/corridor/stop`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stopped_subscriptions: int
+    active_streams: int
+
+
+def _parse_priority_legs_query(raw: str | None) -> list[CorridorLegRef]:
+    """Parse compact query string `YYYY-MM-DD|strike|C,...` into `CorridorLegRef` items."""
+    if not raw or not raw.strip():
+        return []
+    refs: list[CorridorLegRef] = []
+    for token in raw.split(","):
+        part = token.strip()
+        if not part:
+            continue
+        sep = "|" if "|" in part else ":"
+        fields = [item.strip() for item in part.split(sep)]
+        if len(fields) != 3:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid priority_legs token {part!r}; expected EXPIRY|STRIKE|RIGHT",
+            )
+        exp_str, strike_str, right_str = fields
+        try:
+            strike_val = float(strike_str)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"Invalid strike in priority_legs: {strike_str!r}"
+            ) from exc
+        right_upper = right_str.upper()
+        if right_upper not in ("C", "P"):
+            raise HTTPException(
+                status_code=422, detail=f"Invalid right in priority_legs: {right_str!r}"
+            )
+        right_lit: Literal["C", "P"] = "C" if right_upper == "C" else "P"
+        refs.append(CorridorLegRef(expiry=exp_str, strike=strike_val, right=right_lit))
+    return refs
+
+
+def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
 
 # ------------------------------------------------------------------ service orchestrator
@@ -132,16 +261,26 @@ class AnalyzerWebService:
         repo: CSVRepository | None = None,
         broker_client: IBKRBrokerClient | None = None,
         fetcher: PagedOptionChainFetcher | None = None,
+        corridor: CorridorQuoteService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
         self.broker_client = broker_client or IBKRBrokerClient(self.settings)
         self.fetcher = fetcher or PagedOptionChainFetcher(self.broker_client, self.settings)
+        self.corridor = corridor or CorridorQuoteService(
+            self.broker_client,
+            self.settings,
+            clock=self.fetcher.clock,
+            sleep=self.fetcher.sleep,
+        )
         self.validator = TickerValidator(
             watchlist=self.settings.watchlist.hardcoded_tickers,
             allow_custom=self.settings.watchlist.allow_custom_ticker,
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
+        self._corridor_cache: dict[
+            tuple[str, str], tuple[float, dict[tuple[str, float, str], CorridorQuoteRow]]
+        ] = {}
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -179,6 +318,8 @@ class AnalyzerWebService:
             allowed_range_pcts=list(oc.allowed_range_pcts),
             default_strike_step=oc.default_strike_step,
             allowed_strike_steps=list(oc.allowed_strike_steps),
+            dte_min=oc.dte_min,
+            dte_max=oc.dte_max,
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
             active_capabilities_ticker=cap_sym if caps else None,
@@ -298,14 +439,27 @@ class AnalyzerWebService:
         )
 
     def load_chain_analytics(
-        self, raw_ticker: str, snapshot_id: str | None = None
+        self,
+        raw_ticker: str,
+        snapshot_id: str | None = None,
+        *,
+        dte_min: int | None = None,
+        dte_max: int | None = None,
     ) -> ChainAnalyticsResponse:
         symbol = self.validate_ticker(raw_ticker)
+        if dte_min is not None and dte_max is not None and dte_min > dte_max:
+            raise HTTPException(status_code=422, detail="dte_min must be <= dte_max")
         if snapshot_id is not None and snapshot_id.strip():
             df = self.repo.load_snapshot(symbol, snapshot_id.strip())
         else:
             df = self.repo.load_latest(symbol)
         loaded_snap_id = str(df["snapshot_id"][0])
+        if dte_min is not None:
+            df = df.filter(pl.col("dte") >= dte_min)
+        if dte_max is not None:
+            df = df.filter(pl.col("dte") <= dte_max)
+        if df.height == 0:
+            raise SnapshotNotFoundError(f"No contracts found in requested DTE range for {symbol}")
         snap_meta = next(
             (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
             None,
@@ -340,10 +494,184 @@ class AnalyzerWebService:
                 return candidate
         raise SnapshotNotFoundError(f"No snapshots available for {symbol}")
 
+    def _record_corridor_frame(self, frame: CorridorQuoteFrame) -> None:
+        key = (frame.ticker, frame.snapshot_id)
+        existing_spot, quote_map = self._corridor_cache.get(key, (0.0, {}))
+        updated_map = dict(quote_map)
+        for q in frame.quotes:
+            updated_map[(q.expiry, round(float(q.strike), 6), q.right)] = q
+        eff_spot = frame.underlying_price if frame.underlying_price > 0.0 else existing_spot
+        self._corridor_cache[key] = (eff_spot, updated_map)
+
+    def _apply_corridor_overlay(
+        self, df: pl.DataFrame, symbol: str, snapshot_id: str
+    ) -> pl.DataFrame:
+        entry = self._corridor_cache.get((symbol, snapshot_id))
+        if entry is None:
+            return df
+        live_spot, quote_map = entry
+        if not quote_map:
+            return df
+        rows = df.to_dicts()
+        changed = False
+        for row in rows:
+            if live_spot > 0.0:
+                row["underlying_price"] = live_spot
+                strike_f = float(row["strike"])
+                row["moneyness_pct"] = ((strike_f - live_spot) / live_spot) * 100.0
+                changed = True
+            qkey = (str(row["expiry"]), round(float(row["strike"]), 6), str(row["right"]).upper())
+            live_q = quote_map.get(qkey)
+            if live_q is None:
+                continue
+            changed = True
+            row["bid"] = live_q.bid
+            row["ask"] = live_q.ask
+            row["mid"] = live_q.mid
+            row["last"] = live_q.last
+            row["close"] = live_q.close
+            if live_q.volume is not None:
+                row["volume"] = live_q.volume
+            if live_q.open_interest is not None:
+                row["open_interest"] = live_q.open_interest
+            if live_q.iv is not None:
+                row["iv"] = live_q.iv
+            if live_q.delta is not None:
+                row["delta"] = live_q.delta
+            if live_q.gamma is not None:
+                row["gamma"] = live_q.gamma
+            if live_q.theta is not None:
+                row["theta"] = live_q.theta
+            if live_q.vega is not None:
+                row["vega"] = live_q.vega
+            if live_q.greeks_source != "NONE":
+                row["greeks_source"] = live_q.greeks_source
+        if not changed:
+            return df
+        return pl.DataFrame(rows, schema=df.schema)
+
+    def _load_enriched_chain(
+        self,
+        raw_ticker: str,
+        snapshot_id: str | None = None,
+        *,
+        apply_corridor_overlay: bool = True,
+    ) -> tuple[str, str, pl.DataFrame]:
+        symbol = self.validate_ticker(raw_ticker)
+        df = (
+            self.repo.load_snapshot(symbol, snapshot_id.strip())
+            if snapshot_id is not None and snapshot_id.strip()
+            else self.repo.load_latest(symbol)
+        )
+        loaded_snap_id = str(df["snapshot_id"][0])
+        enriched = self._enrich_if_needed(df)
+        if apply_corridor_overlay:
+            enriched = self._apply_corridor_overlay(enriched, symbol, loaded_snap_id)
+        return symbol, loaded_snap_id, enriched
+
+    async def fetch_corridor_quotes(self, payload: CorridorQuotesRequest) -> CorridorQuoteFrame:
+        _, snap_id, enriched = self._load_enriched_chain(
+            payload.ticker,
+            payload.snapshot_id,
+            apply_corridor_overlay=False,
+        )
+        try:
+            return await self.corridor.fetch_corridor_quotes(
+                enriched,
+                snapshot_id=snap_id,
+                target_expiry=payload.target_expiry,
+                window_strikes=payload.window_strikes,
+                max_contracts=payload.max_contracts,
+                priority_legs=payload.priority_legs,
+                on_frame=self._record_corridor_frame,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    async def prepare_corridor_stream(
+        self,
+        raw_ticker: str,
+        *,
+        snapshot_id: str | None = None,
+        priority_legs_raw: str | None = None,
+    ) -> tuple[str, str, pl.DataFrame, list[CorridorLegRef]]:
+        symbol, snap_id, enriched = self._load_enriched_chain(
+            raw_ticker,
+            snapshot_id,
+            apply_corridor_overlay=False,
+        )
+        legs = _parse_priority_legs_query(priority_legs_raw)
+        await self.broker_client.ensure_connected()
+        return symbol, snap_id, enriched, legs
+
+    async def stop_corridor_streams(self) -> CorridorStopResponse:
+        stopped = await self.corridor.stop_all_streams()
+        return CorridorStopResponse(
+            stopped_subscriptions=stopped,
+            active_streams=self.corridor.active_stream_count,
+        )
+
+    def suggest_strategies(self, payload: StrategySuggestRequest) -> StrategySuggestResponse:
+        symbol, snap_id, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
+        walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
+        kinds: tuple[PresetStrategyKind, ...] = (
+            (payload.strategy_kind,) if payload.strategy_kind is not None else PRESET_STRATEGIES
+        )
+        evaluations: list[StrategyEvaluationResponse] = []
+        errors: list[str] = []
+        for kind in kinds:
+            try:
+                evaluations.append(
+                    evaluate_strategy_engine(
+                        enriched,
+                        strategy_kind=kind,
+                        target_expiry=payload.target_expiry,
+                        days_forward=payload.days_forward,
+                        iv_shift=payload.iv_shift,
+                        qty_multiplier=payload.qty_multiplier,
+                        risk_free_rate=self.settings.analytics.risk_free_rate,
+                        walls_report=walls,
+                    )
+                )
+            except ValueError as exc:
+                if payload.strategy_kind is not None:
+                    raise HTTPException(status_code=422, detail=str(exc)) from exc
+                errors.append(f"{kind}: {exc}")
+
+        if not evaluations:
+            detail = "; ".join(errors) or "Unable to construct any preset strategy from snapshot"
+            raise HTTPException(status_code=422, detail=detail)
+
+        return StrategySuggestResponse(
+            ticker=symbol,
+            snapshot_id=snap_id,
+            evaluations=evaluations,
+        )
+
+    def evaluate_strategy(self, payload: StrategyEvaluateRequest) -> StrategyEvaluationResponse:
+        _, _, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
+        try:
+            return evaluate_strategy_engine(
+                enriched,
+                strategy_kind=payload.strategy_kind,
+                target_expiry=payload.target_expiry,
+                legs=payload.legs,
+                days_forward=payload.days_forward,
+                iv_shift=payload.iv_shift,
+                qty_multiplier=payload.qty_multiplier,
+                risk_free_rate=self.settings.analytics.risk_free_rate,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
         symbol = self.validate_ticker(req.ticker)
         fetch_res = await self.fetcher.fetch_option_chain(
-            symbol, range_pct=req.range_pct, strike_step=req.strike_step
+            symbol,
+            range_pct=req.range_pct,
+            strike_step=req.strike_step,
+            dte_min=req.dte_min,
+            dte_max=req.dte_max,
         )
         raw_df = pl.DataFrame(
             [r.model_dump() for r in fetch_res.rows],
@@ -433,9 +761,16 @@ async def api_snapshots(
 async def api_chain(
     ticker: str,
     snapshot_id: str | None = Query(default=None),
+    dte_min: int | None = Query(default=None, ge=0, le=120),
+    dte_max: int | None = Query(default=None, ge=1, le=120),
     svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
-    return svc.load_chain_analytics(ticker, snapshot_id=snapshot_id)
+    return svc.load_chain_analytics(
+        ticker,
+        snapshot_id=snapshot_id,
+        dte_min=dte_min,
+        dte_max=dte_max,
+    )
 
 
 @router.get("/csv/{ticker}")
@@ -454,6 +789,106 @@ async def api_refresh(
     svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return await svc.refresh_chain(payload)
+
+
+@router.post("/strategy/suggest", response_model=StrategySuggestResponse)
+async def api_strategy_suggest(
+    payload: StrategySuggestRequest,
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> StrategySuggestResponse:
+    return svc.suggest_strategies(payload)
+
+
+@router.post("/strategy/evaluate", response_model=StrategyEvaluationResponse)
+async def api_strategy_evaluate(
+    payload: StrategyEvaluateRequest,
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> StrategyEvaluationResponse:
+    return svc.evaluate_strategy(payload)
+
+
+@router.post("/corridor/quotes", response_model=CorridorQuoteFrame)
+async def api_corridor_quotes(
+    payload: CorridorQuotesRequest,
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> CorridorQuoteFrame:
+    return await svc.fetch_corridor_quotes(payload)
+
+
+@router.post("/corridor/stop", response_model=CorridorStopResponse)
+async def api_corridor_stop(
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> CorridorStopResponse:
+    return await svc.stop_corridor_streams()
+
+
+@router.get("/corridor/stream/{ticker}")
+async def api_corridor_stream(
+    request: Request,
+    ticker: str,
+    snapshot_id: str | None = Query(default=None),
+    target_expiry: str | None = Query(default=None),
+    window_strikes: int = Query(default=5, ge=1, le=12),
+    max_contracts: int = Query(default=56, ge=1, le=60),
+    priority_legs: str | None = Query(default=None),
+    max_frames: int | None = Query(default=None, ge=1, le=200),
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> StreamingResponse:
+    _, snap_id, enriched, legs = await svc.prepare_corridor_stream(
+        ticker,
+        snapshot_id=snapshot_id,
+        priority_legs_raw=priority_legs,
+    )
+
+    async def _event_stream() -> AsyncIterator[str]:
+        gen = svc.corridor.stream_corridor_quotes(
+            enriched,
+            snapshot_id=snap_id,
+            target_expiry=target_expiry,
+            window_strikes=window_strikes,
+            max_contracts=max_contracts,
+            priority_legs=legs,
+            is_disconnected=request.is_disconnected,
+            max_frames=max_frames,
+            on_frame=svc._record_corridor_frame,
+        )
+        try:
+            async for frame in gen:
+                yield _format_sse_event("frame", frame.model_dump())
+        except GatewayConnectionError as exc:
+            yield _format_sse_event(
+                "error",
+                {
+                    "error_code": "GATEWAY_OFFLINE",
+                    "status": 503,
+                    "message": (
+                        f"{exc} — IBKR Gateway connection lost during live corridor stream."
+                    ),
+                },
+            )
+        except (OptionChainFetchError, PacingViolationError) as exc:
+            yield _format_sse_event(
+                "error",
+                {
+                    "error_code": "CORRIDOR_STREAM_ERROR",
+                    "status": 502,
+                    "message": str(exc),
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        finally:
+            await gen.aclose()
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ------------------------------------------------------------------ exception handlers

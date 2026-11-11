@@ -57,6 +57,10 @@ def create_app(
         try:
             yield
         finally:
+            try:
+                await service.stop_corridor_streams()
+            except Exception:  # pragma: no cover - defensive shutdown
+                logger.exception("error stopping corridor streams during shutdown")
             service.broker_client.disconnect()
 
     application = FastAPI(
