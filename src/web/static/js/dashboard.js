@@ -773,6 +773,93 @@
     dom.exportCsvBtn.setAttribute("href", url);
   }
 
+  function configuredDefaultMdType() {
+    if (
+      state.status &&
+      state.status.default_market_data_type !== null &&
+      state.status.default_market_data_type !== undefined
+    ) {
+      return Number(state.status.default_market_data_type);
+    }
+    if (
+      bootstrap.defaultMarketDataType !== null &&
+      bootstrap.defaultMarketDataType !== undefined
+    ) {
+      return Number(bootstrap.defaultMarketDataType);
+    }
+    return 3;
+  }
+
+  function configuredFallbackMdType() {
+    if (
+      state.status &&
+      state.status.fallback_market_data_type !== null &&
+      state.status.fallback_market_data_type !== undefined
+    ) {
+      return Number(state.status.fallback_market_data_type);
+    }
+    if (
+      bootstrap.fallbackMarketDataType !== null &&
+      bootstrap.fallbackMarketDataType !== undefined
+    ) {
+      return Number(bootstrap.fallbackMarketDataType);
+    }
+    return configuredDefaultMdType() <= 2 ? 2 : 4;
+  }
+
+  function configuredMarketDataMode() {
+    if (state.status && state.status.market_data_mode) {
+      return String(state.status.market_data_mode).toUpperCase();
+    }
+    if (bootstrap.marketDataMode) {
+      return String(bootstrap.marketDataMode).toUpperCase();
+    }
+    return configuredDefaultMdType() <= 2 ? "LIVE" : "DELAYED";
+  }
+
+  function activeStatusMdType() {
+    if (
+      state.status &&
+      state.status.active_market_data_type !== null &&
+      state.status.active_market_data_type !== undefined
+    ) {
+      return Number(state.status.active_market_data_type);
+    }
+    return configuredDefaultMdType();
+  }
+
+  function configuredFeedBannerSummary() {
+    var modeLbl = configuredMarketDataMode() === "LIVE" ? "Live" : "Delayed";
+    var defT = configuredDefaultMdType();
+    var fbT = configuredFallbackMdType();
+    if (defT !== fbT) {
+      return modeLbl + " Type " + defT + "/" + fbT + " Feed";
+    }
+    return modeLbl + " Type " + defT + " Feed";
+  }
+
+  function configuredDteWindowLabel() {
+    var lo =
+      state.status && state.status.dte_min !== null && state.status.dte_min !== undefined
+        ? Number(state.status.dte_min)
+        : bootstrap.dteMin !== null && bootstrap.dteMin !== undefined
+          ? Number(bootstrap.dteMin)
+          : 30;
+    var hi =
+      state.status && state.status.dte_max !== null && state.status.dte_max !== undefined
+        ? Number(state.status.dte_max)
+        : bootstrap.dteMax !== null && bootstrap.dteMax !== undefined
+          ? Number(bootstrap.dteMax)
+          : 120;
+    return lo + "\u2013" + hi;
+  }
+
+  function gatewayAddressLabel() {
+    var host = (state.status && state.status.host) || bootstrap.ibkrHost || "127.0.0.1";
+    var port = (state.status && state.status.port) || bootstrap.ibkrPort || 4001;
+    return host + ":" + port;
+  }
+
   function marketDataBadgeInfo(mdType) {
     var code = Number(mdType);
     if (code === 1) {
@@ -787,7 +874,11 @@
     if (code === 3) {
       return { label: "TYPE 3: 15M DELAYED", cls: "badge badge--delayed" };
     }
-    return { label: "TYPE " + (mdType || "3"), cls: "badge badge--info" };
+    var fallbackCode =
+      mdType !== null && mdType !== undefined && mdType !== ""
+        ? mdType
+        : configuredDefaultMdType();
+    return { label: "TYPE " + fallbackCode, cls: "badge badge--info" };
   }
 
   function marketDataLabel(mdType) {
@@ -817,34 +908,62 @@
         '<span class="badge-dot" aria-hidden="true"></span><span>' +
         (connected ? "GATEWAY ONLINE" : "GATEWAY OFFLINE (CACHE ONLY)") +
         "</span>";
+      dom.gatewayBadge.title = "IBKR Gateway target: " + gatewayAddressLabel();
     }
     if (dom.mdTypeBadge && statusPayload) {
       var md =
         statusPayload.active_market_data_type !== null &&
         statusPayload.active_market_data_type !== undefined
           ? statusPayload.active_market_data_type
-          : statusPayload.default_market_data_type || 3;
+          : statusPayload.default_market_data_type !== null &&
+              statusPayload.default_market_data_type !== undefined
+            ? statusPayload.default_market_data_type
+            : configuredDefaultMdType();
       applyMdTypeBadge(md);
+      var subNote = statusPayload.live_subscription_missing
+        ? " • Gateway reported missing live subscription; using Delayed fallback"
+        : "";
+      dom.mdTypeBadge.title =
+        (statusPayload.connected ? "Active connection feed (" : "Configured feed (offline, ") +
+        gatewayAddressLabel() +
+        "): Mode " +
+        configuredMarketDataMode() +
+        ", Default Type " +
+        configuredDefaultMdType() +
+        ", Fallback Type " +
+        configuredFallbackMdType() +
+        subNote;
     }
     if (statusPayload && !state.chainData) {
       syncControlCapabilities(statusPayload);
+      renderChainBadges(null);
+    } else if (state.chainData && state.chainData.meta) {
+      renderChainBadges(state.chainData.meta);
     }
   }
 
   function renderChainBadges(meta) {
-    if (
-      dom.mdTypeBadge &&
-      meta &&
-      (!state.status ||
-        state.status.active_market_data_type === null ||
-        state.status.active_market_data_type === undefined)
-    ) {
-      applyMdTypeBadge(meta.market_data_type);
+    if (dom.mdTypeBadge) {
+      if (
+        state.status &&
+        (state.status.active_market_data_type !== null &&
+          state.status.active_market_data_type !== undefined)
+      ) {
+        applyMdTypeBadge(state.status.active_market_data_type);
+      } else if (bootstrap.defaultMarketDataType) {
+        applyMdTypeBadge(bootstrap.defaultMarketDataType);
+      } else if (meta && meta.market_data_type) {
+        applyMdTypeBadge(meta.market_data_type);
+      }
     }
     if (dom.editorialBannerCopy) {
       if (!meta) {
         dom.editorialBannerCopy.textContent =
-          "Immutable CSV Archive \u2022 Delayed Type 3/4 Feed \u2022 Weekly Expirations (30\u2013120 DTE)";
+          "Immutable CSV Archive \u2022 " +
+          configuredFeedBannerSummary() +
+          " \u2022 Weekly Expirations (" +
+          configuredDteWindowLabel() +
+          " DTE)";
       } else {
         var dteSpanTxt =
           meta.dtes && meta.dtes.length
@@ -854,11 +973,19 @@
               "d (" +
               meta.dtes.length +
               " wk exp)"
-            : "30\u2013120 DTE";
+            : configuredDteWindowLabel() + " DTE";
         var verifiedSuffix =
           meta.exchange_native_verified && meta.exchange_validated_strike_count
             ? " \u2022 " + meta.exchange_validated_strike_count + " IBKR strikes"
             : "";
+        var snapMd =
+          meta.market_data_type !== null && meta.market_data_type !== undefined
+            ? Number(meta.market_data_type)
+            : null;
+        var activeMd = activeStatusMdType();
+        var isOffline = !(state.status && state.status.connected);
+        var snapFeedSuffix =
+          snapMd && (isOffline || snapMd !== activeMd) ? " \u2022 Snap T" + snapMd : "";
         dom.editorialBannerCopy.textContent =
           meta.underlying +
           " (" +
@@ -867,7 +994,8 @@
           formatPullScopeSummary(meta) +
           " \u2022 Expirations: " +
           dteSpanTxt +
-          verifiedSuffix;
+          verifiedSuffix +
+          snapFeedSuffix;
       }
     }
     if (dom.greeksBadge) {
@@ -4601,7 +4729,7 @@
       subscribed_count: Math.min(60, selected.length + (selected.length < 60 ? 1 : 0)),
       subscription_cap: 60,
       underlying_price: spot,
-      market_data_type: data.meta.market_data_type || 3,
+      market_data_type: data.meta.market_data_type || configuredDefaultMdType(),
       primary_call_wall: wInfo.callWall,
       primary_put_wall: wInfo.putWall,
       wall_basis: wInfo.basis,
@@ -5279,7 +5407,9 @@
       fetchStatus();
       showBanner(
         "warn",
-        "Live corridor stream interrupted or IBKR Gateway unreachable (Port 4001). Subscriptions cancelled."
+        "Live corridor stream interrupted or IBKR Gateway unreachable (" +
+          gatewayAddressLabel() +
+          "). Subscriptions cancelled."
       );
     };
   }
@@ -5362,7 +5492,15 @@
         renderStatusBadges(res.body);
       }
     } catch (_err) {
-      renderStatusBadges({ connected: false, default_market_data_type: 3 });
+      renderStatusBadges({
+        connected: false,
+        host: bootstrap.ibkrHost || "127.0.0.1",
+        port: bootstrap.ibkrPort || 4001,
+        market_data_mode: configuredMarketDataMode(),
+        default_market_data_type: configuredDefaultMdType(),
+        fallback_market_data_type: configuredFallbackMdType(),
+        active_market_data_type: configuredDefaultMdType(),
+      });
     }
   }
 
@@ -5518,7 +5656,12 @@
             ticker: state.ticker,
             range_pct: rangeVal,
             strike_step: stepVal,
-            dte_min: 30,
+            dte_min:
+              state.status && state.status.dte_min !== null && state.status.dte_min !== undefined
+                ? Number(state.status.dte_min)
+                : bootstrap.dteMin !== null && bootstrap.dteMin !== undefined
+                  ? Number(bootstrap.dteMin)
+                  : 30,
             dte_max: dteMaxVal,
           }),
         });
@@ -5540,7 +5683,9 @@
           detail: rawErrMsg,
           hint: isTimeout
             ? "Try narrowing Range %, raising Strike Step ($5/$10), or lowering Max DTE before retrying."
-            : "Verify IBKR Gateway Port 4001 and FastAPI server availability; cached snapshot remains active.",
+            : "Verify IBKR Gateway (" +
+              gatewayAddressLabel() +
+              ") and FastAPI server availability; cached snapshot remains active.",
         });
         return;
       }
@@ -5549,7 +5694,9 @@
         await fetchStatus();
         var fallbackMsg =
           res.status === 503
-            ? "IBKR Gateway is offline or unreachable. Preserving cached snapshot view."
+            ? "IBKR Gateway (" +
+              gatewayAddressLabel() +
+              ") is offline or unreachable. Preserving cached snapshot view."
             : "Refresh failed (HTTP " + res.status + "). Preserving cached snapshot view.";
         var apiMsg = extractApiErrorMessage(res.body, res.textSnippet || fallbackMsg);
         showBanner(res.status === 503 ? "warn" : "error", apiMsg, {
@@ -5563,7 +5710,9 @@
           rawBody: res.textSnippet,
           hint:
             res.status === 503
-              ? "Check IBKR Gateway connection on Port 4001; cached view preserved."
+              ? "Check IBKR Gateway connection on " +
+                gatewayAddressLabel() +
+                "; cached view preserved."
               : "Preserving previous cached snapshot view.",
         });
         return;
@@ -6311,7 +6460,11 @@
       3: "TYPE 3 (15-min Delayed)",
       4: "TYPE 4 (Delayed-Frozen)",
     };
-    var mdLabel = mdNames[meta.market_data_type] || "TYPE " + (meta.market_data_type || "?");
+    var resolvedMdType =
+      meta.market_data_type !== null && meta.market_data_type !== undefined
+        ? meta.market_data_type
+        : configuredDefaultMdType();
+    var mdLabel = mdNames[resolvedMdType] || "TYPE " + resolvedMdType;
 
     var scopeTitle = isSingleDte
       ? "WYBRANE WYGAŚNIĘCIE (SINGLE DTE): " +
@@ -6319,7 +6472,9 @@
         " DTE (" +
         promptExpiryIso(activeExpiries[0].expiry) +
         ")"
-      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (30\u2013120 DTE): " +
+      : "WSZYSTKIE TYGODNIOWE WYGAŚNIĘCIA (" +
+        configuredDteWindowLabel() +
+        " DTE): " +
         activeExpiries
           .map(function (ex) {
             return ex.dte + "d (" + promptExpiryIso(ex.expiry) + ")";
@@ -7190,6 +7345,7 @@
     applyTickerPullPrefsToControls(state.ticker);
     state.tableSort = readTableSortPref();
     syncTableHeaderSortUI();
+    applyMdTypeBadge(configuredDefaultMdType());
     applyPanelVisibility(readPanelVisibility(), { skipRender: true });
     bindEvents();
     initChartResizeHandling();

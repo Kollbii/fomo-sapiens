@@ -25,6 +25,15 @@ TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
 
 
+def _format_feed_summary(cfg: Settings) -> str:
+    mode_lbl = "Live" if cfg.ibkr.market_data_mode == "LIVE" else "Delayed"
+    def_t = cfg.ibkr.default_market_data_type
+    fb_t = cfg.ibkr.fallback_market_data_type
+    if def_t != fb_t:
+        return f"{mode_lbl} Type {def_t}/{fb_t} Feed"
+    return f"{mode_lbl} Type {def_t} Feed"
+
+
 def create_app(
     settings: Settings | None = None,
     repo: CSVRepository | None = None,
@@ -95,7 +104,14 @@ def create_app(
                 "allowed_range_pcts": list(svc.settings.options_chain.allowed_range_pcts),
                 "default_strike_step": svc.settings.options_chain.default_strike_step,
                 "allowed_strike_steps": list(svc.settings.options_chain.allowed_strike_steps),
+                "ibkr_host": svc.settings.ibkr.host,
                 "ibkr_port": svc.settings.ibkr.port,
+                "market_data_mode": svc.settings.ibkr.market_data_mode,
+                "default_market_data_type": svc.settings.ibkr.default_market_data_type,
+                "fallback_market_data_type": svc.settings.ibkr.fallback_market_data_type,
+                "dte_min": svc.settings.options_chain.dte_min,
+                "dte_max": svc.settings.options_chain.dte_max,
+                "feed_summary": _format_feed_summary(svc.settings),
             },
         )
 

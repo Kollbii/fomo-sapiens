@@ -68,7 +68,9 @@ class GatewayStatusResponse(BaseModel):
     client_id: int
     market_data_mode: Literal["DELAYED", "LIVE"]
     default_market_data_type: int
+    fallback_market_data_type: int = 4
     active_market_data_type: int
+    live_subscription_missing: bool = False
     default_ticker: str
     watchlist: list[str]
     allow_custom_ticker: bool
@@ -310,7 +312,11 @@ class AnalyzerWebService:
             client_id=ibkr.client_id,
             market_data_mode=ibkr.market_data_mode,
             default_market_data_type=ibkr.default_market_data_type,
+            fallback_market_data_type=ibkr.fallback_market_data_type,
             active_market_data_type=active_md,
+            live_subscription_missing=bool(
+                getattr(self.broker_client, "live_subscription_missing", False)
+            ),
             default_ticker=wl.default_ticker,
             watchlist=list(wl.hardcoded_tickers),
             allow_custom_ticker=wl.allow_custom_ticker,
@@ -427,7 +433,10 @@ class AnalyzerWebService:
             enriched,
             zscore_threshold=self.settings.analytics.unusual_volume_zscore_threshold,
         )
-        profiles = build_multi_dte_profiles(enriched)
+        profiles = build_multi_dte_profiles(
+            enriched,
+            default_market_data_type=self.settings.ibkr.default_market_data_type,
+        )
         contracts = enriched.sort(["dte", "strike", "right"]).to_dicts()
 
         return ChainAnalyticsResponse(
@@ -910,13 +919,16 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
 
     @app.exception_handler(GatewayConnectionError)
-    async def _handle_gateway_offline(_req: Request, exc: GatewayConnectionError) -> JSONResponse:
+    async def _handle_gateway_offline(req: Request, exc: GatewayConnectionError) -> JSONResponse:
+        svc: AnalyzerWebService | None = getattr(req.app.state, "service", None)
+        host = svc.settings.ibkr.host if svc is not None else "127.0.0.1"
+        port = svc.settings.ibkr.port if svc is not None else 4001
         return JSONResponse(
             status_code=503,
             content={
                 "error_code": "GATEWAY_OFFLINE",
                 "message": (
-                    f"{exc} — IBKR Gateway on Port 4001 is unreachable. "
+                    f"{exc} — IBKR Gateway on {host}:{port} is unreachable. "
                     "Serving cached CSV snapshots remains available."
                 ),
             },

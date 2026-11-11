@@ -5,7 +5,7 @@
 <header class="topbar" aria-label="Application Header">
   <div class="brand-group">
     <h1 class="masthead-title">{{ app_name }}</h1>
-    <span class="masthead-edition">READ-ONLY GATEWAY &bull; PORT {{ ibkr_port }}</span>
+    <span class="masthead-edition">READ-ONLY GATEWAY &bull; {{ ibkr_host }}:{{ ibkr_port }}</span>
   </div>
 
   <div class="status-cluster">
@@ -30,7 +30,7 @@
 >
   <span class="editorial-banner-kicker">OPTIONS INTELLIGENCE DISPATCH</span>
   <span id="editorial-banner-copy" class="editorial-banner-copy">
-    Immutable CSV Archive &bull; Delayed Type 3/4 Feed &bull; Weekly Expirations (30&ndash;120 DTE)
+    Immutable CSV Archive &bull; {{ feed_summary }} &bull; Weekly Expirations ({{ dte_min }}&ndash;{{ dte_max }} DTE)
   </span>
 </section>
 
@@ -792,11 +792,18 @@
   "defaultTheme": default_theme,
   "watchlist": watchlist,
   "defaultRangePct": default_range_pct,
-  "defaultStrikeStep": default_strike_step
+  "defaultStrikeStep": default_strike_step,
+  "ibkrHost": ibkr_host,
+  "ibkrPort": ibkr_port,
+  "marketDataMode": market_data_mode,
+  "defaultMarketDataType": default_market_data_type,
+  "fallbackMarketDataType": fallback_market_data_type,
+  "dteMin": dte_min,
+  "dteMax": dte_max
 } | tojson }}
 </script>
 {% endblock %}
 
 {% block scripts %}
-<script src="/static/js/dashboard.js?v=20261111p" defer></script>
+<script src="/static/js/dashboard.js?v=20261111q" defer></script>
 {% endblock %}

@@ -14,7 +14,7 @@ import pytest
 
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
-from src.core.config import Settings, StorageSettings
+from src.core.config import IBKRSettings, Settings, StorageSettings
 from src.core.exceptions import GatewayConnectionError
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
@@ -53,7 +53,7 @@ class _MockIB:
 
         async def _connect_async(host: str, port: int, client_id: int, timeout_sec: float) -> None:
             if self.offline:
-                raise ConnectionRefusedError("port 4001 closed")
+                raise ConnectionRefusedError(f"port {port} closed")
             self._connected = True
 
         self.client = SimpleNamespace(connectAsync=_connect_async)
@@ -490,7 +490,9 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert 'src="/static/js/dashboard.js?v=20261111p"' in html
+            assert 'src="/static/js/dashboard.js?v=20261111q"' in html
+            assert "Delayed Type 3/4 Feed" not in r_js.text
+            assert "Port 4001" not in r_js.text
             for js_hook in (
                 "populateWallsDteFilter",
                 "makeWallReferenceMarker",
@@ -543,6 +545,9 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "markStrategyEvaluationDirty",
                 "syncStrategyActionButtons",
                 "strategyPendingEvaluate",
+                "configuredDefaultMdType",
+                "gatewayAddressLabel",
+                "configuredFeedBannerSummary",
                 "strategy: true",
                 "corridor: true",
                 "startCorridorStream",
@@ -774,5 +779,62 @@ def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
                 json={"ticker": "PLTR", "strategy_kind": "BULL_PUT_SPREAD"},
             )
             assert r_404.status_code == 404
+
+    _run(_exercise())
+
+
+def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
+    tmp_path: Path,
+) -> None:
+    custom_settings = Settings(
+        ibkr=IBKRSettings(
+            host="10.0.0.5",
+            port=7496,
+            market_data_mode="LIVE",
+            default_market_data_type=1,
+            fallback_market_data_type=2,
+        ),
+        storage=StorageSettings(),
+    )
+    repo = CSVRepository(custom_settings.storage, root=tmp_path)
+    mock_ib = _MockIB(offline=True)
+    client = IBKRBrokerClient(custom_settings, ib_factory=lambda: mock_ib)
+    fetcher = PagedOptionChainFetcher(client, custom_settings, sleep=_noop_sleep)
+    app = create_app(settings=custom_settings, repo=repo, broker_client=client, fetcher=fetcher)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as http_client:
+                r_index = await http_client.get("/")
+                assert r_index.status_code == 200
+                html = r_index.text
+                assert "10.0.0.5:7496" in html
+                assert "Live Type 1/2 Feed" in html
+                assert "Delayed Type 3/4 Feed" not in html
+                assert '"defaultMarketDataType": 1' in html
+                assert '"marketDataMode": "LIVE"' in html
+                assert '"ibkrPort": 7496' in html
+
+                r_status = await http_client.get("/api/status")
+                assert r_status.status_code == 200
+                st = r_status.json()
+                assert st["host"] == "10.0.0.5"
+                assert st["port"] == 7496
+                assert st["market_data_mode"] == "LIVE"
+                assert st["default_market_data_type"] == 1
+                assert st["fallback_market_data_type"] == 2
+                assert st["active_market_data_type"] == 1
+
+                r_503 = await http_client.post(
+                    "/api/refresh",
+                    json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+                )
+                assert r_503.status_code == 503
+                err_msg = r_503.json()["message"]
+                assert "10.0.0.5:7496" in err_msg
+                assert "4001" not in err_msg
 
     _run(_exercise())
