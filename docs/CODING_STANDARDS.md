@@ -40,9 +40,11 @@ Every feature phase requires automated tests in `pytest`:
 5. **`tests/unit/test_strategies.py`:**
    - Verifies Wall-anchored auto-construction (`Bull Put Spread`, `Bull Call Spread`, `Diagonal Spread`, `Iron Condor`), user-picked `CUSTOM` legs, `Mid`/`Natural`/Slippage/Limit Ladder fills, `POP %` / `±1σ` expected move, unbounded risk guards, and `T+n` / `ΔIV` BSM curves.
 6. **`tests/unit/test_corridor.py` & `tests/integration/test_corridor_api.py`:**
-   - Verifies `select_wall_corridor` Tier `0..3` prioritization and hard `<= 60` subscription cap (`PacingViolationError` above 60), pre-qualified `conId` reuse (`qualifyContractsAsync` skipped), Type `3 -> 4` fallback + BSM Greeks enrichment, and 100% `cancelMktData` cleanup across one-shot pulls, normal stream termination, `stop_all_streams()`, `gen.aclose()`, and mid-stream Gateway disconnects.
+   - Verifies `select_wall_corridor` Tier `0..3` prioritization and hard `<= 60` subscription cap (`PacingViolationError` above 60), pre-qualified `conId` reuse (`qualifyContractsAsync` skipped), Type `3 -> 4` and `LIVE` `1 -> 2` fallback + BSM Greeks enrichment, and 100% `cancelMktData` cleanup across one-shot pulls, normal stream termination, `stop_all_streams()`, `gen.aclose()`, and mid-stream Gateway disconnects.
    - Verifies REST/SSE Corridor endpoints (`/api/corridor/quotes`, `/api/corridor/stop`, `/api/corridor/stream/{ticker}`), `503 GATEWAY_OFFLINE` handling, Strategy Lab live quote overlay without mutating Mode 1 CSVs, and pure `_run()` coroutine stepping without Windows loopback sockets.
    - Keep JavaScript templates inside `src/web/static/js/dashboard.js` free of HTML entities `&bull;` / `&mdash;` (use `\u2022` / `\u2014`).
+7. **Dynamic Config & UI/API Verification (`tests/unit/test_config.py`, `tests/integration/test_web_api.py`):**
+   - Verifies `.env` `MARKET_DATA_MODE` / `DEFAULT_MARKET_DATA_TYPE` / `FALLBACK_MARKET_DATA_TYPE` reconciliation, `LIVE` (`1 -> 2` & mid-page `10089` fallback), server-reported `Ticker.marketDataType` observation, and non-default `IBKR_HOST:IBKR_PORT` + `LIVE` rendering across HTML, `/api/status`, and offline `503` responses.
 
 ---
 

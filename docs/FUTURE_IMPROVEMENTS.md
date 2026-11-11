@@ -5,13 +5,12 @@
 ---
 
 ## 1. Live OPRA Subscription Upgrade (`MARKET_DATA_MODE=LIVE`)
-- **Status:** `[SCAFFOLDED IN CORE — READY FOR ACTIVATION]`
-- **Context:** The core system runs on **Type 3 (15-min Delayed)** and **Type 4 (Delayed-Frozen)** data with local BSM Greeks fallback. Once the user subscribes to live US Options (OPRA) feeds in IBKR:
-- **Activation & Enhancement Plan:**
-  1. Switch `MARKET_DATA_MODE=LIVE` (or `default_market_data_type: 1` in `config/settings.yaml`).
-  2. In `src/broker/fetcher.py` (`_fetch_page_live_opra`), subscribe with `genericTickList="100,101,104,106"` and wait in `0.15s` increments (up to `2.0s` max per page) specifically until both `ticker.modelGreeks` and `ticker.callOpenInterest` / `ticker.putOpenInterest` (tick `101`) populate.
-  3. Add an optional **Bid-Ask Spread Quality Filter** flagging illiquid strikes where `(ask - bid) / mid > 0.25`.
-  - **Module 2 Update (`[IMPLEMENTED IN CORE]`):** Targeted `<= 60`-contract **Wall Strike Corridor & Optional Live Constant Streaming (`src/broker/corridor.py`, `GET /api/corridor/stream/{ticker}`, `#wall-corridor-card`)** is already implemented and automatically honors `MARKET_DATA_MODE=LIVE` (`Type 1 -> 2` with tick list `"100,101,104,106"`) as well as `DELAYED` (`Type 3 -> 4`).
+- **Status:** `[PARTIALLY IMPLEMENTED IN CORE — BID-ASK QUALITY FILTER PLANNED]`
+- **Context:** The core system dynamically honors `MARKET_DATA_MODE=LIVE` / `DEFAULT_MARKET_DATA_TYPE=1|2` / `FALLBACK_MARKET_DATA_TYPE` in `.env` or `config/settings.yaml` across `IBKRBrokerClient`, `PagedOptionChainFetcher._fetch_page_live_opra`, `CorridorQuoteService`, FastAPI `/api/status`, and the UI (with `10089`/`354` fallback to Delayed `Type 3 -> 4`).
+- **Activated & Remaining Items:**
+  1. `[IMPLEMENTED IN CORE]` Setting `MARKET_DATA_MODE=LIVE` or `DEFAULT_MARKET_DATA_TYPE=1` (with optional `FALLBACK_MARKET_DATA_TYPE=2`) reconciles config cleanly across broker, API, and UI (`src/broker/fetcher.py` `_fetch_page_live_opra` polls `genericTickList="100,101,104,106"` for `modelGreeks` and tick `101` OI, cascading `1 -> 2` and downgrading `10089`/`354` to Delayed).
+  2. `[IMPLEMENTED IN CORE — MODULE 2]` Targeted `<= 60`-contract **Wall Strike Corridor & Optional Live Constant Streaming (`src/broker/corridor.py`, `GET /api/corridor/stream/{ticker}`, `#wall-corridor-card`)** dynamically honors `LIVE` (`Type 1 -> 2`) and `DELAYED` (`Type 3 -> 4`).
+  3. `[PLANNED]` Add an optional **Bid-Ask Spread Quality Filter** flagging illiquid strikes where `(ask - bid) / mid > 0.25`.
 
 ---
 

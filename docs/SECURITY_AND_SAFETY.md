@@ -1,7 +1,7 @@
 # Security & Read-Only Safety Specification (`SECURITY_AND_SAFETY.md`)
 
 ## 1. Zero-Trust Read-Only Execution Mandate
-This application is strictly a **read-only analytical terminal**. Because the default configuration targets **Port `4001` (IBKR Gateway Live Session)**, read-only execution is enforced at the code level through **three independent defense-in-depth layers**.
+This application is strictly a **read-only analytical terminal**. Because the default configuration targets **Port `4001` (IBKR Gateway Live Session)** — or any configured `IBKR_HOST:IBKR_PORT` socket (e.g., `7496`/`7497`) — read-only execution is enforced at the code level through **three independent defense-in-depth layers**.
 
 ### Layer 1: Runtime Method Blocking (`ReadOnlyIBGuard` in `src/core/security.py`)
 - Feature modules MUST NEVER instantiate `ib_async.IB()` directly.
@@ -16,9 +16,9 @@ This application is strictly a **read-only analytical terminal**. Because the de
 - **Mandatory Unit Test (`tests/unit/test_security.py`):** Must invoke every blocked method on a guarded `IB` instance and verify that `SecurityViolationError` is raised with zero network socket writes.
 
 ### Layer 2: IBKR Gateway Configuration Checklist
-Users running IBKR Gateway on Port `4001` should verify in **Configure -> Settings -> API -> Settings**:
+Users running IBKR Gateway on `IBKR_PORT` (default `4001`, or TWS/custom port) should verify in **Configure -> Settings -> API -> Settings**:
 1. **Read-Only API:** Checked (`[x]`).
-2. **Socket Port:** `4001`.
+2. **Socket Port:** Matches configured `IBKR_PORT` (default `4001`).
 3. **Master API client ID:** Blank (or not conflicting with `CLIENT_ID=77`).
 
 ### Layer 3: Static Analysis CI Gate (`Makefile`)
