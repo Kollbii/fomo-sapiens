@@ -70,9 +70,14 @@ Verify that if any files in `src/` or `config/` were modified, the corresponding
    - `feat(ui): build NYT print and obsidian terminal dashboard`
    - `test(unit): add pagination and security guard unit tests`
    - `docs(sync): update architecture and schema specs`
-4. Push only when explicitly instructed by the user:
+4. Tag every commit using the tag specified in the user instruction, or derive an appropriate tag from context (current phase/milestone, existing `git tag` history, or `pyproject.toml` version):
 
-    git push origin HEAD
+    git tag -a <tag> -m "<tag summary>"
+
+   If batching multiple commits in one run, apply the target tag to the tip commit (or per-phase sub-tags when instructed).
+5. Push commits and tags only when explicitly instructed by the user:
+
+    git push origin HEAD --follow-tags
 
 ---
 
@@ -85,4 +90,4 @@ Always respond using this compact terminal summary format:
     - Read-Only Guard  : PASS | FAIL
     - Pytest Suite     : PASS (X passed in Y.YYs) | FAIL
     - Doc-Sync Check   : VERIFIED | NEEDS UPDATE
-    - Git Action       : <commit hash + message | skipped due to failure>
+    - Git Action       : <commit hash + tag + message | skipped due to failure>
