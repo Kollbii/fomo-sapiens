@@ -1,4 +1,4 @@
-"""Multi-DTE option chain structure alignment across weekly `(30, 60)` expirations."""
+"""Multi-DTE option chain structure alignment across weekly `[30, 120]` expirations."""
 
 from __future__ import annotations
 
