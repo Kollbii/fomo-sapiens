@@ -53,6 +53,7 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - **Mode 1 Archival Writer:** Saves immutable timestamped snapshots (`data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`), updates `data/latest/{TICKER}_latest.csv` atomically, and updates `data/metadata/snapshot_index.json`.
   - Offline reader capable of serving historical and latest snapshots when IBKR Gateway is closed.
 - **Exit Gate:** Unit and integration tests verifying atomic writes, schema enforcement, and corrupt-file rejection using synthetic fixture data.
+- **Status: `[IMPLEMENTED]`** — `src/storage/{schema,csv_repository}.py`, `tests/integration/test_csv_pipeline.py`; new exception `SnapshotNotFoundError` (see `docs/DATA_SCHEMA.md` §5).
 
 ### Phase 3: IBKR Broker Client, Type 3/4 Handler & Paged Fetcher
 - **Scope:** Implement `src/broker/client.py`, `src/broker/contracts.py`, `src/broker/fetcher.py`, and `src/broker/parser.py`.

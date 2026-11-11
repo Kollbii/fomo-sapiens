@@ -50,7 +50,7 @@ To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes
 | 7 | `underlying_price` | `Float64` | No | Underlying spot/reference price (`> 0.0`) at snapshot time. |
 | 8 | `option_conid` | `Int64` | No | IBKR unique `conId` for this specific option contract. |
 | 9 | `expiry` | `Utf8` | No | Option expiration date normalized to `YYYY-MM-DD`. |
-| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`30 <= dte < 60`). |
+| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`0 <= dte <= 400` enforced by the row model; the `[30, 60)` window + `±3` day tolerance is enforced by the broker filter). |
 | 11 | `target_dte_bucket` | `Int64` | No | Matched target bucket (`30`, `35`, `40`, `45`, or `60`). |
 | 12 | `strike` | `Float64` | No | Option strike price (`> 0.0`). |
 | 13 | `moneyness_pct` | `Float64` | No | Signed percentage from spot: `((strike - underlying_price) / underlying_price) * 100.0`. |
@@ -108,3 +108,10 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
     }
 
 If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically.
+
+---
+
+## 5. Phase 2 Implementation Notes — `[IMPLEMENTED]`
+- **`src/storage/schema.py`:** `OptionContractRow` (field order = CSV column order), `COLUMNS`, `OPTION_CHAIN_POLARS_SCHEMA` (`pl.Schema`), `SnapshotMeta` (index entry). The row model also sanitizes sentinels (prices `<= 0`/NaN/`>= 1e9` → null; counts `< 0`/NaN/`>= 2147483647` → null; `iv <= 0` or `> 10`, `abs(delta) > 1.001`, `gamma < 0` → null), derives `mid` and `mark_price` (`mid` → `last` → `close`), and requires `snapshot_id` prefix == `underlying`.
+- **`src/storage/csv_repository.py`:** `CSVRepository(storage_settings, root)`; `make_snapshot_id(ticker, ts)`; `save_snapshot` (refuses to overwrite an existing snapshot id, raising `StorageSchemaError`), `load_latest` (falls back to the newest valid archive if the cache is missing/corrupt), `load_snapshot`, `list_snapshots` (newest first), `load_index` / `rebuild_index` (self-healing; corrupt or stray CSVs are skipped with a warning). Readers raise `StorageSchemaError` on header/dtype/null violations and `SnapshotNotFoundError` when nothing exists.
+- **Index notes:** `file_path` / `latest_file` are root-relative POSIX paths. `range_pct` / `strike_step` are `null` after a rebuild from CSVs (they are not CSV columns).
