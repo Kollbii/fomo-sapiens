@@ -1,52 +1,45 @@
 .PHONY: help setup run docker-up docker-down test lint typecheck security-guard check
 
-PYTHON ?= python3
 VENV_DIR ?= .venv
+ifeq ($(OS),Windows_NT)
+export PATH := $(abspath $(VENV_DIR)/Scripts);$(PATH)
+else
+export PATH := $(abspath $(VENV_DIR)/bin):$(PATH)
+endif
+UV ?= uv
+UV_RUN ?= $(UV) run --no-sync
 
 help:
-	@echo "IBKR Options Analyzer — Command Reference"
-	@echo "  make setup          Create virtual environment and install dependencies"
-	@echo "  make run            Run FastAPI dashboard locally on http://127.0.0.1:8000 (IBKR 127.0.0.1:4001)"
-	@echo "  make docker-up      Build and start container via Docker Compose (Windows/macOS/Linux)"
-	@echo "  make docker-down    Stop Docker container"
-	@echo "  make test           Run pytest unit and integration suite"
-	@echo "  make check          Run full verification gate (lint + types + security-guard + tests)"
+	@$(UV_RUN) python -c "print('IBKR Options Analyzer - Commands:\n  make setup          Create .venv and install dependencies via uv\n  make run            Run FastAPI server on http://127.0.0.1:8000\n  make docker-up      Build and start Docker container\n  make docker-down    Stop Docker container\n  make test           Run pytest suite\n  make check          Run lint + typecheck + security-guard + test')"
 
 setup:
-	@mkdir -p data/snapshots data/latest data/metadata data/logs
-	@if command -v uv >/dev/null 2>&1; then \
-		uv venv $(VENV_DIR) && uv pip install --python $(VENV_DIR)/bin/python -e ".[dev]"; \
-	else \
-		$(PYTHON) -m venv $(VENV_DIR) && $(VENV_DIR)/bin/pip install --upgrade pip && $(VENV_DIR)/bin/pip install -e ".[dev]"; \
-	fi
-	@if [ ! -f .env ]; then cp .env.example .env; fi
-	@echo "Setup complete. Activate with: source $(VENV_DIR)/bin/activate"
+	$(UV_RUN) python -c "import pathlib, shutil; [pathlib.Path(p).mkdir(parents=True, exist_ok=True) for p in ('data/snapshots', 'data/latest', 'data/metadata', 'data/logs')]; pathlib.Path('.env').exists() or shutil.copy('.env.example', '.env')"
+	$(UV) venv $(VENV_DIR) --allow-existing
+	$(UV) pip install -e ".[dev]"
 
 run:
-	@mkdir -p data/snapshots data/latest data/metadata data/logs
-	$(VENV_DIR)/bin/uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload
+	$(UV_RUN) python -c "import pathlib; [pathlib.Path(p).mkdir(parents=True, exist_ok=True) for p in ('data/snapshots', 'data/latest', 'data/metadata', 'data/logs')]"
+	$(UV_RUN) uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload
 
 docker-up:
-	@mkdir -p data/snapshots data/latest data/metadata data/logs
+	$(UV_RUN) python -c "import pathlib; [pathlib.Path(p).mkdir(parents=True, exist_ok=True) for p in ('data/snapshots', 'data/latest', 'data/metadata', 'data/logs')]"
 	docker compose up --build -d
-	@echo "Dashboard running at http://127.0.0.1:8000"
 
 docker-down:
 	docker compose down
 
 lint:
-	$(VENV_DIR)/bin/ruff check src tests
-	$(VENV_DIR)/bin/ruff format --check src tests
+	$(UV_RUN) ruff check src tests
+	$(UV_RUN) ruff format --check src tests
 
 typecheck:
-	$(VENV_DIR)/bin/mypy src tests
+	$(UV_RUN) mypy src tests
 
 security-guard:
-	@echo "Verifying zero order-placement calls outside src/core/security.py..."
-	@! grep -rnE "\.(placeOrder|cancelOrder|reqGlobalCancel|exerciseOptions)\(" src/ --exclude="security.py"
+	$(UV_RUN) python -c "import pathlib, re, sys; pat = re.compile(r'\.(placeOrder|cancelOrder|reqGlobalCancel|exerciseOptions)\('); hits = [f'{p}:{i}:{line.strip()}' for p in pathlib.Path('src').rglob('*.py') if p.name != 'security.py' for i, line in enumerate(p.read_text(encoding='utf-8').splitlines(), 1) if pat.search(line)]; sys.exit('\n'.join(['SECURITY VIOLATION:'] + hits)) if hits else print('Read-Only Security Guard: PASS')"
 
 test:
-	$(VENV_DIR)/bin/pytest
+	$(UV_RUN) pytest -q --tb=short
 
 check: lint typecheck security-guard test
-	@echo "All quality and security gates passed. Remember to verify AGENTS.md and docs/ sync!"
+	@$(UV_RUN) python -c "print('All quality and security gates passed!')"
