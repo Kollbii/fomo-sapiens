@@ -50,7 +50,7 @@ To minimize IBKR API calls and prevent multi-file sync bugs, each refresh writes
 | 7 | `underlying_price` | `Float64` | No | Underlying spot/reference price (`> 0.0`) at snapshot time. |
 | 8 | `option_conid` | `Int64` | No | IBKR unique `conId` for this specific option contract. |
 | 9 | `expiry` | `Utf8` | No | Option expiration date normalized to `YYYY-MM-DD`. |
-| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`0 <= dte <= 400` in schema; the broker filter selects weekly expirations strictly `30 <= dte < 60`). |
+| 10 | `dte` | `Int64` | No | Calendar days to expiration from `market_date` (`0 <= dte <= 400` in schema; the broker filter selects weekly expirations strictly `30 <= dte <= 120`). |
 | 11 | `strike` | `Float64` | No | Option strike price (`> 0.0`). |
 | 12 | `moneyness_pct` | `Float64` | No | Signed percentage from spot: `((strike - underlying_price) / underlying_price) * 100.0`. |
 | 13 | `right` | `Utf8` | No | Option type: strictly `"C"` (Call) or `"P"` (Put). |

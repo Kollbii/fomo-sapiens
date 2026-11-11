@@ -31,9 +31,9 @@ You enforce the **Mandatory Documentation-Sync Policy** defined in `AGENTS.md`. 
 | `Makefile`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `pyproject.toml` | `AGENTS.md` | CLI commands, environment variables, dependencies, phase status. |
 | `src/core/security.py`, `src/core/config.py` | `docs/SECURITY_AND_SAFETY.md`, `AGENTS.md` | Blocked IBKR methods, `TickerValidator` regex/watchlist rules, port `4001` settings. |
 | `src/storage/schema.py`, `src/storage/csv_repository.py` | `docs/DATA_SCHEMA.md` | CSV column names, Polars dtypes, atomic write steps, `snapshot_index.json` fields. |
-| `src/broker/client.py`, `src/broker/contracts.py`, `src/broker/fetcher.py`, `src/broker/parser.py` | `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md` | Type 3/4 cascade rules, `[30, 60)` DTE matching, `%` range & `$` strike step math, page size (`<=80`). |
-| `src/analytics/*.py` | `docs/ARCHITECTURE.md`, `docs/FUTURE_IMPROVEMENTS.md` | BSM fallback formulas, wall/anomaly algorithms. If a roadmap feature from `FUTURE_IMPROVEMENTS.md` was built, move it to `ARCHITECTURE.md` and mark `[IMPLEMENTED]`. |
-| `src/web/api.py`, `src/web/templates/`, `src/web/static/` | `docs/UI_UX_GUIDELINES.md`, `docs/ARCHITECTURE.md` | CSS design tokens (`--bg-primary`, etc.), layout rows, reserved `#editorial-banner-slot`, API endpoints. |
+| `src/broker/client.py`, `src/broker/contracts.py`, `src/broker/fetcher.py`, `src/broker/parser.py` | `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md` | Type 3/4 cascade rules, `[30, 120]` DTE matching, `%` range & `Auto`/`$` strike step math, `reqContractDetailsAsync` pre-fetch, page size (`<=80`). |
+| `src/analytics/*.py` | `docs/ARCHITECTURE.md`, `docs/FUTURE_IMPROVEMENTS.md` | BSM fallback formulas, wall/anomaly algorithms, Strategy Lab (`strategies.py`) payoff/Greeks math. If a roadmap feature from `FUTURE_IMPROVEMENTS.md` was built, move it to `ARCHITECTURE.md` and mark `[IMPLEMENTED]`. |
+| `src/web/api.py`, `src/web/templates/`, `src/web/static/` | `docs/UI_UX_GUIDELINES.md`, `docs/ARCHITECTURE.md` | CSS design tokens (`--bg-primary`, etc.), layout rows, `.panel-toggle-pill` standards, `#strategy-lab-card` side-by-side canvas & `Plotly.react` lifecycle, reserved `#editorial-banner-slot`, API endpoints (`/api/strategy/*`), asset cache-busters in `base.html`/`index.html`. |
 
 ---
 

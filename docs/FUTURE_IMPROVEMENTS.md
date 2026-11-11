@@ -11,6 +11,7 @@
   1. Switch `MARKET_DATA_MODE=LIVE` (or `default_market_data_type: 1` in `config/settings.yaml`).
   2. In `src/broker/fetcher.py` (`_fetch_page_live_opra`), subscribe with `genericTickList="100,101,104,106"` and wait in `0.15s` increments (up to `2.0s` max per page) specifically until both `ticker.modelGreeks` and `ticker.callOpenInterest` / `ticker.putOpenInterest` (tick `101`) populate.
   3. Add an optional **Bid-Ask Spread Quality Filter** flagging illiquid strikes where `(ask - bid) / mid > 0.25`.
+  - **Module 2 Update (`[IMPLEMENTED IN CORE]`):** Targeted `<= 60`-contract **Wall Strike Corridor & Optional Live Constant Streaming (`src/broker/corridor.py`, `GET /api/corridor/stream/{ticker}`, `#wall-corridor-card`)** is already implemented and automatically honors `MARKET_DATA_MODE=LIVE` (`Type 1 -> 2` with tick list `"100,101,104,106"`) as well as `DELAYED` (`Type 3 -> 4`).
 
 ---
 
@@ -21,7 +22,7 @@
     - $\text{Call GEX}_K = +\text{OI}_{\text{call}, K} \times \Gamma_{\text{call}, K} \times 100 \times S^2 \times 0.01$
     - $\text{Put GEX}_K = -\text{OI}_{\text{put}, K} \times \Gamma_{\text{put}, K} \times 100 \times S^2 \times 0.01$
     - $\text{Net GEX}_K = \text{Call GEX}_K + \text{Put GEX}_K$
-  - **Zero-Gamma Flip Level:** Interpolate the exact underlying spot price $S_{\text{flip}}$ where cumulative Net GEX across the `[30, 60)` weekly chain crosses zero (transitioning from positive mean-reverting gamma to negative volatility-amplifying gamma).
+  - **Zero-Gamma Flip Level:** Interpolate the exact underlying spot price $S_{\text{flip}}$ where cumulative Net GEX across the `[30, 120]` weekly chain crosses zero (transitioning from positive mean-reverting gamma to negative volatility-amplifying gamma).
 - **Module Target:** `src/analytics/gex.py` + new GEX Bar Profile tab in Chart A.
 
 ---
@@ -46,7 +47,7 @@
 ## 4. 25-Delta Risk Reversal (Put-Call Skew) & Term Structure Curve
 - **Status:** `[PLANNED — PHASE 7]`
 - **Quantitative Specification:**
-  - For each weekly expiration in the `[30, 60)` DTE window:
+  - For each weekly expiration in the `[30, 120]` DTE window:
     - Extract **ATM IV** (interpolated at `abs(delta) == 0.50` or `strike == spot`).
     - Extract **25-Delta Put IV** (`delta == -0.25`) and **25-Delta Call IV** (`delta == +0.25`).
     - Compute **25-Delta Risk Reversal:** $\text{RR}_{25} = \text{IV}_{25\Delta \text{ Call}} - \text{IV}_{25\Delta \text{ Put}}$.
@@ -56,13 +57,13 @@
 ---
 
 ## 5. Max Pain & Implied Expected Move Cone ($\pm 1\sigma / \pm 2\sigma$)
-- **Status:** `[PLANNED — PHASE 7]`
+- **Status:** `[PARTIALLY IMPLEMENTED IN STRATEGY LAB; MAX PAIN + WALLS CONE PLANNED — PHASE 7]`
 - **Quantitative Specification:**
-  - **Max Pain Strike:** For each expiration, evaluate candidate settlement prices $S_T \in \text{Strikes}$ and find the strike that minimizes total intrinsic payout to option holders:
-    $$\text{Payout}(S_T) = \sum_K \text{OI}_{\text{call}, K} \max(0, S_T - K) + \sum_K \text{OI}_{\text{put}, K} \max(0, K - S_T)$$
-  - **Implied Expected Move ($\pm 1\sigma$):**
-    $$\Delta S_{1\sigma} = S \times \text{IV}_{\text{ATM}} \times \sqrt{\frac{\text{DTE}}{365}}$$
-  - Render shaded $\pm 1\sigma$ expected move bands onto the Put/Call Wall charts.
+  - **Implemented (`src/analytics/strategies.py` + `#chart-strategy-payoff`):** Computes `±1σ` Expected Move ($\Delta S_{1\sigma} = S \times \text{IV}_{\text{ATM}} \times \sqrt{\text{DTE}/365}$) in Strategy Risk KPIs and renders a shaded `±1σ` Expected Move vertical band on `#chart-strategy-payoff`.
+  - **Remaining Planned Items:**
+    - **Max Pain Strike:** For each expiration, evaluate candidate settlement prices $S_T \in \text{Strikes}$ and find the strike that minimizes total intrinsic payout to option holders:
+      $$\text{Payout}(S_T) = \sum_K \text{OI}_{\text{call}, K} \max(0, S_T - K) + \sum_K \text{OI}_{\text{put}, K} \max(0, K - S_T)$$
+    - Render $\pm 1\sigma / \pm 2\sigma$ expected move bands directly onto the main Put/Call Wall charts.
 
 ---
 

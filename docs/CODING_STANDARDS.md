@@ -31,12 +31,18 @@ Every feature phase requires automated tests in `pytest`:
    - Tests `TickerValidator.validate()` against valid symbols (`NVDA`, `AVGO`, `CRDO`, `PLTR`, `SPY`) and malicious inputs (`../etc`, `NVDA;rm`, `BRK.A`, `12345`, `""`, `"ABCDEFG"`).
    - Tests `ReadOnlyIBGuard.lock()` ensuring `placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, and `whatIfOrder` raise `SecurityViolationError`.
 2. **`tests/unit/test_contracts_and_pagination.py`:**
-   - Verifies strict `[30, 60)` weekly DTE matching, `+-X%` moneyness filtering, grid-aligned `$ strike_step` striding (and Auto step selection), and `<= 80` contracts/page splitting.
+   - Verifies strict `[30, 120]` weekly DTE matching, `+-X%` moneyness filtering, grid-aligned `$ strike_step` striding (and Auto step selection), and `<= 80` contracts/page splitting.
 3. **`tests/unit/test_bsm_and_analytics.py`:**
    - Verifies vectorized BSM implied volatility and Greeks against known analytical option values.
    - Verifies Put/Call Wall detection (both OI mode and Volume fallback mode) and `Volume > OI` anomaly detection.
 4. **`tests/integration/test_csv_pipeline.py`:**
    - Verifies Mode 1 archival writes, `latest` updates, `snapshot_index.json` rebuilds, and full offline pipeline execution from CSV -> Analytics -> FastAPI response.
+5. **`tests/unit/test_strategies.py`:**
+   - Verifies Wall-anchored auto-construction (`Bull Put Spread`, `Bull Call Spread`, `Diagonal Spread`, `Iron Condor`), user-picked `CUSTOM` legs, `Mid`/`Natural`/Slippage/Limit Ladder fills, `POP %` / `±1σ` expected move, unbounded risk guards, and `T+n` / `ΔIV` BSM curves.
+6. **`tests/unit/test_corridor.py` & `tests/integration/test_corridor_api.py`:**
+   - Verifies `select_wall_corridor` Tier `0..3` prioritization and hard `<= 60` subscription cap (`PacingViolationError` above 60), pre-qualified `conId` reuse (`qualifyContractsAsync` skipped), Type `3 -> 4` fallback + BSM Greeks enrichment, and 100% `cancelMktData` cleanup across one-shot pulls, normal stream termination, `stop_all_streams()`, `gen.aclose()`, and mid-stream Gateway disconnects.
+   - Verifies REST/SSE Corridor endpoints (`/api/corridor/quotes`, `/api/corridor/stop`, `/api/corridor/stream/{ticker}`), `503 GATEWAY_OFFLINE` handling, Strategy Lab live quote overlay without mutating Mode 1 CSVs, and pure `_run()` coroutine stepping without Windows loopback sockets.
+   - Keep JavaScript templates inside `src/web/static/js/dashboard.js` free of HTML entities `&bull;` / `&mdash;` (use `\u2022` / `\u2014`).
 
 ---
 
