@@ -12,6 +12,7 @@ This application is strictly a **read-only analytical terminal**. Because the de
   - `exerciseOptions`
   - `whatIfOrder`
   - `whatIfOrderAsync`
+- `ReadOnlyIBGuard.verify_locked(ib)` returns `True` only if every blocked method on both targets is a trap. Config additionally refuses `ibkr.read_only_enforced: false` (`ConfigurationError`).
 - **Mandatory Unit Test (`tests/unit/test_security.py`):** Must invoke every blocked method on a guarded `IB` instance and verify that `SecurityViolationError` is raised with zero network socket writes.
 
 ### Layer 2: IBKR Gateway Configuration Checklist
@@ -33,8 +34,8 @@ The application supports two ticker selection methods:
 2. **Dynamic Custom Stock Input Box:** Allows typing any US Stock/ETF symbol in the UI.
 
 ### 2.2 Strict Sanitization Pipeline (`TickerValidator` in `src/core/security.py`)
-Every ticker input from any source (UI form, URL parameter, query string, or config) MUST pass through `TickerValidator.validate(raw_input: str) -> str` before being used in file paths or IBKR calls:
-1. **Normalization:** Confirm input is a `str`, strip whitespace, convert to uppercase.
+Every ticker input from any source (UI form, URL parameter, query string, or config) MUST pass through `TickerValidator.validate(raw_input: str) -> str` (a classmethod) before being used in file paths or IBKR calls. When `watchlist.allow_custom_ticker` is `false`, use the instance method `TickerValidator(watchlist, allow_custom).validate_selection(raw)`, which additionally enforces watchlist membership.
+1. **Normalization:** Confirm input is a `str`, strip whitespace, require pure ASCII (rejects Unicode look-alikes such as full-width letters), convert to uppercase.
 2. **Strict Regex Gate:** Must match `^[A-Z]{1,5}$` (1 to 5 uppercase ASCII letters only).
    - Rejects path traversal (`..`, `/`, `\`), shell metacharacters (`;`, `|`, `$`, `&`), whitespace, numbers, and punctuation with `InvalidTickerError` (HTTP `422`).
 3. **IBKR Qualification Gate:** Before creating any directory under `data/snapshots/{TICKER}/` or querying option parameters, the broker client must qualify the contract as a US Stock:

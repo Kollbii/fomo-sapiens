@@ -173,3 +173,12 @@ Under IBKR **Type 3 (15-min Delayed)** data without an OPRA subscription, IBKR o
 | **Outside Market Hours / Unpopulated Type 3 Ticks** | Page collector detects `>80%` of contracts have empty `bid`/`ask`/`last`. | Automatically switches to `reqMarketDataType(4)` (Delayed-Frozen) and re-polls the page so last closing prices populate. |
 | **Invalid Custom Ticker** | Caught in `TickerValidator` or empty `qualifyContractsAsync` result. | Rejects request with HTTP `422 Unprocessable Entity` and descriptive error banner before touching option chains or disk. |
 | **API Pacing Warning (`Error 100 / 162`)** | Intercepted in `ib.errorEvent`. | Paged fetcher increases inter-page cooldown (`0.35s -> 1.0s`) and retries the page once. |
+
+
+---
+
+## 6. Phase 1 Implementation Notes (`src/core/`) — `[IMPLEMENTED]`
+- **`src/core/exceptions.py`:** `AnalyzerError` base + `SecurityViolationError`, `InvalidTickerError`, `ConfigurationError`, `GatewayConnectionError`, `UnderlyingPriceUnavailableError`, `OptionChainFetchError`, `PacingViolationError`, `StorageSchemaError`.
+- **`src/core/config.py`:** Frozen, `extra="forbid"` Pydantic v2 models (`AppSettings`, `IBKRSettings`, `WatchlistSettings`, `OptionsChainSettings`, `AnalyticsSettings`, `StorageSettings`, root `Settings`). `load_settings(yaml_path, env_file)` loads `config/settings.yaml`, then applies flat env overrides (process env beats `.env`): `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`, `APP_HOST`, `APP_PORT`. Validation failures raise `ConfigurationError`. `ibkr.read_only_enforced: false` is rejected. `get_settings()` is `lru_cache`d; `configure_logging()` is idempotent (stdout + rotating `storage.logs_dir/analyzer.log`, 5 MB x 5).
+- **`src/core/security.py`:** `TickerValidator` (`validate` classmethod = universal gate; instance `is_watchlist` / `validate_selection` honour `allow_custom_ticker`) and `ReadOnlyIBGuard.lock/verify_locked` (traps installed on the `IB` instance and `ib.client`).
+- **Cross-platform tooling:** `Makefile` uses `uv run` and Python one-liners, so `make check` works natively on Windows, macOS and Linux.

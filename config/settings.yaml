@@ -72,3 +72,4 @@ storage:
   snapshots_dir: "data/snapshots"
   latest_dir: "data/latest"
   metadata_index_file: "data/metadata/snapshot_index.json"
+  logs_dir: "data/logs"   # rotating analyzer.log lives here

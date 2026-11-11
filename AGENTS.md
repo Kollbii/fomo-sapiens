@@ -44,6 +44,8 @@ Agents MUST build the system incrementally following the 5 phases below. **Do NO
   - `ReadOnlyIBGuard`: Wraps `ib_async.IB` and hard-blocks all order/mutation methods (`placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, `whatIfOrder`) by raising `SecurityViolationError`.
 - **Exit Gate:** 100% passing unit tests in `tests/unit/test_security.py` and `tests/unit/test_config.py`.
 
+- **Status: `[IMPLEMENTED]`** — `src/core/{config,exceptions,security}.py` with `tests/unit/test_config.py` and `tests/unit/test_security.py`. Config is `config/settings.yaml` (new key `storage.logs_dir`) + env overrides `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`, `APP_HOST`, `APP_PORT`.
+
 ### Phase 2: CSV Storage Engine & Offline Cache Layer
 - **Scope:** Implement `src/storage/schema.py` and `src/storage/csv_repository.py`.
 - **Key Deliverables:**
