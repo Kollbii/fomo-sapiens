@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.exceptions import ConfigurationError
@@ -44,6 +44,10 @@ class AppSettings(_StrictModel):
         return upper
 
 
+_LIVE_MD_TYPES: tuple[int, ...] = (1, 2)
+_DELAYED_MD_TYPES: tuple[int, ...] = (3, 4)
+
+
 class IBKRSettings(_StrictModel):
     host: str = "127.0.0.1"
     port: int = Field(default=4001, ge=1, le=65535)
@@ -53,6 +57,41 @@ class IBKRSettings(_StrictModel):
     market_data_mode: Literal["DELAYED", "LIVE"] = "DELAYED"
     default_market_data_type: int = Field(default=3, ge=1, le=4)
     fallback_market_data_type: int = Field(default=4, ge=1, le=4)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _align_defaults(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+        raw = dict(data)
+        has_mode = "market_data_mode" in raw and raw["market_data_mode"] is not None
+        has_def = "default_market_data_type" in raw and raw["default_market_data_type"] is not None
+        has_fb = "fallback_market_data_type" in raw and raw["fallback_market_data_type"] is not None
+
+        if has_def and not has_mode:
+            try:
+                def_val = int(raw["default_market_data_type"])
+            except (TypeError, ValueError):
+                return raw
+            if def_val in _LIVE_MD_TYPES:
+                raw["market_data_mode"] = "LIVE"
+                if not has_fb:
+                    raw["fallback_market_data_type"] = 2
+            elif def_val in _DELAYED_MD_TYPES:
+                raw["market_data_mode"] = "DELAYED"
+                if not has_fb:
+                    raw["fallback_market_data_type"] = 4
+        elif has_mode and not has_def:
+            mode_val = str(raw["market_data_mode"]).strip().upper()
+            if mode_val == "LIVE":
+                raw["default_market_data_type"] = 1
+                if not has_fb:
+                    raw["fallback_market_data_type"] = 2
+            elif mode_val == "DELAYED":
+                raw["default_market_data_type"] = 3
+                if not has_fb:
+                    raw["fallback_market_data_type"] = 4
+        return raw
 
     @field_validator("market_data_mode", mode="before")
     @classmethod
@@ -65,6 +104,24 @@ class IBKRSettings(_StrictModel):
         if not value:
             raise ValueError("read_only_enforced must remain true; the app is strictly read-only")
         return value
+
+    @model_validator(mode="after")
+    def _validate_mode_and_types(self) -> IBKRSettings:
+        if self.market_data_mode == "DELAYED":
+            if (
+                self.default_market_data_type not in _DELAYED_MD_TYPES
+                or self.fallback_market_data_type not in _DELAYED_MD_TYPES
+            ):
+                raise ValueError(
+                    "MARKET_DATA_MODE=DELAYED requires market data types 3 (Delayed) / "
+                    "4 (Delayed-Frozen)"
+                )
+        elif self.default_market_data_type not in _LIVE_MD_TYPES:
+            raise ValueError(
+                "MARKET_DATA_MODE=LIVE requires primary market data type 1 (Live OPRA) or "
+                "2 (Frozen)"
+            )
+        return self
 
 
 class WatchlistSettings(_StrictModel):
@@ -136,6 +193,7 @@ class _EnvOverrides(BaseSettings):
     ibkr_client_id: int | None = None
     market_data_mode: str | None = None
     default_market_data_type: int | None = None
+    fallback_market_data_type: int | None = None
     risk_free_rate: float | None = None
     log_level: str | None = None
     app_host: str | None = None
@@ -149,11 +207,45 @@ _ENV_MAP: tuple[tuple[str, str, str], ...] = (
     ("ibkr_client_id", "ibkr", "client_id"),
     ("market_data_mode", "ibkr", "market_data_mode"),
     ("default_market_data_type", "ibkr", "default_market_data_type"),
+    ("fallback_market_data_type", "ibkr", "fallback_market_data_type"),
     ("risk_free_rate", "analytics", "risk_free_rate"),
     ("log_level", "app", "log_level"),
     ("app_host", "app", "host"),
     ("app_port", "app", "port"),
 )
+
+
+def _reconcile_ibkr_env_overrides(raw: dict[str, Any], overrides: _EnvOverrides) -> None:
+    """Align mode/primary/fallback defaults when only part of `.env` overrides YAML."""
+    env_mode = overrides.market_data_mode
+    env_def = overrides.default_market_data_type
+    env_fb = overrides.fallback_market_data_type
+    if env_mode is None and env_def is None:
+        return
+    ibkr_raw = raw.get("ibkr")
+    if not isinstance(ibkr_raw, dict):
+        ibkr_raw = {}
+        raw["ibkr"] = ibkr_raw
+
+    if env_def is not None and env_mode is None:
+        if env_def in _LIVE_MD_TYPES:
+            ibkr_raw["market_data_mode"] = "LIVE"
+            if env_fb is None:
+                ibkr_raw["fallback_market_data_type"] = 2
+        elif env_def in _DELAYED_MD_TYPES:
+            ibkr_raw["market_data_mode"] = "DELAYED"
+            if env_fb is None:
+                ibkr_raw["fallback_market_data_type"] = 4
+    elif env_mode is not None and env_def is None:
+        mode_u = env_mode.strip().upper()
+        if mode_u == "LIVE":
+            ibkr_raw["default_market_data_type"] = 1
+            if env_fb is None:
+                ibkr_raw["fallback_market_data_type"] = 2
+        elif mode_u == "DELAYED":
+            ibkr_raw["default_market_data_type"] = 3
+            if env_fb is None:
+                ibkr_raw["fallback_market_data_type"] = 4
 
 
 def load_settings(
@@ -185,6 +277,7 @@ def load_settings(
                     section_data = {}
                     raw[section] = section_data
                 section_data[key] = value
+        _reconcile_ibkr_env_overrides(raw, overrides)
         return Settings.model_validate(raw)
     except ConfigurationError:
         raise

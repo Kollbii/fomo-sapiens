@@ -14,7 +14,12 @@ from typing import Any
 
 from ib_async import Option
 
-from src.broker.client import DELAYED_PRIMARY_TYPE, IBKRBrokerClient, SleepFn, poll_until
+from src.broker.client import (
+    IBKRBrokerClient,
+    SleepFn,
+    market_data_type_label,
+    poll_until,
+)
 from src.broker.contracts import ChainPlan, ContractDiscoveryService
 from src.broker.parser import (
     SnapshotContext,
@@ -266,57 +271,74 @@ class PagedOptionChainFetcher:
                     with contextlib.suppress(Exception):
                         await self.sleep(PAGE_PACING_YIELD_SEC)
 
-    async def _fetch_page_delayed(
+    async def _collect_page_with_fallback(
         self,
         page_contracts: Sequence[Any],
         *,
+        generic_tick_list: str,
+        initial_ready: Callable[[Any], bool],
         allow_fallback: bool = True,
+        check_live_downgrade: bool = False,
     ) -> list[Any]:
-        """Collect one page (`<= 80` contracts) in Type 3/4 Delayed mode.
-
-        - Subscribes with `genericTickList="100,101,106"`, `snapshot=False`,
-          `regulatorySnapshot=False`.
-        - Polls every `page_poll_interval_sec` (`0.25s`) up to `page_collect_timeout_sec` (`2.25s`).
-        - Guarantees `cancelMktData` for all subscribed contracts in `finally:`.
-        - If `>80%` of contracts have no usable quote under Type 3 and fallback is available,
-          cascades to Type 4 (`Delayed-Frozen`) and re-polls the page once.
-        - If a pacing warning (`100`/`162`) occurred, widens cooldown to `1.0s` and retries once.
-        """
+        """Collect one page with pacing retry, live->delayed downgrade, and empty-quote fallback."""
         tickers = await self._collect_page_once(
             page_contracts,
-            generic_tick_list=DELAYED_GENERIC_TICKS,
-            ready_predicate=has_usable_quote,
+            generic_tick_list=generic_tick_list,
+            ready_predicate=initial_ready,
         )
+
+        if check_live_downgrade and self.client.live_subscription_missing:
+            sub_notice = self.client.consume_subscription_fallback_notice()
+            if sub_notice and sub_notice not in self._notices:
+                self._notices.append(sub_notice)
+            return await self._fetch_page_delayed(page_contracts, allow_fallback=allow_fallback)
 
         if self.client.consume_pacing_warning():
             self.active_cooldown_sec = max(self.active_cooldown_sec, PACING_COOLDOWN_SEC)
             await self.sleep(self.active_cooldown_sec)
             tickers = await self._collect_page_once(
                 page_contracts,
-                generic_tick_list=DELAYED_GENERIC_TICKS,
-                ready_predicate=has_usable_quote,
+                generic_tick_list=generic_tick_list,
+                ready_predicate=initial_ready,
             )
 
         if (
             allow_fallback
-            and self.client.current_type == DELAYED_PRIMARY_TYPE
             and self.client.can_fallback()
             and empty_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
         ):
+            prev_type = self.client.current_type
             new_type = self.client.switch_to_fallback_data_type()
             notice = (
-                f"Over 80% of Type 3 delayed quotes were empty; switched to "
-                f"MarketDataType({new_type}) Delayed-Frozen"
+                f"Over 80% of Type {prev_type} ({market_data_type_label(prev_type)}) quotes were "
+                f"empty; switched to MarketDataType({new_type}) "
+                f"{market_data_type_label(new_type)}"
             )
             self._notices.append(notice)
             logger.info(notice)
             tickers = await self._collect_page_once(
                 page_contracts,
-                generic_tick_list=DELAYED_GENERIC_TICKS,
+                generic_tick_list=generic_tick_list,
                 ready_predicate=has_usable_quote,
             )
 
+        self.client.observe_tickers_market_data_type(tickers)
         return tickers
+
+    async def _fetch_page_delayed(
+        self,
+        page_contracts: Sequence[Any],
+        *,
+        allow_fallback: bool = True,
+    ) -> list[Any]:
+        """Collect one page (`<= 80` contracts) under Delayed market data cascade (`3 -> 4`)."""
+        return await self._collect_page_with_fallback(
+            page_contracts,
+            generic_tick_list=DELAYED_GENERIC_TICKS,
+            initial_ready=has_usable_quote,
+            allow_fallback=allow_fallback,
+            check_live_downgrade=False,
+        )
 
     async def _fetch_page_live_opra(
         self,
@@ -324,44 +346,14 @@ class PagedOptionChainFetcher:
         *,
         allow_fallback: bool = True,
     ) -> list[Any]:
-        """Scaffolded collector for `MARKET_DATA_MODE=LIVE` (Type 1 Live OPRA -> Type 2 Frozen).
-
-        Subscribes with `genericTickList="100,101,104,106"` and waits for live quotes,
-        `modelGreeks`, and generic tick `101` (`callOpenInterest` / `putOpenInterest`).
-        If IBKR emits `Error 10089`/`354` (missing OPRA subscription), `IBKRBrokerClient`
-        automatically drops back to Type 3 Delayed.
-        """
-        tickers = await self._collect_page_once(
+        """Collect one page (`<= 80` contracts) in Live mode (`1 -> 2` or `10089/354 -> 3`)."""
+        return await self._collect_page_with_fallback(
             page_contracts,
             generic_tick_list=LIVE_OPRA_GENERIC_TICKS,
-            ready_predicate=has_live_opra_data,
+            initial_ready=has_live_opra_data,
+            allow_fallback=allow_fallback,
+            check_live_downgrade=True,
         )
-
-        if self.client.consume_pacing_warning():
-            self.active_cooldown_sec = max(self.active_cooldown_sec, PACING_COOLDOWN_SEC)
-            await self.sleep(self.active_cooldown_sec)
-            tickers = await self._collect_page_once(
-                page_contracts,
-                generic_tick_list=LIVE_OPRA_GENERIC_TICKS,
-                ready_predicate=has_live_opra_data,
-            )
-
-        if (
-            allow_fallback
-            and self.client.can_fallback()
-            and empty_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
-        ):
-            new_type = self.client.switch_to_fallback_data_type()
-            notice = f"Over 80% of live quotes were empty; switched to MarketDataType({new_type})"
-            self._notices.append(notice)
-            logger.info(notice)
-            tickers = await self._collect_page_once(
-                page_contracts,
-                generic_tick_list=LIVE_OPRA_GENERIC_TICKS,
-                ready_predicate=has_usable_quote,
-            )
-
-        return tickers
 
     async def fetch_pages(self, contracts: Sequence[Any]) -> tuple[list[Any], int]:
         """Partition `contracts` into `<= 80`-contract pages and collect all tickers."""
@@ -410,6 +402,11 @@ class PagedOptionChainFetcher:
         qualified = await self.qualify_option_contracts(candidates)
         tickers, pages_fetched = await self.fetch_pages(qualified)
 
+        sub_notice = self.client.consume_subscription_fallback_notice()
+        if sub_notice and sub_notice not in self._notices:
+            self._notices.append(sub_notice)
+        active_md_type = self.client.get_active_market_data_type()
+
         now_utc = self.clock().astimezone(UTC)
         snapshot_id = make_snapshot_id(plan.underlying.symbol, now_utc)
         snapshot_ts_utc = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -419,7 +416,7 @@ class PagedOptionChainFetcher:
             snapshot_id=snapshot_id,
             snapshot_ts_utc=snapshot_ts_utc,
             market_date=market_date_str,
-            market_data_type=self.client.current_type,
+            market_data_type=active_md_type,
             underlying=plan.underlying.symbol,
             underlying_conid=plan.underlying.conid,
             underlying_price=plan.underlying.spot,
@@ -447,7 +444,7 @@ class PagedOptionChainFetcher:
             "dtes_matched=%s range_pct=%.4f strike_step=%.4f total_contracts=%d "
             "pages_fetched=%d elapsed_ms=%.2f greeks_source_counts=%s snapshot_id=%s",
             plan.underlying.symbol,
-            self.client.current_type,
+            active_md_type,
             plan.underlying.spot,
             dtes_matched,
             plan.range_pct,
@@ -464,7 +461,7 @@ class PagedOptionChainFetcher:
             snapshot_id=snapshot_id,
             snapshot_ts_utc=snapshot_ts_utc,
             market_date=market_date_str,
-            market_data_type=self.client.current_type,
+            market_data_type=active_md_type,
             plan=plan,
             rows=rows,
             pages_fetched=pages_fetched,

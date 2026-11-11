@@ -22,7 +22,7 @@ from src.broker.corridor import (
     corridor_quote_key,
     select_wall_corridor,
 )
-from src.core.config import Settings
+from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import GatewayConnectionError, PacingViolationError
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
 
@@ -477,3 +477,61 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
         _run(anext(gen3))
     assert len(fake_ib.cancelled) == frame3.subscribed_count
     assert service.active_stream_count == 0
+
+
+def test_corridor_live_mode_falls_back_type1_to_type2_dynamically() -> None:
+    df = _build_chain_df(strikes=[90.0, 100.0, 110.0], put_wall=90.0, call_wall=110.0)
+    live_settings = Settings(
+        ibkr=IBKRSettings(
+            market_data_mode="LIVE",
+            default_market_data_type=1,
+            fallback_market_data_type=2,
+        )
+    )
+    fake_ib = _FakeIB()
+
+    def _live_frozen_ticker(contract: Any, _ticks: str, mode_history: list[int]) -> Any:
+        if getattr(contract, "secType", "") == "STK":
+            return SimpleNamespace(contract=contract, last=100.0, marketPrice=lambda: 100.0)
+        tk = SimpleNamespace(
+            contract=contract,
+            marketDataType=1,
+            bid=float("nan"),
+            ask=float("nan"),
+            last=float("nan"),
+            close=float("nan"),
+            volume=0,
+            callOpenInterest=0,
+            putOpenInterest=0,
+            modelGreeks=None,
+        )
+
+        class _FrozenAware:
+            def __getattr__(self, name: str) -> Any:
+                cur = mode_history[-1] if mode_history else 1
+                if cur == 2:
+                    if name == "marketDataType":
+                        return 2
+                    if name in ("bid", "ask", "last", "close"):
+                        return 5.0
+                return getattr(tk, name)
+
+        return _FrozenAware()
+
+    fake_ib.ticker_factory = _live_frozen_ticker
+    client = IBKRBrokerClient(live_settings, ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, live_settings, sleep=_noop_sleep)
+
+    frame = _run(
+        service.fetch_corridor_quotes(
+            df,
+            snapshot_id="NVDA_20261111_160000",
+            target_expiry="2026-12-19",
+            window_strikes=1,
+            max_contracts=20,
+        )
+    )
+    assert frame.market_data_type == 2
+    assert any("Type 1" in n and "Type 2" in n for n in frame.notices)
+    assert fake_ib.market_data_types[-2:] == [1, 2]
+    assert len(fake_ib.cancelled) == len(fake_ib.subscribed)

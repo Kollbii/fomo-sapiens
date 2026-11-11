@@ -67,14 +67,16 @@ def _opt_int(val: Any) -> int | None:
     return int(val) if val is not None else None
 
 
-def build_multi_dte_profiles(df: pl.DataFrame) -> MultiDTEProfilesReport:
+def build_multi_dte_profiles(
+    df: pl.DataFrame, *, default_market_data_type: int = 3
+) -> MultiDTEProfilesReport:
     """Align Call and Put chains by `(expiry, dte)` and `strike`."""
     if df.height == 0:
         return MultiDTEProfilesReport(
             underlying="",
             underlying_price=0.0,
             snapshot_id="",
-            market_data_type=3,
+            market_data_type=default_market_data_type,
             greeks_source_counts={},
             expiries=[],
         )

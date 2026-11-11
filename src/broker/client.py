@@ -1,11 +1,12 @@
-"""Read-only IBKR Gateway connection manager with Type 3 -> 4 (or 1 -> 2) market data cascade."""
+"""Read-only IBKR Gateway connection manager with dynamic MarketDataType (1..4) cascade."""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import math
-from collections.abc import Awaitable, Callable
+from collections import Counter
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ib_async import IB
@@ -28,11 +29,48 @@ PACING_CODES: frozenset[int] = frozenset({100, 162})
 #: Gateway/TWS connectivity drop warnings recorded for transport diagnostics.
 DISCONNECT_CODES: frozenset[int] = frozenset({502, 504, 1100, 1300, 2110})
 
+LIVE_TYPES: frozenset[int] = frozenset({1, 2})
 DELAYED_TYPES: frozenset[int] = frozenset({3, 4})
+ALL_MARKET_DATA_TYPES: frozenset[int] = frozenset({1, 2, 3, 4})
 LIVE_PRIMARY_TYPE = 1
 LIVE_FALLBACK_TYPE = 2
 DELAYED_PRIMARY_TYPE = 3
 DELAYED_FALLBACK_TYPE = 4
+MARKET_DATA_TYPE_LABELS: dict[int, str] = {
+    1: "Live OPRA",
+    2: "Frozen",
+    3: "Delayed",
+    4: "Delayed-Frozen",
+}
+
+
+def market_data_type_label(data_type: int) -> str:
+    """Return human-readable label for IBKR market data type `1..4`."""
+    return MARKET_DATA_TYPE_LABELS.get(data_type, f"Type {data_type}")
+
+
+def _ticker_has_quote_data(ticker: Any) -> bool:
+    """Check whether `ticker` received real quote or modelGreek values (safe for default Ticker)."""
+    for attr in (
+        "bid",
+        "ask",
+        "last",
+        "close",
+        "delayedBid",
+        "delayedAsk",
+        "delayedLast",
+        "delayedClose",
+    ):
+        raw = getattr(ticker, attr, None)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            num = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not math.isnan(num) and not math.isinf(num) and num > 0.0:
+            return True
+    return getattr(ticker, "modelGreeks", None) is not None
 
 
 async def poll_until(
@@ -59,18 +97,21 @@ class IBKRBrokerClient:
         cfg = self.settings.ibkr
         self.mode: Literal["DELAYED", "LIVE"] = cfg.market_data_mode
         if self.mode == "LIVE":
-            self.primary_type, self.fallback_type = LIVE_PRIMARY_TYPE, LIVE_FALLBACK_TYPE
-        else:
-            if (
-                cfg.default_market_data_type not in DELAYED_TYPES
-                or cfg.fallback_market_data_type not in DELAYED_TYPES
-            ):
+            if cfg.default_market_data_type not in LIVE_TYPES:
                 raise ConfigurationError(
-                    "MARKET_DATA_MODE=DELAYED requires market data types 3 (Delayed) / "
-                    "4 (Delayed-Frozen)"
+                    "MARKET_DATA_MODE=LIVE requires primary market data type 1 (Live OPRA) "
+                    "or 2 (Frozen)"
                 )
-            self.primary_type = cfg.default_market_data_type
-            self.fallback_type = cfg.fallback_market_data_type
+        elif (
+            cfg.default_market_data_type not in DELAYED_TYPES
+            or cfg.fallback_market_data_type not in DELAYED_TYPES
+        ):
+            raise ConfigurationError(
+                "MARKET_DATA_MODE=DELAYED requires market data types 3 (Delayed) / "
+                "4 (Delayed-Frozen)"
+            )
+        self.primary_type = cfg.default_market_data_type
+        self.fallback_type = cfg.fallback_market_data_type
 
         self.ib: Any = ReadOnlyIBGuard.lock((ib_factory or IB)())
         if not ReadOnlyIBGuard.verify_locked(self.ib):
@@ -78,8 +119,10 @@ class IBKRBrokerClient:
         self.ib.errorEvent += self._on_error
 
         self.current_type: int = self.primary_type
+        self._observed_connection_type: int | None = None
         self.subscription_warning_count = 0
         self.live_subscription_missing = False
+        self._subscription_fallback_notice: str | None = None
         self._pacing_warning = False
         self._was_connected = False
         self._last_disconnect_notice: str | None = None
@@ -162,6 +205,7 @@ class IBKRBrokerClient:
 
     def _safe_disconnect(self) -> None:
         self._was_connected = False
+        self._observed_connection_type = None
         try:
             self.ib.disconnect()
         except Exception:  # pragma: no cover - defensive
@@ -171,32 +215,59 @@ class IBKRBrokerClient:
     def _set_market_data_type(self, data_type: int) -> None:
         self.ib.reqMarketDataType(data_type)
         self.current_type = data_type
+        self._observed_connection_type = None
         logger.info("reqMarketDataType(%d)", data_type)
 
+    def observe_tickers_market_data_type(self, tickers: Sequence[Any]) -> int:
+        """Record the modal connection-granted `Ticker.marketDataType` (`1..4`) when valid."""
+        observed: list[int] = []
+        for tk in tickers:
+            raw_md = getattr(tk, "marketDataType", None)
+            if type(raw_md) is not int or raw_md not in ALL_MARKET_DATA_TYPES:
+                continue
+            if self.current_type in DELAYED_TYPES:
+                # Delayed queries never upgrade to Live; ignore default Ticker().marketDataType == 1
+                if raw_md in DELAYED_TYPES:
+                    observed.append(raw_md)
+            else:
+                # In LIVE mode, Gateway downgrades to 2/3/4 explicitly; Type 1 counts once populated
+                if raw_md != LIVE_PRIMARY_TYPE or _ticker_has_quote_data(tk):
+                    observed.append(raw_md)
+        if observed:
+            counts = Counter(observed)
+            modal = int(min(counts, key=lambda dt: (-counts[dt], dt)))
+            self._observed_connection_type = modal
+        return self.get_active_market_data_type()
+
     def get_active_market_data_type(self) -> int:
-        """Query `ib.client.marketDataType` when present, else return tracked `current_type`."""
+        """Query `ib.client.marketDataType` / observed ticker type, else tracked `current_type`."""
         client = getattr(self.ib, "client", None)
         client_md = getattr(client, "marketDataType", None)
-        if type(client_md) is int and client_md in {
-            LIVE_PRIMARY_TYPE,
-            LIVE_FALLBACK_TYPE,
-            DELAYED_PRIMARY_TYPE,
-            DELAYED_FALLBACK_TYPE,
-        }:
+        if type(client_md) is int and client_md in ALL_MARKET_DATA_TYPES:
             return client_md
+        if self._observed_connection_type in ALL_MARKET_DATA_TYPES:
+            return int(self._observed_connection_type)
         return int(self.current_type)
 
     def reset_market_data_type(self) -> int:
-        """Start every refresh from the configured primary type (3 = Delayed or 1 = Live)."""
+        """Start every refresh from the configured primary type."""
+        self.live_subscription_missing = False
+        self._subscription_fallback_notice = None
+        self._observed_connection_type = None
         self._set_market_data_type(self.primary_type)
         return self.current_type
 
+    def _next_fallback_target(self) -> int:
+        if self.live_subscription_missing and self.current_type in DELAYED_TYPES:
+            return DELAYED_FALLBACK_TYPE
+        return self.fallback_type
+
     def can_fallback(self) -> bool:
-        return self.current_type != self.fallback_type
+        return self.current_type != self._next_fallback_target()
 
     def switch_to_fallback_data_type(self) -> int:
-        """Cascade to the frozen variant: 3 -> 4 (Delayed-Frozen) or 1 -> 2 (Frozen)."""
-        target = DELAYED_FALLBACK_TYPE if self.current_type in DELAYED_TYPES else self.fallback_type
+        """Cascade to configured fallback type (`3->4`, `1->2`, or configured fallback)."""
+        target = self._next_fallback_target()
         self._set_market_data_type(target)
         return target
 
@@ -205,6 +276,11 @@ class IBKRBrokerClient:
         """Return True once if a pacing warning arrived since the last call."""
         flagged, self._pacing_warning = self._pacing_warning, False
         return flagged
+
+    def consume_subscription_fallback_notice(self) -> str | None:
+        """Return and clear any queued live-subscription downgrade notice."""
+        notice, self._subscription_fallback_notice = self._subscription_fallback_notice, None
+        return notice
 
     def _on_error(self, req_id: int, code: int, message: str, contract: Any = None) -> None:
         """`ib.errorEvent` listener. Must never raise."""
@@ -216,8 +292,22 @@ class IBKRBrokerClient:
                 logger.info("IBKR subscription notice %s (reqId=%s): %s", code, req_id, message)
                 if self.current_type not in DELAYED_TYPES:
                     # No live OPRA permissions: continue on the delayed cascade.
+                    prev_type = self.current_type
                     self.live_subscription_missing = True
-                    self._set_market_data_type(DELAYED_PRIMARY_TYPE)
+                    self._subscription_fallback_notice = (
+                        f"Live subscription unavailable on Gateway for Type {prev_type} "
+                        f"({market_data_type_label(prev_type)}, code {code}); cascaded to "
+                        f"MarketDataType({DELAYED_PRIMARY_TYPE}) "
+                        f"{market_data_type_label(DELAYED_PRIMARY_TYPE)}."
+                    )
+                    if self.is_connected:
+                        try:
+                            self._set_market_data_type(DELAYED_PRIMARY_TYPE)
+                        except ConnectionError:
+                            self.current_type = DELAYED_PRIMARY_TYPE
+                    else:
+                        self.current_type = DELAYED_PRIMARY_TYPE
+                    self._observed_connection_type = DELAYED_PRIMARY_TYPE
             elif code in PACING_CODES:
                 self._pacing_warning = True
                 logger.warning("IBKR pacing warning %s: %s", code, message)

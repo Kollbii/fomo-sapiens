@@ -26,7 +26,7 @@ from src.analytics.bsm_fallback import (
     solve_implied_volatility,
 )
 from src.analytics.walls import ChainWallsReport, WallBasis, compute_walls
-from src.broker.client import DELAYED_PRIMARY_TYPE, IBKRBrokerClient, SleepFn, poll_until
+from src.broker.client import IBKRBrokerClient, SleepFn, market_data_type_label, poll_until
 from src.broker.contracts import extract_spot
 from src.broker.fetcher import (
     DELAYED_GENERIC_TICKS,
@@ -826,6 +826,89 @@ class CorridorQuoteService:
 
         return option_tickers, spot_ticker
 
+    async def _poll_initial_corridor(
+        self,
+        session: _ActiveCorridorSession,
+        option_contracts: Sequence[Any],
+        spot_contract: Any | None,
+        *,
+        resubscribe_on_fallback: bool,
+    ) -> tuple[_ActiveCorridorSession, list[Any], Any | None, list[str]]:
+        """Subscribe corridor, wait for initial ticks, and apply dynamic Type fallback if needed."""
+        oc = self.settings.options_chain
+        corridor_cfg = self.settings.corridor
+        notices: list[str] = []
+
+        async def _resubscribe(suffix: str) -> tuple[list[Any], Any | None]:
+            nonlocal session
+            self._cleanup_session(session)
+            session = _ActiveCorridorSession(
+                session_id=f"{session.session_id}-{suffix}",
+                ib=self.client.ib,
+            )
+            self._active_sessions[session.session_id] = session
+            return await self._subscribe_corridor(
+                session,
+                option_contracts,
+                spot_contract,
+                generic_ticks=self._generic_ticks(),
+            )
+
+        try:
+            option_tickers, spot_ticker = await self._subscribe_corridor(
+                session,
+                option_contracts,
+                spot_contract,
+                generic_ticks=self._generic_ticks(),
+            )
+            await poll_until(
+                lambda: all(has_usable_quote(tk) for tk in option_tickers),
+                corridor_cfg.oneshot_collect_timeout_sec,
+                oc.page_poll_interval_sec,
+                self.sleep,
+            )
+
+            if self.client.live_subscription_missing:
+                sub_notice = self.client.consume_subscription_fallback_notice()
+                if sub_notice:
+                    notices.append(sub_notice)
+                if resubscribe_on_fallback:
+                    option_tickers, spot_ticker = await _resubscribe("dl")
+                await poll_until(
+                    lambda: all(has_usable_quote(tk) for tk in option_tickers),
+                    corridor_cfg.oneshot_collect_timeout_sec,
+                    oc.page_poll_interval_sec,
+                    self.sleep,
+                )
+
+            if (
+                self.client.can_fallback()
+                and empty_quote_ratio(option_tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
+            ):
+                prev_type = self.client.current_type
+                new_type = self.client.switch_to_fallback_data_type()
+                notices.append(
+                    f"Corridor Type {prev_type} ({market_data_type_label(prev_type)}) quotes were "
+                    f">80% empty; cascaded to Type {new_type} ({market_data_type_label(new_type)})."
+                )
+                if resubscribe_on_fallback:
+                    option_tickers, spot_ticker = await _resubscribe("fb")
+                    timeout_sec = corridor_cfg.oneshot_collect_timeout_sec
+                else:
+                    timeout_sec = min(1.5, corridor_cfg.oneshot_collect_timeout_sec)
+                await poll_until(
+                    lambda: all(has_usable_quote(tk) for tk in option_tickers),
+                    timeout_sec,
+                    oc.page_poll_interval_sec,
+                    self.sleep,
+                )
+
+            self.client.observe_tickers_market_data_type(option_tickers)
+            return session, option_tickers, spot_ticker, notices
+        except BaseException:
+            self._cleanup_session(session)
+            raise
+
     async def fetch_corridor_quotes(
         self,
         df: pl.DataFrame,
@@ -851,9 +934,6 @@ class CorridorQuoteService:
         self.client.reset_market_data_type()
         option_contracts, spot_contract = await self._prepare_contracts(selection)
 
-        oc = self.settings.options_chain
-        corridor_cfg = self.settings.corridor
-        notices: list[str] = []
         session = _ActiveCorridorSession(
             session_id=f"oneshot-{uuid.uuid4().hex[:8]}",
             ib=self.client.ib,
@@ -861,47 +941,12 @@ class CorridorQuoteService:
         self._active_sessions[session.session_id] = session
 
         try:
-            option_tickers, spot_ticker = await self._subscribe_corridor(
+            session, option_tickers, spot_ticker, notices = await self._poll_initial_corridor(
                 session,
                 option_contracts,
                 spot_contract,
-                generic_ticks=self._generic_ticks(),
+                resubscribe_on_fallback=True,
             )
-            await poll_until(
-                lambda: all(has_usable_quote(tk) for tk in option_tickers),
-                corridor_cfg.oneshot_collect_timeout_sec,
-                oc.page_poll_interval_sec,
-                self.sleep,
-            )
-
-            if (
-                self.client.current_type == DELAYED_PRIMARY_TYPE
-                and self.client.can_fallback()
-                and empty_quote_ratio(option_tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
-            ):
-                # Re-subscribe under Type 4 Delayed-Frozen cleanly after cancelling Type 3
-                self._cleanup_session(session)
-                session = _ActiveCorridorSession(
-                    session_id=f"oneshot-{uuid.uuid4().hex[:8]}",
-                    ib=self.client.ib,
-                )
-                self._active_sessions[session.session_id] = session
-                new_type = self.client.switch_to_fallback_data_type()
-                notices.append(
-                    f"Corridor Type 3 delayed quotes were >80% empty; cascaded to Type {new_type}."
-                )
-                option_tickers, spot_ticker = await self._subscribe_corridor(
-                    session,
-                    option_contracts,
-                    spot_contract,
-                    generic_ticks=self._generic_ticks(),
-                )
-                await poll_until(
-                    lambda: all(has_usable_quote(tk) for tk in option_tickers),
-                    corridor_cfg.oneshot_collect_timeout_sec,
-                    oc.page_poll_interval_sec,
-                    self.sleep,
-                )
 
             live_spot = (
                 extract_spot(spot_ticker) if spot_ticker is not None else None
@@ -974,7 +1019,6 @@ class CorridorQuoteService:
         option_contracts, spot_contract = await self._prepare_contracts(selection)
 
         corridor_cfg = self.settings.corridor
-        oc = self.settings.options_chain
         eff_poll = (
             float(poll_interval_sec)
             if poll_interval_sec is not None
@@ -987,36 +1031,12 @@ class CorridorQuoteService:
         self._active_sessions[session.session_id] = session
 
         try:
-            notices: list[str] = []
-            option_tickers, spot_ticker = await self._subscribe_corridor(
+            session, option_tickers, spot_ticker, notices = await self._poll_initial_corridor(
                 session,
                 option_contracts,
                 spot_contract,
-                generic_ticks=self._generic_ticks(),
+                resubscribe_on_fallback=False,
             )
-            await poll_until(
-                lambda: all(has_usable_quote(tk) for tk in option_tickers),
-                corridor_cfg.oneshot_collect_timeout_sec,
-                oc.page_poll_interval_sec,
-                self.sleep,
-            )
-
-            if (
-                self.client.current_type == DELAYED_PRIMARY_TYPE
-                and self.client.can_fallback()
-                and empty_quote_ratio(option_tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
-            ):
-                new_type = self.client.switch_to_fallback_data_type()
-                notices.append(
-                    f"Corridor stream switched to MarketDataType({new_type}) "
-                    "after empty Type 3 poll."
-                )
-                await poll_until(
-                    lambda: all(has_usable_quote(tk) for tk in option_tickers),
-                    min(1.5, corridor_cfg.oneshot_collect_timeout_sec),
-                    oc.page_poll_interval_sec,
-                    self.sleep,
-                )
 
             rfr = self.settings.analytics.risk_free_rate or DEFAULT_RISK_FREE_RATE
             last_sigs: dict[str, tuple[Any, ...]] = {}
@@ -1033,6 +1053,7 @@ class CorridorQuoteService:
                         "IBKR Gateway connection lost during live corridor stream"
                     )
 
+                self.client.observe_tickers_market_data_type(option_tickers)
                 raw_spot = extract_spot(spot_ticker) if spot_ticker is not None else None
                 live_spot = float(raw_spot) if raw_spot is not None else selection.underlying_price
                 ts_utc = self.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")

@@ -1221,3 +1221,75 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
     assert not client2.is_connected
     # Already-subscribed contracts prior to socket failure are still cancelled cleanly
     assert fake_ib2.cancelled == contracts[:2]
+
+
+def test_client_configured_types_ticker_observation_and_live_midpage_downgrade() -> None:
+    # 1. Explicit primary=2, fallback=2 starts directly on Frozen without false Type 1 reset
+    frozen_cfg = Settings(
+        ibkr=IBKRSettings(
+            market_data_mode="LIVE",
+            default_market_data_type=2,
+            fallback_market_data_type=2,
+        )
+    )
+    fake_frozen_ib = FakeIB()
+    frozen_client = IBKRBrokerClient(frozen_cfg, ib_factory=lambda: fake_frozen_ib)
+    assert frozen_client.primary_type == 2
+    assert frozen_client.fallback_type == 2
+    assert frozen_client.can_fallback() is False
+
+    # Empty Ticker(marketDataType=1) default must NOT overwrite Type 3 delayed session
+    delayed_client = IBKRBrokerClient(Settings(), ib_factory=lambda: FakeIB())
+    empty_delayed_tk = SimpleNamespace(
+        marketDataType=1, bid=float("nan"), ask=float("nan"), last=float("nan"), close=float("nan")
+    )
+    assert delayed_client.observe_tickers_market_data_type([empty_delayed_tk]) == 3
+
+    # Real Type 4 callback on delayed ticker updates active market data type dynamically
+    tk4 = SimpleNamespace(marketDataType=4, bid=-1.0, ask=-1.0, last=-1.0, close=4.2)
+    assert delayed_client.observe_tickers_market_data_type([tk4]) == 4
+    assert delayed_client.get_active_market_data_type() == 4
+
+    # 2. Live fetcher catches Error 10089 mid-page-1, logs notice, and re-collects under Type 3
+    live_cfg = Settings(
+        ibkr=IBKRSettings(
+            market_data_mode="LIVE",
+            default_market_data_type=1,
+            fallback_market_data_type=2,
+        )
+    )
+    fake_live_ib = FakeIB()
+    live_client = IBKRBrokerClient(live_cfg, ib_factory=lambda: fake_live_ib)
+    _run(live_client.ensure_connected())
+    assert live_client.get_active_market_data_type() == 1
+
+    def _downgrade_factory(contract: Any, _ticks: str) -> Any:
+        if live_client.current_type == 1:
+            fake_live_ib.errorEvent.emit(
+                contract.conId or 1,
+                10089,
+                "Requested market data requires additional subscription for API",
+                contract,
+            )
+            return SimpleNamespace(contract=contract, bid=-1.0, ask=-1.0, last=-1.0, close=-1.0)
+        return SimpleNamespace(
+            contract=contract,
+            marketDataType=3,
+            delayedBid=4.1,
+            delayedAsk=4.3,
+            delayedLast=4.2,
+            close=4.0,
+        )
+
+    fake_live_ib.ticker_factory = _downgrade_factory
+    fetcher = PagedOptionChainFetcher(live_client, live_cfg, sleep=_noop_sleep)
+    contracts = [Option("NVDA", "20261211", 170.0, "C", "SMART", conId=501)]
+    tickers, pages = _run(fetcher.fetch_pages(contracts))
+    assert pages == 1
+    assert len(tickers) == 1
+    assert live_client.live_subscription_missing is True
+    assert live_client.get_active_market_data_type() == 3
+    assert any("MarketDataType(3)" in n for n in fetcher._notices)
+    # After 10089 downgrade to Type 3, delayed-frozen fallback (3 -> 4) remains enabled
+    assert live_client.can_fallback() is True
+    assert live_client.switch_to_fallback_data_type() == 4

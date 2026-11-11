@@ -20,6 +20,7 @@ ENV_VARS = (
     "IBKR_CLIENT_ID",
     "MARKET_DATA_MODE",
     "DEFAULT_MARKET_DATA_TYPE",
+    "FALLBACK_MARKET_DATA_TYPE",
     "RISK_FREE_RATE",
     "LOG_LEVEL",
     "APP_HOST",
@@ -122,3 +123,37 @@ def test_configure_logging_writes_file(tmp_path: Path) -> None:
     for h in managed:
         logging.getLogger().removeHandler(h)
         h.close()
+
+
+def test_env_market_data_reconciliation_and_mismatch(tmp_path: Path) -> None:
+    # 1. Setting only DEFAULT_MARKET_DATA_TYPE=1 auto-derives LIVE mode & Type 2 fallback
+    env_live_type = tmp_path / "live_type.env"
+    env_live_type.write_text("DEFAULT_MARKET_DATA_TYPE=1\n", encoding="utf-8")
+    s1 = load_settings(DEFAULT_YAML_PATH, env_live_type)
+    assert s1.ibkr.market_data_mode == "LIVE"
+    assert s1.ibkr.default_market_data_type == 1
+    assert s1.ibkr.fallback_market_data_type == 2
+
+    # 2. Setting only MARKET_DATA_MODE=LIVE aligns defaults to (1, 2) instead of YAML (3, 4)
+    env_live_mode = tmp_path / "live_mode.env"
+    env_live_mode.write_text("MARKET_DATA_MODE=LIVE\n", encoding="utf-8")
+    s2 = load_settings(DEFAULT_YAML_PATH, env_live_mode)
+    assert s2.ibkr.market_data_mode == "LIVE"
+    assert s2.ibkr.default_market_data_type == 1
+    assert s2.ibkr.fallback_market_data_type == 2
+
+    # 3. Explicit FALLBACK_MARKET_DATA_TYPE override works alongside DEFAULT_MARKET_DATA_TYPE=1
+    env_custom_fb = tmp_path / "custom_fb.env"
+    env_custom_fb.write_text(
+        "DEFAULT_MARKET_DATA_TYPE=1\nFALLBACK_MARKET_DATA_TYPE=4\n", encoding="utf-8"
+    )
+    s3 = load_settings(DEFAULT_YAML_PATH, env_custom_fb)
+    assert s3.ibkr.market_data_mode == "LIVE"
+    assert s3.ibkr.default_market_data_type == 1
+    assert s3.ibkr.fallback_market_data_type == 4
+
+    # 4. Contradictory explicit mode + type raises ConfigurationError
+    env_bad = tmp_path / "bad.env"
+    env_bad.write_text("MARKET_DATA_MODE=DELAYED\nDEFAULT_MARKET_DATA_TYPE=1\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError):
+        load_settings(DEFAULT_YAML_PATH, env_bad)
