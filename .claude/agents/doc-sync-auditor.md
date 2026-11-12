@@ -18,7 +18,7 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 1. `git status --short` and `git diff --stat` (add `HEAD~N..HEAD` / `--cached` as instructed).
 2. `git diff -U2 -- <changed code paths>` — read only the hunks.
 3. Map each changed path to its docs (table), `grep -n` the affected identifier in those docs, and edit only the matching lines/sections.
-4. Verify every identifier you wrote exists in the diff or the code (`grep -rn "<identifier>" src/`). Never invent numbers, names, or defaults.
+4. Verify every identifier you wrote exists in the diff or the code (`grep -rn "<identifier>" src/`). Never invent numbers, names, or defaults. `tests/unit/test_docs_consistency.py` enforces `` `#<id>` `` and `GET|POST /api/...` references automatically.
 5. If an implemented feature came from `docs/FUTURE_IMPROVEMENTS.md`, move its spec into `docs/ARCHITECTURE.md` and mark `[IMPLEMENTED]`.
 
 ## 2. Code -> Documentation Map

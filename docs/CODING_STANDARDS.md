@@ -63,6 +63,8 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-3.8-flash` always `thinkingLevel: HIGH`) while preserving unrelated settings, and invalid specs are rejected.
 10. **`tests/integration/test_offline_fixture_smoke.py`:**
    - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
+11. **`tests/unit/test_docs_consistency.py`:**
+   - Fails when `AGENTS.md`, `docs/*.md`, or `.agent/agents/*.md` reference a `` `#<id>` `` missing from `src/web/` templates/JS/CSS, or a `GET|POST /api/...` route the app does not serve (checked against the OpenAPI schema).
 
 ---
 

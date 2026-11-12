@@ -33,7 +33,7 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 2. `reqSecDefOptParamsAsync`; inspect all `SMART` chains, multiplier `"100"`.
 3. Expirations: inclusive `dte_min <= dte <= dte_max` (default `30..120`), one per ISO week, prefer Friday, else latest day of that week.
 4. Strikes: `spot * (1 ± range_pct)`; `strike_step=None` = Auto (`choose_auto_strike_step` over canonical steps, `<= 28` strikes). Exact per-expiration strikes via `reqContractDetailsAsync` (`Semaphore(3)` only inside a running loop, 900 s TTL cache, timeout falls back to `reqSecDefOptParams`) — prevents `Error 200` phantom strikes.
-5. Hard cap `MAX_TOTAL_CONTRACTS = 400` (5 pages x 80); auto-widen step + notice when exceeded. Reuse `conId > 0`; never re-qualify.
+5. Hard cap `max_total_contracts` = `max_contracts_per_page * max_pages_per_refresh` (80 x 5 = 400); auto-widen step + notice when exceeded. Reuse `conId > 0`; never re-qualify.
 6. Pages of `<= 80`; yield `0.01 s` every 20 subscribe/cancel calls; poll `0.25 s` up to `2.25 s`; `cancelMktData` in `finally:`; `0.35 s` inter-page cooldown. Generic ticks: delayed `"100,101,106"`, live `"100,101,104,106"`.
 
 ## 5. Wall Corridor (`src/broker/corridor.py`)
