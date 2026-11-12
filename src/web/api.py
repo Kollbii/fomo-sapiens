@@ -697,6 +697,12 @@ class AnalyzerWebService:
 
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
         symbol = self.validate_ticker(req.ticker)
+        # IBKR allows 100 simultaneous market-data lines by default (shared with TWS). A page of
+        # 80 contracts plus a corridor stream of up to 60 would exceed it, so stop streams first.
+        stopped_lines = 0
+        if self.corridor.active_stream_count:
+            stopped_lines = await self.corridor.stop_all_streams()
+            logger.info("refresh %s stopped corridor streams (%d lines)", symbol, stopped_lines)
         fetch_res = await self.fetcher.fetch_option_chain(
             symbol,
             range_pct=req.range_pct,
@@ -720,6 +726,11 @@ class AnalyzerWebService:
         )
         req_step = fetch_res.plan.strikes.requested_step
         notices = list(fetch_res.notices)
+        if stopped_lines:
+            notices.append(
+                f"Stopped the corridor stream ({stopped_lines} market-data lines) before the "
+                "refresh to stay under the IBKR line limit."
+            )
         if actual_step > plan_step + 1e-6:
             notices.append(
                 f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."

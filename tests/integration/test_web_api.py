@@ -910,3 +910,36 @@ def test_refresh_flags_unusable_snapshot_in_notices(tmp_path: Path) -> None:
     _run(_exercise())
     # Saved with a flag, not refused
     assert repo.list_snapshots("NVDA")[0].spot_source == "CLOSE"
+
+
+def test_refresh_stops_running_corridor_streams_first(tmp_path: Path) -> None:
+    import asyncio
+
+    app, _repo, mock_ib = _build_test_app(tmp_path)
+    corridor = app.state.service.corridor
+    stream_contracts = [SimpleNamespace(conId=900 + i) for i in range(60)]
+    session = SimpleNamespace(
+        session_id="tab-2",
+        stop_event=asyncio.Event(),
+        cleaned_up=False,
+        subscribed_contracts=stream_contracts,
+        ib=mock_ib,
+    )
+    corridor._active_sessions["tab-2"] = session
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            assert any(
+                "Stopped the corridor stream (60" in n for n in r_ok.json()["meta"]["notices"]
+            )
+
+    _run(_exercise())
+    assert corridor.active_stream_count == 0
+    # The 60 stream lines were cancelled before the first option page was subscribed
+    assert mock_ib.cancelled[:60] == stream_contracts
