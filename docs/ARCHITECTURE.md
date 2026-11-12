@@ -208,4 +208,4 @@ Under IBKR **Type 3 (15-min Delayed)** data without an OPRA subscription, IBKR o
 ---
 
 ## 6. Implementation Notes
-Per-module implementation details (class/function inventories, helper names, cache-buster versions) live in `docs/reference/IMPLEMENTATION_NOTES.md` (§1 core, §2 storage, §3 broker, §4 analytics, §5 web). This file only holds architectural contracts.
+Per-module implementation details (class/function inventories, helper names, cache-buster versions) live in `docs/reference/IMPLEMENTATION_NOTES.md` (§1 core, §2 storage, §3 broker, §4 analytics, §5 web incl. §5.1 UI element inventory). This file only holds architectural contracts.

@@ -1,86 +1,81 @@
-# UI/UX Design Paradigm & Styling Specification (`UI_UX_GUIDELINES.md`)
+# UI/UX Design Contract (`UI_UX_GUIDELINES.md`)
 
-## 1. Core Design Philosophy: NYT Editorial Meets High-Density Terminal
-The interface merges two distinct visual languages into a unified, zero-fluff workspace:
-1. **New York Times Editorial Hierarchy:** High-contrast serif mastheads and section titles, double-line horizontal rules (`border-top: 3px double`), generous structural clarity between analytical blocks, and journalistic framing of key levels.
-2. **Bloomberg / CLI Financial Terminal Density:** Monospaced tabular numerals (`font-variant-numeric: tabular-nums`), compact padding on option chain tables, instant keyboard/pill navigation, and crisp semantic color coding for Calls, Puts, and Volume/OI anomalies.
+> **Contract, not inventory.** This file holds the rules every frontend change must respect.
+> Element-by-element implementation details (helper names, selectors, animations, exact
+> controls) live in `docs/reference/IMPLEMENTATION_NOTES.md` §5.1. Token values are defined
+> only in `src/web/static/css/tokens.css`.
+
+## 1. Design Philosophy: NYT Editorial Meets High-Density Terminal
+1. **NYT editorial hierarchy:** high-contrast serif mastheads and section titles, double editorial rules (`--border-editorial`), clear separation between analytical blocks, journalistic framing of key levels.
+2. **Financial-terminal density:** monospaced tabular numerals, compact table padding, pill/keyboard navigation, consistent semantic colors for Calls, Puts, and anomalies.
 
 ---
 
-## 2. Dual-Theme Polarity (`Variant 3: Print Edition <-> Obsidian Terminal`)
-The root `<html>` element toggles `data-theme="print"` (default) and `data-theme="terminal"` via a persistent header switch stored in `localStorage`. All CSS rules in `src/web/static/css/tokens.css` and all Plotly chart layouts MUST read from these exact design tokens:
+## 2. Dual Themes & Design Tokens
+- `<html data-theme="print">` (default, **NYT Print Edition**) or `data-theme="terminal"` (**Obsidian Terminal**). The choice persists in `localStorage("ibkr_options_theme")` and is applied before first paint (inline script in `base.html`).
+- Toggling the theme must re-skin every Plotly chart in place (no refetch, no reload).
+- All colors, fonts, borders, and shadows come from CSS custom properties in `tokens.css`; row stylesheets and JS never hard-code theme colors (JS fallbacks in `themeVars()` mirror the token values).
 
-| Design Token | `data-theme="print"` (NYT Print Edition) | `data-theme="terminal"` (Obsidian Terminal) | Purpose |
+| Token | `print` | `terminal` | Purpose |
 | :--- | :--- | :--- | :--- |
-| `--bg-primary` | `#FBF9F5` (Warm Newsprint) | `#0B0D10` (Deep Obsidian) | Main page background |
-| `--bg-surface` | `#F3EFE6` (Muted Paper Card) | `#12161C` (Terminal Panel) | Metric cards, control bars, table headers |
-| `--bg-elevated` | `#FFFFFF` (Crisp Ink Paper) | `#181D25` (Active Row/Input) | Inputs, active tabs, hover states |
-| `--text-primary` | `#111111` (Stark Black Ink) | `#ECEFF4` (Crisp Ivory/White) | Headlines, primary numbers |
-| `--text-secondary` | `#4A4A48` (Charcoal Subtext) | `#94A3B8` (Muted Slate) | Subtitles, column headers, axis labels |
-| `--text-muted` | `#767672` (Editorial Caption) | `#64748B` (Dim Telemetry) | Timestamps, metadata badges |
-| `--border-hairline` | `#D8D3C8` (`1px solid`) | `#222934` (`1px solid`) | Cell dividers, grid hairlines |
-| `--border-editorial`| `#111111` (`3px double`) | `#334155` (`3px double`) | Major section separators |
-| `--accent-call` | `#0F6E4F` (Forest Emerald) | `#10B981` (Terminal Emerald) | Call Walls, Call OI/Volume bars |
-| `--accent-put` | `#A82020` (Editorial Crimson) | `#F43F5E` (Terminal Rose/Red) | Put Walls, Put OI/Volume bars |
-| `--accent-anomaly` | `#B45309` (Amber Ochre) | `#F59E0B` (Terminal Amber) | `Volume > OI` anomalies, Type 3/4 badges |
-| `--accent-focus` | `#1D4ED8` (Editorial Cobalt) | `#38BDF8` (Terminal Cyan) | Active DTE curve highlight, focus ring |
+| `--bg-canvas` | `#FBF9F5` | `#0A0D12` | Page background |
+| `--bg-surface` | `#F3EFE6` | `#11161F` | Cards, control bars, table headers |
+| `--bg-elevated` | `#FFFFFF` | `#171D29` | Inputs, active tabs |
+| `--bg-table-stripe` / `--bg-hover` | `#F7F4EC` / `#ECE7DA` | `#0F141C` / `#1E2636` | Table striping, hover |
+| `--text-primary` | `#111111` | `#EAECEF` | Headlines, primary numbers |
+| `--text-secondary` | `#4A4A4A` | `#A0AAB8` | Subtitles, column headers |
+| `--text-muted` | `#727272` | `#6C7687` | Timestamps, metadata, chart captions |
+| `--border-subtle` / `--border-strong` | `#DFDCD2` / `#111111` | `#252E3E` / `#3B475C` | Hairlines / emphasis borders |
+| `--border-editorial` | `3px double #111111` | `1px solid #3B475C` | Major section separators |
+| `--accent-primary` | `#1A1A1A` | `#F59E0B` | Primary actions |
+| `--accent-call` | `#0F6E4F` | `#10B981` | Calls, Call Walls |
+| `--accent-put` | `#A82020` | `#EF4444` | Puts, Put Walls |
+| `--accent-warn` | `#B45309` | `#F59E0B` | Delayed/frozen feed badges, warnings |
+| `--accent-anomaly` | `#C2410C` | `#FB923C` | `Volume > OI` / Z-score anomalies |
+| `--plotly-bg` / `--plotly-grid` / `--plotly-ink` | `#FFFFFF` / `#E8E4DA` / `#111111` | `#11161F` / `#1E2636` / `#EAECEF` | Plotly paper, grid, text |
+
+Translucent `--accent-*-bg` variants and `--accent-atm-bg` back highlighted rows and badges.
 
 ---
 
-## 3. Typography System
-Load Google Fonts (`Newsreader` or `Playfair Display` + `JetBrains Mono` + `Inter`) with clean local system fallbacks:
-- **`--font-editorial` (`'Newsreader', 'Playfair Display', Georgia, serif`):**
-  - Used for the Top Masthead, Reserved Editorial Banner headlines, Section Headers (`Put & Call Wall Structure`, `Multi-DTE Volatility & Greeks`), and Primary Wall Callout Titles.
-- **`--font-mono` (`'JetBrains Mono', 'SFMono-Regular', Consolas, monospace`):**
-  - Mandatory for **all** prices, strikes, DTE badges, percentages, Greeks, volumes, open interest, timestamps, and control inputs. Always enforce `font-variant-numeric: tabular-nums`.
-- **`--font-sans` (`'Inter', -apple-system, BlinkMacSystemFont, sans-serif`):**
-  - Used for compact UI labels, tooltips, and filter descriptions.
+## 3. Typography
+Google Fonts `Newsreader`, `JetBrains Mono`, `Inter` with system fallbacks:
+- **`--font-editorial`** (`Newsreader`, Georgia): masthead, editorial banner, section and panel titles, wall callouts.
+- **`--font-mono`** (`JetBrains Mono`): **mandatory** for every price, strike, DTE, percentage, Greek, volume, OI, timestamp, and control input, always with `font-variant-numeric: tabular-nums` (`.tabular`, `.mono`, `td.num`).
+- **`--font-sans`** (`Inter`): compact labels, tooltips, filter descriptions.
 
 ---
 
-## 4. Page Layout Architecture (`src/web/templates/index.html`)
-The viewport uses a disciplined 12-column CSS Grid (`max-width: 1680px`, `margin: 0 auto`, `padding: 1rem 1.5rem`):
+## 4. Page Layout Contract (`src/web/templates/index.html`)
+12-column CSS Grid shell (`max-width: 1680px`, centered). Rows appear in this order:
 
-1. **Row 1 — Editorial Masthead & System Telemetry Bar:**
-   - Left: Serif Masthead title (`IBKR OPTIONS ANALYZER`) + edition date & active snapshot timestamp.
-   - Right: Connection status badge (`PORT <port>: CONNECTED` or `OFFLINE CACHE • PORT <port>` driven dynamically by `/api/status` & `#app-bootstrap`), live Market Data badge (`#md-type-badge` dynamically synced from `/api/status` `active_market_data_type`: `TYPE 1: LIVE OPRA` `.badge--live`, `TYPE 2: FROZEN` `.badge--amber`, `TYPE 3: 15M DELAYED` `.badge--delayed`, `TYPE 4: DELAYED-FROZEN` `.badge--amber`, plus `• Snap T<N>` attribution appended to `#editorial-banner-copy` when the displayed snapshot feed differs or the Gateway is offline), Greeks source badge (`IBKR MODEL` / `BSM FALLBACK`), and **Theme Switcher (`Print / Terminal`)**.
-2. **Row 2 — Reserved Top Editorial Banner Slot (`#editorial-banner-slot`):**
-   - **Mandatory Architectural Requirement:** A dedicated full-width structural container (`min-height: 64px`, collapsible via a subtle corner toggle, styled with top and bottom editorial double rules) reserved above the control bar for future executive narrative/banner modules. Renders dynamic server-configured feed/DTE copy (`Live Type 1/2 Feed` / `Delayed Type 3/4 Feed` or custom `Type X/Y Feed` + `dte_min–dte_max DTE`) plus key snapshot metadata (`#editorial-banner-copy`, including pull scope and exchange-verified IBKR strike count when available), seeded cleanly from `#app-bootstrap`.
-3. **Row 3 — Command & Filter Control Strip:**
-   - **Watchlist Quick-Pills:** `[NVDA]` `[AVGO]` `[CRDO]` `[PLTR]` (1-click switching).
-   - **Validated Custom Ticker Input:** Uppercase monospaced input (`maxlength="5"`, pattern `[A-Z]{1,5}`) + `Load` / `Refresh` button.
-   - **Chain Parameters (`syncControlCapabilities` / `syncControlsFromMeta`):**
-     - **Moneyness Range (`%`):** Dropdown/segmented control (`+-10%`, `+-15%`, `+-20%` [default], `+-25%`, `+-35%`, `+-50%`), dynamically injecting/disabling (`(N/A)`) options from `available_range_pcts`, resetting on uncached `404` / ticker switches, and automatically synchronized to loaded snapshot `meta.range_pct` unless the user saved custom per-ticker pull preferences (`localStorage("ibkr_pull_prefs_v1")`, storing `range_pct`, `strike_step`, `dte_max` per ticker).
-     - **Strike Step (`$`):** Dropdown (`Auto` [default], `$1`, `$2.5`, `$5`, `$10`, `$25` plus dynamic exchange-native/widened steps), dynamically injecting exchange-discovered steps and disabling unsupported increments (`(N/A)`) from `available_strike_steps` while preserving `Auto` (or the ticker's saved preference) across cached snapshot loads (the pulled step of any snapshot stays surfaced in `#editorial-banner-copy`, `#kpi-spot`, `#walls-basis-label`, and `#snapshot-select`).
-     - **DTE Ceiling (`#dte-max-select`):** Upper DTE selector (`30–60d`, `30–90d`, `30–120d` [default]) passed to `POST /api/refresh` (`dte_min=30`, `dte_max`).
-   - **Historical Snapshot Selector:** Dropdown populated from `snapshot_index.json` (showing timestamp, contract count, and `±Range% • $Step` pull scope) allowing instant switching between any archived CSV for the active ticker.
-   - **Manual Refresh Trigger:** Prominent `[REFRESH FROM IBKR]` button with 120s HTTP timeout guard (`AbortController` in `apiJson`), isolated Stage 1 HTTP/gateway failure vs. Stage 2 `UI_RENDER` error handling, and dismissible context-rich alert banner (`#alert-banner`: `#seq • HH:MM:SS` badge, repeat counter `×N`, `.is-fresh` pulse animation, pull scope / phase / HTTP status / elapsed ms chips, expandable `<details>` technical traceback/non-JSON `textSnippet`, and `#alert-banner-close` `[×]` button).
-   - **Panels Visibility Switcher (`#panel-visibility-controls`):** Terminal-styled `PANELS:` bar in Row 3 with toggleable pill buttons (`data-panel-target` for `walls`, `iv_smile`, `anomalies`, `greeks`, `corridor`, `strategy` — 6 `.panel-toggle-pill` buttons total) and `[Reset Panels]` (`#panel-visibility-reset`), persisted in `localStorage("ibkr_panel_visibility_v1")`. Defaults to `Put & Call Walls`, `Unusual Activity`, `Wall Corridor`, and `Strategy Lab` enabled (`true`) and `IV Smile` and `Greeks Structure` hidden (`false`). Wall Corridor network fetches/streams execute strictly on explicit user clicks/toggles; Strategy Lab supports a cache-only `[x] Auto-Build on Load` (`#strategy-auto-populate`, default ON, persisted in `localStorage("ibkr_strategy_auto_populate_v1")`) toggle without touching IBKR Gateway.
-4. **Row 4 — High-Density KPI Summary Strip (4 Columns):**
-   - **Card 1:** Underlying Spot Price + Pull Scope (`±Range% • $Step`) + Active Weekly Expirations in `[30, 120]` window.
-   - **Card 2:** Primary Call Wall (Strike, OI / Volume concentration, `%` distance from spot).
-   - **Card 3:** Primary Put Wall (Strike, OI / Volume concentration, `%` distance from spot).
-   - **Card 4:** Unusual Activity Count (`Volume > OI` contracts & top Volume Z-Score strike/DTE).
-5. **Row 5 — Interactive Multi-DTE Plotly Canvas (Snap-to-Grid 12-Col Resizable Cards):**
-   - `.chart-grid` uses a 12-column CSS Grid (`grid-auto-flow: row dense`). Each `.panel-card` carries `data-panel-id` (`walls`, `iv_smile`, `anomalies`, `greeks`, `corridor`, `strategy`), collapses completely out of the grid when `.is-hidden` is active (`iv_smile` and `greeks` default hidden; toggling them visible triggers `requestAnimationFrame` + `Plotly.Plots.resize`, while hiding `corridor` stops any active SSE stream), and includes a `PointerEvents`-driven corner drag handle (`.panel-resize-handle` with `setPointerCapture` + live `data-snap-hint` preview) and a compact header width-cycle badge (`.panel-span-btn`, e.g. `6/12` → `8/12` → `12/12` → `4/12`), snapping to quantized CSS Grid column spans (`.panel-card--span-{4,6,8,12}`) and heights (`localStorage("ibkr_chart_grid_layout_v1")`), triggering `Plotly.Plots.resize`, and resetting via double-click on `.panel-title`.
-   - **Chart A (Top-Left, `#chart-walls`):** Put Walls & Call Walls by Strike with interactive header switchers persisted in `localStorage`:
-     - **Layout (`#walls-view-select`):** Defaults to **Horizontal Price-Ladder / Butterfly** (`Strike` ascending on Y-axis, horizontal `SPOT` / `CALL WALL` / `PUT WALL` lines, Calls extending right and Puts extending left with positive-only axis ticks and tooltips), switchable to **Vertical Grouped Bars** (`barmode: "group"` with non-negative Call and Put bars aligned on the Strike X-axis). Both layouts use `computeStrikeAxisGeometry` in `dashboard/charts.js` so the numeric Strike axis applies `tickmode: "array"` ticks mapped strictly to active strikes (`<= 22` all labeled, `> 22` evenly downsampled to `<= 18` labels without `$$` duplication), padded `±0.6 * edgeStep` bounds preserving `SPOT`/Wall markers, and per-strike local bar widths/offsets + anomaly marker offsets scaling dynamically to `$0.5/$1/$2.5/$5/$10/$25/$50+` and mixed strike grids (no `$5` clamp).
-     - **Metric (`#walls-metric-select`):** `Auto (OI → Vol)`, `Open Interest`, `Volume`, or `OI + Volume` overlay (`barmode: "overlay"`, semi-transparent OI backdrop behind foreground Volume).
-     - **DTE & Expiry Scope (`#walls-dte-select`, `#walls-split-dte`, `#walls-basis-label`):** Explicit header telemetry dynamically computing the active DTE slice's step badge (`±Range% / $Step` or `$min–$max STEP` for mixed grids) alongside the dropdown showing active weekly DTEs + expiration dates (`All DTEs` span across `[30, 120]` or single `Xd (YYYY-MM-DD)`), optional `By DTE` Call/Put color-gradient stack in `All DTEs` mode, per-DTE/expiry breakdown in every strike hover tooltip, and active/dominant DTE attribution on `CALL WALL` / `PUT WALL` reference annotations.
-     - **Anomaly Overlay Switch (`#walls-show-anomalies`):** Toggleable indicator highlighting strikes/sides with flagged `Volume > OI` or `Volume Z-Score` spikes via framed amber diamond markers aligned to the Call/Put bars.
-     - **AI Analysis Prompt Export (`#walls-copy-ai-btn`):** Compact header copy button building a structured, concise AI prompt loaded with ALL weekly expirations in the chain at once (term-structure summary plus per-expiry walls, Greeks, anomalies and strike ladders, independent of `#walls-dte-select`), Call/Put Walls, P/C ratios, ATM IV, `Delta`/`Gamma`/`Theta`/`IV` + `greeks_source` (`IBKR_MODEL` vs `BSM_FALLBACK`) across ATM/walls/anomalies/strike ladder, `Step $` / `Range %` pull scope, and anomalies—instructing the AI to analyze data + current market/day context deeply and respond in **simple, short bullet-point Polish** (max ~280–400 words) covering market context, walls, anomalies, a mandatory 3-point plain-Polish **Delta/Gamma/Theta** explanation, and **Top 3 best-fit option strategies**.
-   - **Chart B (Top-Right):** Multi-DTE Implied Volatility Smile / Skew Overlay (lines colored distinctly per weekly DTE with vertical ATM spot marker).
-   - **Chart C (Bottom-Left):** Unusual Activity Heatmap / Scatter (`Volume / OI Ratio` or `Volume Z-Score` by Strike and DTE).
-   - **Chart D (Bottom-Right):** Multi-DTE Greeks Structure (`Delta`, `Gamma`, `Theta`, `Vega` selector overlaid across `[30, 120]` weekly DTE expirations).
-   - **Big Tile D2 (`#wall-corridor-card`, `data-panel-id="corridor"`, default `12/12` columns, `panel-card--corridor`, min-height `460px`):** Click-only Wall Strike Corridor & Live Constant Streaming workspace. Renders a zero-network local preview directly from `state.chainData` on load/snapshot switch (`#corridor-status-badge` = `IDLE • MANUAL`). Controls pair Target Expiry/DTE (`#corridor-expiry-select`), strike corridor window (`#corridor-window-select`: `±3`, `±5` [default], `±7`), live subscription ceiling badge (`#corridor-subs-badge`: `N / 60 SUBS`), `[Refresh Corridor Quotes]` (`#corridor-refresh-btn` -> `POST /api/corridor/quotes`, bypassing the auto-reprice throttle), explicit opt-in switch `[ ] Enable Live Constant Streaming` (`#corridor-stream-toggle` / `.corridor-stream-switch` -> `EventSource` on `GET /api/corridor/stream/{ticker}` with `pagehide` `sendBeacon` / hide-panel teardown -> `POST /api/corridor/stop`), and opt-in `[ ] Auto Re-Price Strategy` (`#corridor-auto-reprice`, which automatically re-prices active or custom legs on incoming live/refreshed frames and runs an immediate silent evaluation if toggled ON when non-preview corridor quotes are present). Inside `.corridor-workspace`, a 4-card `.corridor-kpi-strip` summarizes Put Corridor, Call Corridor, Spot & Feed, and Sequence/Latency; beneath it, `.corridor-split` shows `.corridor-ladder-table` (Put Wall `.row-wall-put`, Call Wall `.row-wall-call`, and Strategy Leg `.row-strategy-leg` highlights with `corridorFlashUp` / `corridorFlashDown` green/red tick animations) side-by-side with `#chart-corridor-ladder` (Bid-Ask range whisker Plot with `SPOT` / `PW` / `CW` markers). Incoming corridor frames update `state.chainData.contracts` and Strategy Leg Bid/Ask/Mid/`Δ` cells in-place (`refreshStrategyLegsQuotesOnly`, prioritizing live local `state.chainData.contracts` quotes) without rebuilding open leg dropdowns.
-   - **Big Tile E (`#strategy-lab-card`, `data-panel-id="strategy"`, default `12/12` columns, `height: 590px` desktop):** Compact side-by-side Interactive Strategy Lab & `T+n` Payoff Workspace. Header & controls pair `[x] Auto-Build on Load` (`#strategy-auto-populate`, cache-only auto-population of Strategy KPIs and `#chart-strategy-payoff` via `/api/strategy/suggest` on snapshot load/refresh/reveal, or `/api/strategy/evaluate` when preserving valid `CUSTOM` legs across same-ticker reloads), Wall-anchored preset buttons (`Bull Put`, `Bull Call`, `Diagonal`, `Iron Condor`, `Custom`), target Expiry/Qty selectors (snapping via `snapDteValueToExpiries` across Strategy, Walls, Table, and Corridor when expirations narrow), `[Auto-Build from Walls]`, `[Evaluate / Re-Price]`, `[+ Add Leg]`, and `[Clear]` actions, and a 5-card Strategy KPI strip (Net Mid/Natural, Slippage + Limit Ladder, Max Profit/Loss + RoR %, Breakevens + POP % + `±1σ` Expected Move, Net Position Greeks). Users can delete any leg down to `0` rows (`×` button never locked on the final leg, showing the placeholder until another leg is added or auto-built), append legs directly from `#chain-table` `+Leg` buttons (`addSpecificStrategyLeg`), and `[Clear]` resets evaluated payoff curves/KPIs without discarding custom legs or resurrecting deleted legs (`resetStrategyEvaluationUI(true)`). Beneath the KPI strip, `.strategy-split` arranges the workspace into two side-by-side columns (`grid-template-columns: minmax(450px, 1.02fr) minmax(380px, 1.18fr)`, collapsing to `1fr` stacked below `1120px`): the **left pane** (`.strategy-legs-pane`) houses the compact pickable multi-leg table (`BUY/SELL`, `CALL/PUT`, `Expiry`, `Strike`, `Qty`, local Bid/Ask/Mid/`Δ`/IV resolved live-local first via `resolveLocalContractMid` with strict `(expiry, right, strike)` fallback `findExactEvaluatedLeg` and `snapLegToValidContract` when switching right/expiry) and `Time Forward (T+n)` / `IV Shock` sliders (which evaluate active/custom legs on `change` whenever `state.strategyLegs.length > 0`), while the **right pane** (`.strategy-chart-pane`) hosts the full-height Plotly `#chart-strategy-payoff` block canvas (`min-height: 290px`, `.is-idle` flex-centered only before render, with `yaxis.zeroline = true`) plotting `Today (T+0)`, `Midpoint`, `At Expiration`, and `Simulated` curves inside a shaded `±1σ` band with centered horizontal legend and framed `SPOT`, `CALL WALL`, `PUT WALL`, and breakeven markers. In-place `Plotly.react(...)` updates guard `if (!el.data) { el.innerHTML = ""; }` (never wiping Plotly's existing SVG container when `el.data` already exists), `renderStrategyEmptyPlaceholder()` calls `window.Plotly.purge(el)` before showing `.strategy-empty-state`, `strategyPendingEvaluate` coalesces overlapping evaluation triggers so slider/auto-reprice calls are never silently dropped, and `extractApiErrorMessage` surfaces human-readable Pydantic `422` validation errors cleanly. (The row 3 `PANELS:` toggle uses the standard `.panel-toggle-pill` class identically to all other panels.)
-6. **Row 6 — High-Density Tabular Option Chain, Column Sort & Header Filters:**
-   - DTE Bucket quick tabs (`#dte-bucket-tabs`: `All (30–120d)`, `30–60d`, `61–90d`, `91–120d`) synced bidirectionally with the DTE / Expiry selector (`#filter-dte`, snapping to nearest expiry via `snapDteValueToExpiries`), Right filter (`#filter-right`), `[Unusual Activity Only]` toggle (`#filter-unusual`), and `[Reset Filters]` button (`#table-reset-filters-btn`).
-   - Compact monospaced 18-column table (`padding: 4px 8px`, `font-size: 12px`, `Expiry | DTE | Right | Strike ... | Source | Leg`) with dual sticky `<thead>` rows: interactive `.th-sort-btn` headers (`aria-sort`, nulls-always-last deterministic sorting persisted in `localStorage("ibkr_chain_table_sort_v1")`, active `--accent-focus` highlight), top `<tr class="table-filter-row">` containing per-column dropdown selectors (`Expiry`, `Right`, `Source`) and numeric comparison/range expression inputs (`>0`, `>=1.5`, `30..60`, `-0.4..-0.15` for `IV %`, `Bid`, `Ask`, `Mark`, `DTE`, `Strike`, `Moneyness %`, `Volume`, `Open Int`, `Vol/OI`, `Delta`, `Gamma`, `Theta`, `Vega`) with `.is-filtered` highlights, and trailing per-row `+Leg` button (`.chain-add-leg-btn`, invoking `addSpecificStrategyLeg`) to append contracts into Strategy Lab, plus focus preservation on live Corridor body updates, ATM row highlight, inline horizontal volume/OI bars, and amber badges on `Volume > OI` rows.
+1. **Masthead & telemetry:** serif title; Gateway badge (`host:port`, connected vs. `OFFLINE CACHE`); market-data badge `#md-type-badge` showing the *observed* type (`TYPE 1: LIVE OPRA`, `TYPE 2: FROZEN`, `TYPE 3: 15M DELAYED`, `TYPE 4: DELAYED-FROZEN`); Greeks source badge; theme switch.
+2. **Reserved editorial banner `#editorial-banner-slot`:** full width, editorial double rules, kept structurally ready for future narrative modules (`docs/FUTURE_IMPROVEMENTS.md` §6); currently shows feed/DTE summary and snapshot metadata in `#editorial-banner-copy`.
+3. **Control strip:** watchlist pills (`NVDA`, `AVGO`, `CRDO`, `PLTR`); custom ticker input (`maxlength="5"`, `pattern="[A-Za-z]{1,5}"`, auto-uppercase, inline `422` error); Range % (default `±20%`), Strike Step (default `Auto`), DTE ceiling (default `30–120d`) — options the exchange cannot serve are shown disabled `(N/A)`; historical snapshot selector; `[REFRESH FROM IBKR]`; dismissible `#alert-banner`; `PANELS:` bar.
+4. **KPI strip (4 cards):** spot + pull scope + active expirations; Primary Call Wall; Primary Put Wall; unusual-activity count.
+5. **Panel grid (snap-to-grid, resizable):** `#chart-walls` (Put/Call Walls), IV smile, unusual activity, Greeks structure, `#wall-corridor-card` (Wall Corridor), `#strategy-lab-card` (Strategy Lab). Spans snap to `4/6/8/12` columns; layout persists in `localStorage`.
+6. **Option chain table `#chain-table`:** 18 monospaced columns, sortable headers (nulls last), per-column filters, DTE bucket tabs, `+Leg` buttons feeding Strategy Lab.
+
+**Defaults:** panels `walls`, `anomalies`, `corridor`, `strategy` visible; `iv_smile`, `greeks` hidden.
 
 ---
 
-## 5. Plotly Chart Styling Rules (`src/web/static/js/dashboard/charts.js`)
-- Never use Plotly's default white/blue theme.
-- All charts must dynamically apply `--bg-surface`, `--text-primary`, `--border-hairline`, and `--font-mono` for axis ticks whenever the user toggles between **Print Edition** and **Obsidian Terminal**.
-- Always draw bold framed reference badges (`bordercolor`, `borderwidth: 1.5`, `borderpad: 3`, opaque `bgcolor`) at `underlying_price` (`SPOT`) and markers at the **Primary Call Wall** and **Primary Put Wall** (horizontal in Chart A's Ladder mode with right/left anti-overlap anchoring; vertical in Grouped and Charts B–D) annotated with DTE attribution on Chart A.
+## 5. Behavioral Rules (Must Hold)
+1. **Network discipline:** the only calls that reach IBKR are explicit user actions — `[REFRESH FROM IBKR]`, `[Refresh Corridor Quotes]`, and the opt-in `Enable Live Constant Streaming` switch. Strategy Lab auto-build and every snapshot/table/chart interaction are cache-only.
+2. **Streaming teardown:** hiding the corridor panel, toggling streaming off, or leaving the page (`pagehide`) stops the SSE stream and calls `POST /api/corridor/stop`.
+3. **Immutable archives:** live corridor quotes update the in-memory chain only; the UI never implies archived CSVs changed.
+4. **Panel toggles** use `.panel-toggle-pill` (with `.active`) exclusively; no one-off toggle styles.
+5. **Persistence:** every user preference uses a versioned `localStorage` key (`ibkr_*_v1`, plus `ibkr_options_theme` and `ibkr_walls_*`); changing a stored shape requires a new version suffix.
+6. **Errors:** API failures show a human-readable message (`detail`, then `message`) in `#alert-banner`; tracebacks are never rendered. HTTP/Gateway failures (Stage 1) are reported separately from client render failures (Stage 2 `UI_RENDER`), so a render bug is never blamed on the Gateway.
+7. **Plotly lifecycle:** update charts with `Plotly.react`; clear a container's `innerHTML` only when it has no `el.data`; call `Plotly.purge(el)` before replacing a chart with a placeholder; call `Plotly.Plots.resize` after a panel is revealed or resized.
+8. **JS strings** never contain HTML entities (`&bull;`, `&mdash;`); use `\u2022` / `\u2014`.
+9. **Cache-busting:** after any CSS/JS change, bump the `?v=` values in `base.html` (stylesheet loop) and `index.html` (`dashboard/main.js`).
+10. **Accessibility & focus:** sortable headers expose `aria-sort`; focus stays on table filter inputs while live corridor updates re-render rows.
+
+---
+
+## 6. Plotly Chart Styling (`src/web/static/js/dashboard/charts.js`)
+- Never use Plotly's default theme. Every layout reads colors and fonts from `themeVars()` (`--plotly-bg`, `--plotly-grid`, `--plotly-ink`, `--text-muted`, `--accent-call|put|anomaly|warn`, `--font-mono`) and is re-applied on theme toggle.
+- Axis ticks and hover labels use `--font-mono`; the walls strike axis labels only strikes present in the chain.
+- Always draw framed reference markers for `SPOT` (`underlying_price`), **Primary Call Wall**, and **Primary Put Wall** (horizontal on the walls ladder view, vertical on the other charts), annotated with DTE attribution on `#chart-walls`.
+- Calls use `--accent-call`, Puts `--accent-put`, anomalies `--accent-anomaly`; multi-DTE series use the theme's DTE palette consistently across charts.

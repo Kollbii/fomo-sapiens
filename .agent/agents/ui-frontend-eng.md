@@ -14,7 +14,8 @@ owns:
   - tests/integration/test_web_api.py
   - tests/integration/test_corridor_api.py
 reads:
-  - docs/UI_UX_GUIDELINES.md (only the row/section you are changing)
+  - docs/UI_UX_GUIDELINES.md (the UI contract — tokens, layout rows, behavioral rules; always)
+  - docs/reference/IMPLEMENTATION_NOTES.md §5.1 (only the row you are changing)
   - docs/reference/IMPLEMENTATION_NOTES.md (section 5 only)
   - src/web/, src/main.py
   - src/services/schemas.py and the public methods of src/services/analyzer.py (`AnalyzerService`)

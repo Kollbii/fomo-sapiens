@@ -64,3 +64,14 @@ def test_documented_api_routes_exist() -> None:
         if not any(m == method and pat.match(path) for m, pat in served)
     )
     assert missing == [], f"documented routes not served by the app: {missing}"
+
+
+def test_documented_design_tokens_are_defined_in_css() -> None:
+    css = "\n".join(
+        p.read_text(encoding="utf-8") for p in (WEB_DIR / "static" / "css").glob("*.css")
+    )
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+    guide = (ROOT / "docs" / "UI_UX_GUIDELINES.md").read_text(encoding="utf-8")
+    documented = set(re.findall(r"`(--[a-z0-9-]+)`", guide))
+    assert documented, "no tokens found in UI_UX_GUIDELINES.md - regex drifted?"
+    assert sorted(documented - defined) == []

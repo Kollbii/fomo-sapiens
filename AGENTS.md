@@ -26,7 +26,7 @@ Before concluding any task, PR, or implementation phase, the agent MUST perform 
 1. Did you add, rename, or modify a module, CLI command, environment variable, or API route? -> Update `AGENTS.md` and `docs/ARCHITECTURE.md`.
 2. Did you alter CSV columns, data types, or file naming logic? -> Update `docs/DATA_SCHEMA.md`.
 3. Did you modify ticker validation, socket connection parameters, or read-only guards? -> Update `docs/SECURITY_AND_SAFETY.md`.
-4. Did you change CSS tokens, font pairings, layout grids, or Plotly templates? -> Update `docs/UI_UX_GUIDELINES.md`.
+4. Did you change CSS tokens, font pairings, layout rows, UI behavioral rules, or Plotly styling? -> Update `docs/UI_UX_GUIDELINES.md` (element-level details go to `docs/reference/IMPLEMENTATION_NOTES.md` §5.1).
 5. Did you change coding conventions, typing rules, or test commands? -> Update `docs/CODING_STANDARDS.md`.
 6. Did you implement a feature listed in `docs/FUTURE_IMPROVEMENTS.md`? -> Move its specification from `docs/FUTURE_IMPROVEMENTS.md` into `docs/ARCHITECTURE.md` and mark its status as `[IMPLEMENTED]`.
 7. Did you add or change classes, helpers, element inventories, or cache-buster versions? -> Update the matching layer section of `docs/reference/IMPLEMENTATION_NOTES.md` (contracts stay in the files above).

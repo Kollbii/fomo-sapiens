@@ -24,7 +24,10 @@ milestones in git history.
 
 - Split oversized files along responsibility seams: `dashboard.js` (7.4k lines) into 14 native ES modules under `src/web/static/js/dashboard/` (entry `main.js`), `tokens.css` into 8 per-row stylesheets, `src/broker/corridor.py` and `src/analytics/strategies.py` into packages, and `test_contracts_and_pagination.py` into client/contracts/parser/fetcher tests. Behavior unchanged (statement/AST-identical splits; identical rendered DOM, Plotly calls and Firefox screenshot). Static files are served with `Cache-Control: no-cache`; `make js-check` also validates the ES-module import graph.
 
+- `docs/UI_UX_GUIDELINES.md` is now a compact contract (20 kB -> 8 kB: tokens, typography, layout rows, 10 behavioral rules, Plotly styling); the element-by-element inventory moved verbatim to `docs/reference/IMPLEMENTATION_NOTES.md` §5.1.
+
 ### Fixed
+- `docs/UI_UX_GUIDELINES.md` token table listed tokens that do not exist (`--bg-primary`, `--border-hairline`, `--accent-focus`) and stale values/fonts; it now matches `tokens.css`.
 - Documentation no longer claims unused tooling (Tailwind, HTMX, `scipy.optimize`) or non-existent identifiers.
 
 ## [0.2.1] - 2026-11-11

@@ -39,7 +39,7 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 | `src/broker/*` | `docs/ARCHITECTURE.md` §3/§5, `docs/DATA_SCHEMA.md` §3 (parser), `docs/reference/IMPLEMENTATION_NOTES.md` §3 |
 | `src/analytics/*` | `docs/ARCHITECTURE.md` §4, `docs/reference/IMPLEMENTATION_NOTES.md` §4, `docs/FUTURE_IMPROVEMENTS.md` |
 | `src/services/*`, `src/web/api.py`, `src/web/errors.py`, `src/main.py` | `docs/reference/IMPLEMENTATION_NOTES.md` §5, `docs/ARCHITECTURE.md` §3.0, `AGENTS.md` §4 API surface |
-| `src/web/templates/*`, `src/web/static/*` | `docs/UI_UX_GUIDELINES.md`, `docs/reference/IMPLEMENTATION_NOTES.md` §5 (cache-buster versions) |
+| `src/web/templates/*`, `src/web/static/*` | `docs/UI_UX_GUIDELINES.md` only when a rule, token, or row changes; element/selector/helper details and cache-buster versions -> `docs/reference/IMPLEMENTATION_NOTES.md` §5.1 |
 | `tests/*` (new test files) | `docs/CODING_STANDARDS.md` §4 |
 | any user-visible change | `CHANGELOG.md` `## [Unreleased]` |
 | new module / responsibility shift | `.agent/agents/<owner>.md` `owns:` list + `make agents-sync` |
