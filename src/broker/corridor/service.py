@@ -1,26 +1,36 @@
-"""Targeted Wall Strike Corridor (±k strikes, <= 60 contracts) & Live Constant Streaming."""
+"""`CorridorQuoteService`: bounded IBKR subscriptions, one-shot pulls and SSE-ready streams.
+
+Every `reqMktData` is paired with `cancelMktData` in `finally:` (stop, disconnect,
+`aclose()`, Gateway drop, lifespan exit)."""
 
 from __future__ import annotations
 
 import asyncio
 import inspect
 import logging
-import math
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal, Protocol
+from typing import Any
 
 import numpy as np
-import numpy.typing as npt
-import polars as pl
 from ib_async import Option, Stock
-from pydantic import BaseModel, ConfigDict, Field
 
 from src.broker.client import IBKRBrokerClient, SleepFn, market_data_type_label, poll_until
 from src.broker.contracts import extract_spot
+from src.broker.corridor.models import (
+    CORRIDOR_MAX_CONTRACTS,
+    CorridorContractSpec,
+    CorridorQuoteFrame,
+    CorridorQuoteRow,
+    CorridorSelection,
+    FloatArray,
+    GreeksFallback,
+    corridor_quote_key,
+)
+from src.broker.corridor.quotes import compute_mid, compute_spread_pct
 from src.broker.fetcher import (
     DELAYED_GENERIC_TICKS,
     EMPTY_QUOTE_FALLBACK_THRESHOLD,
@@ -31,184 +41,14 @@ from src.broker.parser import extract_model_greeks, extract_open_interest, has_u
 from src.core.config import Settings
 from src.core.exceptions import (
     GatewayConnectionError,
-    OptionChainFetchError,
     PacingViolationError,
 )
-from src.core.security import TickerValidator
 from src.storage.schema import (
-    GreeksSource,
-    OptionRight,
-    WallBasis,
     sanitize_count,
     sanitize_price,
 )
 
 logger = logging.getLogger(__name__)
-
-CORRIDOR_MAX_CONTRACTS = 60
-DEFAULT_CORRIDOR_MAX_CONTRACTS = 56
-DEFAULT_WINDOW_STRIKES = 5
-
-CorridorZone = Literal["PUT_WALL", "CALL_WALL", "BOTH_WALLS", "ATM", "STRATEGY_LEG"]
-FloatArray = npt.NDArray[np.float64]
-BoolArray = npt.NDArray[np.bool_]
-
-
-class CorridorLegRef(BaseModel):
-    """Reference to an open Strategy Lab leg prioritized inside the Wall Corridor."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    expiry: str
-    strike: float = Field(gt=0.0)
-    right: OptionRight
-
-
-class CorridorQuoteRow(BaseModel):
-    """Single option quote inside a Wall Strike Corridor snapshot or stream frame."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    option_conid: int
-    expiry: str
-    dte: int
-    strike: float
-    right: OptionRight
-    zone: CorridorZone
-    is_put_wall: bool = False
-    is_call_wall: bool = False
-    is_strategy_leg: bool = False
-    bid: float | None = None
-    ask: float | None = None
-    mid: float | None = None
-    last: float | None = None
-    close: float | None = None
-    spread_pct: float | None = None
-    volume: int | None = None
-    open_interest: int | None = None
-    iv: float | None = None
-    delta: float | None = None
-    gamma: float | None = None
-    theta: float | None = None
-    vega: float | None = None
-    greeks_source: GreeksSource = "NONE"
-    updated_ts_utc: str
-
-
-class CorridorQuoteFrame(BaseModel):
-    """Full Wall Corridor quote frame returned by one-shot pull or streamed via SSE."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    ticker: str
-    snapshot_id: str
-    target_expiry: str
-    target_dte: int
-    window_strikes: int
-    max_contracts: int
-    subscribed_count: int
-    subscription_cap: int = CORRIDOR_MAX_CONTRACTS
-    underlying_price: float
-    market_data_type: int
-    primary_call_wall: float | None
-    primary_put_wall: float | None
-    wall_basis: WallBasis
-    updated_ts_utc: str
-    sequence: int = 1
-    mode: Literal["ONE_SHOT", "STREAM"] = "ONE_SHOT"
-    elapsed_ms: float | None = None
-    changed_keys: list[str] = Field(default_factory=list)
-    quotes: list[CorridorQuoteRow]
-    notices: list[str] = Field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class CorridorContractSpec:
-    """Selected contract inside the Wall Corridor plus cached fallback attributes."""
-
-    option_conid: int
-    symbol: str
-    expiry: str
-    ib_expiry: str
-    dte: int
-    strike: float
-    right: OptionRight
-    zone: CorridorZone
-    is_put_wall: bool
-    is_call_wall: bool
-    is_strategy_leg: bool
-    cached_bid: float | None
-    cached_ask: float | None
-    cached_mid: float | None
-    cached_last: float | None
-    cached_close: float | None
-    cached_volume: int | None
-    cached_open_interest: int | None
-    cached_iv: float | None
-    cached_delta: float | None
-    cached_gamma: float | None
-    cached_theta: float | None
-    cached_vega: float | None
-    cached_greeks_source: GreeksSource
-
-
-@dataclass(frozen=True)
-class CorridorSelection:
-    """Deterministic Wall Strike Corridor contract set ready for broker subscription."""
-
-    ticker: str
-    underlying_conid: int
-    underlying_price: float
-    target_expiry: str
-    target_dte: int
-    window_strikes: int
-    max_contracts: int
-    primary_put_wall: float | None
-    primary_call_wall: float | None
-    wall_basis: WallBasis
-    atm_strike: float
-    specs: tuple[CorridorContractSpec, ...]
-
-
-@dataclass(frozen=True)
-class WallAnchors:
-    """Primary Put/Call Wall strikes the corridor is centred on (computed by the caller).
-
-    The broker layer never computes walls itself; `src/services/corridor.py` derives anchors
-    from the analytics walls report. `by_expiry` maps ISO expiry -> `(put_wall, call_wall)`;
-    missing sides fall back to the aggregate walls.
-    """
-
-    basis: WallBasis
-    aggregate_put: float | None = None
-    aggregate_call: float | None = None
-    by_expiry: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
-
-    def resolve(self, expiry: str) -> tuple[float | None, float | None]:
-        put_wall, call_wall = self.by_expiry.get(expiry, (None, None))
-        return (
-            put_wall if put_wall is not None else self.aggregate_put,
-            call_wall if call_wall is not None else self.aggregate_call,
-        )
-
-
-class GreeksFallback(Protocol):
-    """Computes Greeks for quotes lacking IBKR `modelGreeks` (injected; e.g. vectorized BSM).
-
-    Returns `(iv, delta, gamma, theta, vega, usable)`; rows with `usable == False` keep their
-    cached snapshot Greeks.
-    """
-
-    def __call__(
-        self,
-        *,
-        mark_price: FloatArray,
-        spot: FloatArray,
-        strike: FloatArray,
-        dte: FloatArray,
-        is_call: BoolArray,
-        fallback_iv: FloatArray,
-    ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray, BoolArray]: ...
 
 
 @dataclass
@@ -220,40 +60,6 @@ class _ActiveCorridorSession:
     cleaned_up: bool = False
 
 
-def corridor_quote_key(expiry: str, strike: float, right: str) -> str:
-    """Canonical string key identifying one option contract inside UI & stream diffs."""
-    return f"{expiry}|{strike:g}|{right.upper()}"
-
-
-def _opt_float(val: object) -> float | None:
-    if val is None:
-        return None
-    try:
-        num = float(val)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-    if math.isnan(num) or math.isinf(num):
-        return None
-    return num
-
-
-def _opt_int(val: object) -> int | None:
-    if val is None or isinstance(val, bool):
-        return None
-    if isinstance(val, int):
-        return val
-    if isinstance(val, float):
-        if math.isnan(val) or math.isinf(val):
-            return None
-        return int(val)
-    if isinstance(val, str):
-        try:
-            return int(val.strip())
-        except ValueError:
-            return None
-    return None
-
-
 async def _is_client_disconnected(
     callback: Callable[[], bool | Awaitable[bool]] | None,
 ) -> bool:
@@ -263,293 +69,6 @@ async def _is_client_disconnected(
     if inspect.isawaitable(res):
         return bool(await res)
     return bool(res)
-
-
-def _compute_mid(
-    bid: float | None,
-    ask: float | None,
-    last: float | None,
-    close: float | None,
-    fallback_mid: float | None = None,
-) -> float | None:
-    if bid is not None and ask is not None and bid > 0.0 and ask >= bid:
-        return (bid + ask) / 2.0
-    for candidate in (last, close, bid, ask, fallback_mid):
-        if candidate is not None and candidate > 0.0:
-            return candidate
-    return None
-
-
-def _compute_spread_pct(bid: float | None, ask: float | None, mid: float | None) -> float | None:
-    if bid is None or ask is None or mid is None or bid <= 0.0 or ask < bid or mid <= 0.0:
-        return None
-    return round(((ask - bid) / mid) * 100.0, 2)
-
-
-def _nearest_index(sorted_strikes: Sequence[float], anchor: float) -> int:
-    return min(
-        range(len(sorted_strikes)),
-        key=lambda idx: (abs(sorted_strikes[idx] - anchor), sorted_strikes[idx]),
-    )
-
-
-def _ib_expiry(iso_expiry: str) -> str:
-    clean = iso_expiry.strip()
-    if len(clean) == 10 and clean[4] == "-" and clean[7] == "-":
-        return clean.replace("-", "")
-    return clean[:8]
-
-
-def _normalize_greeks_source(raw: object) -> GreeksSource:
-    text = str(raw or "NONE").upper()
-    if text == "IBKR_MODEL":
-        return "IBKR_MODEL"
-    if text == "BSM_FALLBACK":
-        return "BSM_FALLBACK"
-    return "NONE"
-
-
-def _row_to_spec(
-    raw: dict[str, Any],
-    *,
-    symbol: str,
-    zone: CorridorZone,
-    is_put_wall: bool,
-    is_call_wall: bool,
-    is_strategy_leg: bool,
-) -> CorridorContractSpec:
-    exp_iso = str(raw["expiry"])
-    right_lit: OptionRight = "C" if str(raw["right"]).upper() == "C" else "P"
-    bid = sanitize_price(raw.get("bid"))
-    ask = sanitize_price(raw.get("ask"))
-    last = sanitize_price(raw.get("last"))
-    close = sanitize_price(raw.get("close"))
-    cached_mid = _compute_mid(bid, ask, last, close, sanitize_price(raw.get("mid")))
-    return CorridorContractSpec(
-        option_conid=_opt_int(raw.get("option_conid")) or 0,
-        symbol=symbol,
-        expiry=exp_iso,
-        ib_expiry=_ib_expiry(exp_iso),
-        dte=int(raw["dte"]),
-        strike=float(raw["strike"]),
-        right=right_lit,
-        zone=zone,
-        is_put_wall=is_put_wall,
-        is_call_wall=is_call_wall,
-        is_strategy_leg=is_strategy_leg,
-        cached_bid=bid,
-        cached_ask=ask,
-        cached_mid=cached_mid,
-        cached_last=last,
-        cached_close=close,
-        cached_volume=_opt_int(raw.get("volume")),
-        cached_open_interest=_opt_int(raw.get("open_interest")),
-        cached_iv=_opt_float(raw.get("iv")),
-        cached_delta=_opt_float(raw.get("delta")),
-        cached_gamma=_opt_float(raw.get("gamma")),
-        cached_theta=_opt_float(raw.get("theta")),
-        cached_vega=_opt_float(raw.get("vega")),
-        cached_greeks_source=_normalize_greeks_source(raw.get("greeks_source")),
-    )
-
-
-def select_wall_corridor(
-    df: pl.DataFrame,
-    *,
-    wall_anchors: WallAnchors,
-    target_expiry: str | None = None,
-    window_strikes: int = DEFAULT_WINDOW_STRIKES,
-    max_contracts: int = DEFAULT_CORRIDOR_MAX_CONTRACTS,
-    priority_legs: Sequence[CorridorLegRef] = (),
-    include_opposite_right: bool = True,
-) -> CorridorSelection:
-    """Select `±window_strikes` around Primary Put & Call Walls, strictly `<= 60` contracts.
-
-    Priority tiers inside the contract budget:
-      0. Active Strategy Lab legs (even if on a secondary DTE, e.g. Diagonal spreads)
-      1. Primary Wall strikes & sides (`P` inside Put Wall `±k`, `C` inside Call Wall `±k`),
-         ordered closest to their Wall strike first
-      2. Opposite right at those Wall strikes (if `include_opposite_right=True`)
-      3. Nearest ATM `±k` strikes around underlying spot if remaining budget allows
-    """
-    if df.height == 0:
-        raise OptionChainFetchError("Cannot select Wall Corridor from an empty chain DataFrame")
-
-    eff_win = min(max(1, int(window_strikes)), 15)
-    eff_max = min(max(1, int(max_contracts)), CORRIDOR_MAX_CONTRACTS)
-
-    first = df.row(0, named=True)
-    symbol = TickerValidator.validate(str(first["underlying"]))
-    underlying_conid = int(first["underlying_conid"])
-    spot = float(first["underlying_price"])
-    if spot <= 0.0:
-        raise OptionChainFetchError(f"Invalid spot price {spot} for {symbol}")
-
-    exp_rows = df.select(["expiry", "dte"]).unique().sort(["dte", "expiry"]).iter_rows(named=True)
-    exps = [(str(r["expiry"]), int(r["dte"])) for r in exp_rows]
-    if not exps:
-        raise OptionChainFetchError(f"No expirations found for {symbol}")
-
-    exp_dte_map = dict(exps)
-    if target_expiry and target_expiry in exp_dte_map:
-        resolved_expiry = target_expiry
-        resolved_dte = exp_dte_map[target_expiry]
-    else:
-        resolved_expiry, resolved_dte = exps[0]
-
-    put_wall, call_wall = wall_anchors.resolve(resolved_expiry)
-
-    df_exp = df.filter(pl.col("expiry") == resolved_expiry).sort(["strike", "right"])
-    if df_exp.height == 0:
-        raise OptionChainFetchError(f"No contracts available for {symbol} {resolved_expiry}")
-
-    avail_strikes = sorted({float(s) for s in df_exp["strike"].to_list() if float(s) > 0.0})
-    if not avail_strikes:
-        raise OptionChainFetchError(f"No positive strikes available for {symbol} {resolved_expiry}")
-
-    atm_strike = min(avail_strikes, key=lambda s: (abs(s - spot), s))
-    pw_anchor = put_wall if put_wall is not None else spot
-    cw_anchor = call_wall if call_wall is not None else spot
-
-    pw_idx = _nearest_index(avail_strikes, pw_anchor)
-    cw_idx = _nearest_index(avail_strikes, cw_anchor)
-    atm_idx = _nearest_index(avail_strikes, atm_strike)
-    idx_by_strike = {round(s, 6): i for i, s in enumerate(avail_strikes)}
-
-    pw_window = {
-        i for i in range(max(0, pw_idx - eff_win), min(len(avail_strikes), pw_idx + eff_win + 1))
-    }
-    cw_window = {
-        i for i in range(max(0, cw_idx - eff_win), min(len(avail_strikes), cw_idx + eff_win + 1))
-    }
-    atm_window = {
-        i for i in range(max(0, atm_idx - eff_win), min(len(avail_strikes), atm_idx + eff_win + 1))
-    }
-
-    priority_keys = {(leg.expiry, round(float(leg.strike), 6), leg.right) for leg in priority_legs}
-    all_rows_by_key: dict[tuple[str, float, str], dict[str, Any]] = {}
-    for row in df.iter_rows(named=True):
-        right_u = str(row["right"]).upper()
-        if right_u not in ("C", "P"):
-            continue
-        key = (str(row["expiry"]), round(float(row["strike"]), 6), right_u)
-        all_rows_by_key[key] = row
-
-    def _classify_zone(idx: int | None, *, is_leg: bool) -> CorridorZone:
-        if idx is None:
-            return "STRATEGY_LEG"
-        in_pw = idx in pw_window
-        in_cw = idx in cw_window
-        if in_pw and in_cw:
-            return "BOTH_WALLS"
-        if in_pw:
-            return "PUT_WALL"
-        if in_cw:
-            return "CALL_WALL"
-        if is_leg:
-            return "STRATEGY_LEG"
-        return "ATM"
-
-    ranked_candidates: list[tuple[tuple[int, int, float, float, int], CorridorContractSpec]] = []
-    seen_keys: set[tuple[str, float, str]] = set()
-
-    # Tier 0: explicitly prioritized Strategy Lab legs (capped reasonably inside eff_max)
-    for leg in priority_legs:
-        key = (leg.expiry, round(float(leg.strike), 6), leg.right)
-        if key in seen_keys:
-            continue
-        raw_match = all_rows_by_key.get(key)
-        if raw_match is None:
-            continue
-        seen_keys.add(key)
-        s_idx = (
-            idx_by_strike.get(round(float(raw_match["strike"]), 6))
-            if key[0] == resolved_expiry
-            else None
-        )
-        zone = _classify_zone(s_idx, is_leg=True)
-        is_pw = put_wall is not None and abs(float(raw_match["strike"]) - put_wall) < 1e-4
-        is_cw = call_wall is not None and abs(float(raw_match["strike"]) - call_wall) < 1e-4
-        spec = _row_to_spec(
-            raw_match,
-            symbol=symbol,
-            zone=zone,
-            is_put_wall=is_pw and leg.right == "P",
-            is_call_wall=is_cw and leg.right == "C",
-            is_strategy_leg=True,
-        )
-        ranked_candidates.append(((0, 0, abs(spec.strike - spot), spec.strike, 0), spec))
-
-    # Tiers 1..3 inside target expiration
-    for row in df_exp.iter_rows(named=True):
-        right_u = str(row["right"]).upper()
-        if right_u not in ("C", "P"):
-            continue
-        strike_val = float(row["strike"])
-        key = (resolved_expiry, round(strike_val, 6), right_u)
-        if key in seen_keys:
-            continue
-        s_idx = idx_by_strike.get(round(strike_val, 6))
-        if s_idx is None:
-            continue
-
-        in_pw = s_idx in pw_window
-        in_cw = s_idx in cw_window
-        in_atm = s_idx in atm_window
-        if not (in_pw or in_cw or in_atm):
-            continue
-
-        d_pw = abs(s_idx - pw_idx) if in_pw else 999
-        d_cw = abs(s_idx - cw_idx) if in_cw else 999
-        d_atm = abs(s_idx - atm_idx) if in_atm else 999
-
-        if (in_pw and right_u == "P") or (in_cw and right_u == "C"):
-            tier = 1
-            wall_dist = d_pw if (in_pw and right_u == "P") else d_cw
-        elif (in_pw or in_cw) and include_opposite_right:
-            tier = 2
-            wall_dist = min(d_pw, d_cw)
-        elif in_atm:
-            tier = 3
-            wall_dist = d_atm
-        else:
-            continue
-
-        seen_keys.add(key)
-        is_pw = put_wall is not None and abs(strike_val - put_wall) < 1e-4 and right_u == "P"
-        is_cw = call_wall is not None and abs(strike_val - call_wall) < 1e-4 and right_u == "C"
-        is_leg = key in priority_keys
-        spec = _row_to_spec(
-            row,
-            symbol=symbol,
-            zone=_classify_zone(s_idx, is_leg=is_leg),
-            is_put_wall=is_pw,
-            is_call_wall=is_cw,
-            is_strategy_leg=is_leg,
-        )
-        right_ord = 0 if right_u == "P" else 1
-        ranked_candidates.append(
-            ((tier, wall_dist, abs(strike_val - spot), strike_val, right_ord), spec)
-        )
-
-    ranked_candidates.sort(key=lambda pair: pair[0])
-    chosen = [spec for _, spec in ranked_candidates[:eff_max]]
-    chosen.sort(key=lambda s: (s.dte, s.strike, s.right))
-
-    return CorridorSelection(
-        ticker=symbol,
-        underlying_conid=underlying_conid,
-        underlying_price=spot,
-        target_expiry=resolved_expiry,
-        target_dte=resolved_dte,
-        window_strikes=eff_win,
-        max_contracts=eff_max,
-        primary_put_wall=put_wall,
-        primary_call_wall=call_wall,
-        wall_basis=wall_anchors.basis,
-        atm_strike=atm_strike,
-        specs=tuple(chosen),
-    )
 
 
 def _contract_from_spec(spec: CorridorContractSpec) -> Option:
@@ -588,8 +107,8 @@ def _build_frame_quotes(
             ask = spec.cached_ask
             last = spec.cached_last
             close = spec.cached_close
-        mid = _compute_mid(bid, ask, last, close, spec.cached_mid)
-        spread_pct = _compute_spread_pct(bid, ask, mid)
+        mid = compute_mid(bid, ask, last, close, spec.cached_mid)
+        spread_pct = compute_spread_pct(bid, ask, mid)
         vol = sanitize_count(getattr(tk, "volume", None))
         if vol is None:
             vol = spec.cached_volume

@@ -36,7 +36,7 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 5. Hard cap `max_total_contracts` = `max_contracts_per_page * max_pages_per_refresh` (80 x 5 = 400); auto-widen step + notice when exceeded. Reuse `conId > 0`; never re-qualify.
 6. Pages of `<= 80`; yield `0.01 s` every 20 subscribe/cancel calls; poll `0.25 s` up to `2.25 s`; `cancelMktData` in `finally:`; `0.35 s` inter-page cooldown. Generic ticks: delayed `"100,101,106"`, live `"100,101,104,106"`.
 
-## 5. Wall Corridor (`src/broker/corridor.py`)
+## 5. Wall Corridor (`src/broker/corridor/`: `models`, `quotes`, `selection`, `service`)
 - Tier 0 Strategy legs -> Tier 1 primary wall side -> Tier 2 opposite right at walls -> Tier 3 ATM; `len(specs) <= max_contracts <= 60` else `PacingViolationError`.
 - One-shot (`fetch_corridor_quotes`) and single-active stream (`stream_corridor_quotes`) must cancel 100% of subscriptions on stop, SSE disconnect, `gen.aclose()`, ticker/expiry switch, gateway drop, and lifespan exit. Every new code path needs a cleanup test in `test_corridor.py`.
 
@@ -65,7 +65,10 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - `config/settings.yaml`
 - `.env.example`
 - `tests/unit/test_config.py`
-- `tests/unit/test_contracts_and_pagination.py`
+- `tests/unit/test_broker_client.py`
+- `tests/unit/test_contracts.py`
+- `tests/unit/test_parser.py`
+- `tests/unit/test_fetcher.py`
 - `tests/unit/test_corridor.py`
 - `tests/integration/test_csv_pipeline.py`
 

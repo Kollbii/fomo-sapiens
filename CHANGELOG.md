@@ -22,6 +22,8 @@ milestones in git history.
 
 - Introduced the `src/services/` layer (`AnalyzerService`, corridor glue, request/response schemas); `src/web/` is now thin routes (`api.py`) + exception mapping (`errors.py`). The broker no longer imports analytics (walls passed as `WallAnchors`, BSM Greeks injected via `GreeksFallback`), and service-level validation errors return `422 INVALID_REQUEST` with `error_code`/`message`/`detail`. Import rules are enforced by `tests/unit/test_layering.py`.
 
+- Split oversized files along responsibility seams: `dashboard.js` (7.4k lines) into 14 native ES modules under `src/web/static/js/dashboard/` (entry `main.js`), `tokens.css` into 8 per-row stylesheets, `src/broker/corridor.py` and `src/analytics/strategies.py` into packages, and `test_contracts_and_pagination.py` into client/contracts/parser/fetcher tests. Behavior unchanged (statement/AST-identical splits; identical rendered DOM, Plotly calls and Firefox screenshot). Static files are served with `Cache-Control: no-cache`; `make js-check` also validates the ES-module import graph.
+
 ### Fixed
 - Documentation no longer claims unused tooling (Tailwind, HTMX, `scipy.optimize`) or non-existent identifiers.
 

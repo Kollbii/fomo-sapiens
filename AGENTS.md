@@ -15,7 +15,7 @@ Coding agents MUST use the following stack and MUST NOT introduce alternative fr
 - **Data Processing & Schema Validation:** `polars` (for all dataframe analytics and CSV I/O) and `pydantic>=2.0` + `pydantic-settings` (for boundary validation and configuration). **Do NOT use `pandas` in core analytics or storage pipelines.**
 - **Quantitative Fallback Math:** `numpy` vectorization plus `scipy.special.erf` for the normal CDF (hand-rolled vectorized Newton-Raphson + bisection IV solver; no `scipy.optimize`) for Black-Scholes-Merton implied volatility and Greeks calculation when Type 3/4 delayed feeds omit `modelGreeks`, using default `risk_free_rate: 0.0425`.
 - **Backend & Web Server:** `fastapi`, `uvicorn[standard]`, `jinja2`, `python-multipart`.
-- **Frontend UI:** Semantic server-rendered HTML5 (Jinja2), hand-written CSS driven by custom properties (`tokens.css`; no CSS framework), vanilla JavaScript with `fetch` / `EventSource` (no framework, no build step), and `Plotly.js` for multi-DTE interactive charts.
+- **Frontend UI:** Semantic server-rendered HTML5 (Jinja2), hand-written CSS split by dashboard row (`src/web/static/css/*.css`, custom properties in `tokens.css`; no CSS framework), vanilla JavaScript as native ES modules (`src/web/static/js/dashboard/*.js`, entry `main.js`; `fetch` / `EventSource`; no framework, no bundler, no build step), and `Plotly.js` for multi-DTE interactive charts.
 - **Quality & Testing:** `pytest`, `pytest-asyncio`, `mypy` (strict mode), `ruff` (linting and formatting).
 
 ---
@@ -43,8 +43,8 @@ All five core phases are `[IMPLEMENTED]`; their delivery history lives in `CHANG
 | :--- | :--- | :--- | :--- | :--- |
 | 1 | Core: config, exceptions, read-only guard, ticker validation | `src/core/{config,exceptions,security}.py` | `test_config.py`, `test_security.py`, `test_security_guard.py` | `docs/SECURITY_AND_SAFETY.md` |
 | 2 | Storage: 27-column schema, Mode 1 atomic CSV archive, snapshot index | `src/storage/{schema,csv_repository}.py` | `test_csv_pipeline.py`, `test_offline_fixture_smoke.py` | `docs/DATA_SCHEMA.md` |
-| 3 | Broker: ib-async client, `DELAYED 3->4` / `LIVE 1->2` cascade, weekly `[30, 120]` DTE discovery, `<= 80`/page fetcher, `<= 60` Wall Corridor | `src/broker/{client,contracts,parser,fetcher,corridor}.py` | `test_contracts_and_pagination.py`, `test_corridor.py` | `docs/ARCHITECTURE.md` §3, §5 |
-| 4 | Analytics: BSM IV/Greeks fallback, walls, anomalies, multi-DTE profiles, Strategy Lab | `src/analytics/{bsm_fallback,walls,anomalies,term_greeks,strategies}.py` | `test_bsm_and_analytics.py`, `test_strategies.py` | `docs/ARCHITECTURE.md` §4 |
+| 3 | Broker: ib-async client, `DELAYED 3->4` / `LIVE 1->2` cascade, weekly `[30, 120]` DTE discovery, `<= 80`/page fetcher, `<= 60` Wall Corridor | `src/broker/{client,contracts,parser,fetcher}.py`, `src/broker/corridor/{models,quotes,selection,service}.py` | `test_broker_client.py`, `test_contracts.py`, `test_parser.py`, `test_fetcher.py`, `test_corridor.py` | `docs/ARCHITECTURE.md` §3, §5 |
+| 4 | Analytics: BSM IV/Greeks fallback, walls, anomalies, multi-DTE profiles, Strategy Lab | `src/analytics/{bsm_fallback,walls,anomalies,term_greeks}.py`, `src/analytics/strategies/{models,chain,builders,engine}.py` | `test_bsm_and_analytics.py`, `test_strategies.py` | `docs/ARCHITECTURE.md` §4 |
 | — | Services: `AnalyzerService` orchestration (refresh, cached analytics, Strategy Lab, Corridor), request/response models | `src/services/{analyzer,corridor,schemas}.py` | `test_web_api.py`, `test_corridor_api.py`, `test_layering.py` | `docs/CODING_STANDARDS.md` §1, `docs/ARCHITECTURE.md` §3.0 |
 | 5 | Web: FastAPI routes + SSE, NYT Print / Obsidian Terminal UI, Plotly panels, Corridor & Strategy Lab cards, chain table | `src/main.py`, `src/web/` | `test_web_api.py`, `test_corridor_api.py` | `docs/UI_UX_GUIDELINES.md` |
 

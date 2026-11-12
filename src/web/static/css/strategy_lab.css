@@ -1,0 +1,237 @@
+/* Row 5b Strategy Lab tile. Loaded after tokens.css (order: base.html). */
+
+/* --------------------------------------------------------------------------
+   Row 5b: Big Strategy Lab Tile (Auto-Builder, Legs Table & T+n Payoff)
+   -------------------------------------------------------------------------- */
+.panel-card--strategy {
+  height: 590px;
+  min-height: 500px;
+  max-height: 1120px;
+}
+
+.panel-controls--strategy {
+  gap: 6px;
+}
+
+.strategy-preset-pills {
+  gap: 3px;
+}
+
+.strategy-preset-pills .pill-btn {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.strategy-qty-input {
+  width: 58px;
+  text-align: center;
+  font-family: var(--font-mono);
+}
+
+.strategy-workspace {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.strategy-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.strategy-kpi-card {
+  padding: 7px 9px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.strategy-kpi-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.strategy-kpi-value {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strategy-kpi-value.is-credit {
+  color: var(--accent-call);
+}
+
+.strategy-kpi-value.is-debit {
+  color: var(--accent-put);
+}
+
+.strategy-kpi-sub {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.strategy-rationale {
+  padding: 6px 10px;
+  background: var(--bg-surface);
+  border-left: 3px solid var(--accent-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.strategy-split {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(450px, 1.02fr) minmax(380px, 1.18fr);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.strategy-legs-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.strategy-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+}
+
+.strategy-legs-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.strategy-legs-table th,
+.strategy-legs-table td {
+  padding: 4px 4px;
+  border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
+}
+
+.strategy-legs-table .select-control {
+  height: 24px;
+  padding: 1px 3px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  max-width: 100%;
+}
+
+.strategy-leg-qty {
+  width: 44px;
+  text-align: center;
+}
+
+.strategy-leg-side.is-sell {
+  color: var(--accent-put);
+  font-weight: 700;
+}
+
+.strategy-leg-side.is-buy {
+  color: var(--accent-call);
+  font-weight: 700;
+}
+
+.strategy-leg-del-btn {
+  padding: 1px 6px;
+  height: 22px;
+  font-size: 10px;
+}
+
+.strategy-sim-bar {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+
+.strategy-slider-label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.strategy-slider-label input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
+.strategy-chart-pane {
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  position: relative;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  overflow: hidden;
+}
+
+.chart-canvas--strategy {
+  display: block;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 290px;
+}
+
+.chart-canvas--strategy.is-idle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.strategy-empty-state {
+  padding: 20px;
+  text-align: center;
+  max-width: 440px;
+  margin: 0 auto;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+

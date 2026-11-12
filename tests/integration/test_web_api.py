@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -425,8 +426,16 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-right"' in html
             assert 'id="th-filter-source"' in html
 
-            r_css = await client.get("/static/css/tokens.css")
-            assert r_css.status_code == 200
+            # Stylesheets: every <link> from base.html, in cascade order (tokens first).
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261112a"', html)
+            assert sheets[0] == "/static/css/tokens.css"
+            assert sheets[-1] == "/static/css/responsive.css"
+            css_texts: list[str] = []
+            for sheet in sheets:
+                r_sheet = await client.get(sheet)
+                assert r_sheet.status_code == 200, sheet
+                css_texts.append(r_sheet.text)
+            r_css = SimpleNamespace(text="\n".join(css_texts))
             assert "--bg-canvas:" in r_css.text
             assert 'html[data-theme="terminal"]' in r_css.text
             assert "panel-card--span-6" in r_css.text
@@ -443,10 +452,23 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".alert-banner.is-fresh" in r_css.text
             assert ".alert-banner-close" in r_css.text
             assert ".chain-add-leg-btn" in r_css.text
-            assert 'href="/static/css/tokens.css?v=20261111i"' in html
+            assert len(sheets) == 8
 
-            r_js = await client.get("/static/js/dashboard.js")
-            assert r_js.status_code == 200
+            # Dashboard ES modules: crawl the import graph from the served entry point.
+            r_main = await client.get("/static/js/dashboard/main.js")
+            assert r_main.status_code == 200
+            assert r_main.headers["cache-control"] == "no-cache"
+            module_texts: dict[str, str] = {"main.js": r_main.text}
+            pending = ["main.js"]
+            while pending:
+                for spec in re.findall(r'from "\./([a-z_]+\.js)"', module_texts[pending.pop()]):
+                    if spec not in module_texts:
+                        r_mod = await client.get(f"/static/js/dashboard/{spec}")
+                        assert r_mod.status_code == 200, spec
+                        module_texts[spec] = r_mod.text
+                        pending.append(spec)
+            assert len(module_texts) >= 10
+            r_js = SimpleNamespace(text="\n".join(module_texts.values()))
             assert "Plotly.react" in r_js.text
             assert "Plotly.purge" in r_js.text
             assert "DEFAULT_PANEL_VISIBILITY" in r_js.text
@@ -471,7 +493,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert 'src="/static/js/dashboard.js?v=20261111q"' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261112a">' in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
             assert "Port 4001" not in r_js.text
             for js_hook in (
@@ -543,7 +565,7 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "resetAllTableFilters",
                 "ibkr_chain_table_sort_v1",
             ):
-                assert js_hook in r_js.text, f"Missing {js_hook} in dashboard.js"
+                assert js_hook in r_js.text, f"Missing {js_hook} in dashboard modules"
 
             assert 'data-panel-target="strategy"' in html
             assert 'data-panel-target="corridor"' in html

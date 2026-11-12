@@ -1,0 +1,71 @@
+/* Responsive breakpoints (must load last). Loaded after tokens.css (order: base.html). */
+
+/* --------------------------------------------------------------------------
+   Responsive Breakpoints
+   -------------------------------------------------------------------------- */
+@media (max-width: 1120px) {
+  .kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .panel-card,
+  .panel-card--span-4,
+  .panel-card--span-6,
+  .panel-card--span-8,
+  .panel-card--span-12 {
+    grid-column: 1 / -1;
+    width: 100%;
+    resize: none;
+  }
+  .panel-span-btn {
+    display: none;
+  }
+  .panel-resize-handle {
+    cursor: ns-resize;
+  }
+  .panel-card--corridor {
+    height: auto;
+    min-height: 700px;
+  }
+  .corridor-kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .corridor-split {
+    grid-template-columns: 1fr;
+  }
+  .corridor-chart-pane {
+    height: 320px;
+    min-height: 280px;
+  }
+  .chart-canvas--corridor {
+    min-height: 280px;
+  }
+  .panel-card--strategy {
+    height: auto;
+    min-height: 760px;
+  }
+  .strategy-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .strategy-split {
+    grid-template-columns: 1fr;
+  }
+  .strategy-chart-pane {
+    height: 340px;
+    min-height: 300px;
+  }
+  .chart-canvas--strategy {
+    min-height: 300px;
+  }
+}
+
+@media (max-width: 680px) {
+  .dashboard-shell {
+    padding: 10px 10px 24px;
+  }
+  .kpi-strip,
+  .corridor-kpi-strip,
+  .strategy-kpi-grid,
+  .strategy-sim-bar {
+    grid-template-columns: 1fr;
+  }
+}

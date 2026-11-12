@@ -84,7 +84,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── __init__.py
     │   │   ├── client.py
     │   │   ├── contracts.py
-    │   │   ├── corridor.py
+    │   │   ├── corridor/         # models, quotes, selection (pure), service (subscriptions)
     │   │   ├── fetcher.py
     │   │   └── parser.py
     │   ├── storage/
@@ -97,7 +97,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── walls.py
     │   │   ├── anomalies.py
     │   │   ├── term_greeks.py
-    │   │   └── strategies.py
+    │   │   └── strategies/       # models, chain, builders (wall presets), engine (evaluate)
     │   ├── services/
     │   │   ├── __init__.py
     │   │   ├── analyzer.py       # AnalyzerService: refresh, chain analytics, Strategy Lab, corridor
@@ -111,10 +111,11 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │       │   ├── base.html
     │       │   └── index.html
     │       └── static/
-    │           ├── css/
-    │           │   └── tokens.css
-    │           └── js/
-    │               └── dashboard.js
+    │           ├── css/          # tokens, layout, controls, charts, corridor, strategy_lab,
+    │           │                 # chain_table, responsive (cascade order = base.html)
+    │           └── js/dashboard/ # native ES modules: main.js entry + state, helpers, badges,
+    │                             # charts, panels, chain_table, snapshots, strategy_lab,
+    │                             # corridor, network, events, ai_prompt, grid_layout
     └── tests/
         ├── conftest.py          # fixtures_dir, fixture_repo
         ├── support/             # aio.py (run_coro, run_virtual_loop, noop_sleep), ib_fakes.py

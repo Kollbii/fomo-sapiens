@@ -9,7 +9,7 @@
 - **Context:** The core system dynamically honors `MARKET_DATA_MODE=LIVE` / `DEFAULT_MARKET_DATA_TYPE=1|2` / `FALLBACK_MARKET_DATA_TYPE` in `.env` or `config/settings.yaml` across `IBKRBrokerClient`, `PagedOptionChainFetcher._fetch_page_live_opra`, `CorridorQuoteService`, FastAPI `/api/status`, and the UI (with `10089`/`354` fallback to Delayed `Type 3 -> 4`).
 - **Activated & Remaining Items:**
   1. `[IMPLEMENTED IN CORE]` Setting `MARKET_DATA_MODE=LIVE` or `DEFAULT_MARKET_DATA_TYPE=1` (with optional `FALLBACK_MARKET_DATA_TYPE=2`) reconciles config cleanly across broker, API, and UI (`src/broker/fetcher.py` `_fetch_page_live_opra` polls `genericTickList="100,101,104,106"` for `modelGreeks` and tick `101` OI, cascading `1 -> 2` and downgrading `10089`/`354` to Delayed).
-  2. `[IMPLEMENTED IN CORE — MODULE 2]` Targeted `<= 60`-contract **Wall Strike Corridor & Optional Live Constant Streaming (`src/broker/corridor.py`, `GET /api/corridor/stream/{ticker}`, `#wall-corridor-card`)** dynamically honors `LIVE` (`Type 1 -> 2`) and `DELAYED` (`Type 3 -> 4`).
+  2. `[IMPLEMENTED IN CORE — MODULE 2]` Targeted `<= 60`-contract **Wall Strike Corridor & Optional Live Constant Streaming (`src/broker/corridor/`, `GET /api/corridor/stream/{ticker}`, `#wall-corridor-card`)** dynamically honors `LIVE` (`Type 1 -> 2`) and `DELAYED` (`Type 3 -> 4`).
   3. `[PLANNED]` Add an optional **Bid-Ask Spread Quality Filter** flagging illiquid strikes where `(ask - bid) / mid > 0.25`.
 
 ---
@@ -58,7 +58,7 @@
 ## 5. Max Pain & Implied Expected Move Cone ($\pm 1\sigma / \pm 2\sigma$)
 - **Status:** `[PARTIALLY IMPLEMENTED IN STRATEGY LAB; MAX PAIN + WALLS CONE PLANNED — PHASE 7]`
 - **Quantitative Specification:**
-  - **Implemented (`src/analytics/strategies.py` + `#chart-strategy-payoff`):** Computes `±1σ` Expected Move ($\Delta S_{1\sigma} = S \times \text{IV}_{\text{ATM}} \times \sqrt{\text{DTE}/365}$) in Strategy Risk KPIs and renders a shaded `±1σ` Expected Move vertical band on `#chart-strategy-payoff`.
+  - **Implemented (`src/analytics/strategies/` + `#chart-strategy-payoff`):** Computes `±1σ` Expected Move ($\Delta S_{1\sigma} = S \times \text{IV}_{\text{ATM}} \times \sqrt{\text{DTE}/365}$) in Strategy Risk KPIs and renders a shaded `±1σ` Expected Move vertical band on `#chart-strategy-payoff`.
   - **Remaining Planned Items:**
     - **Max Pain Strike:** For each expiration, evaluate candidate settlement prices $S_T \in \text{Strikes}$ and find the strike that minimizes total intrinsic payout to option holders:
       $$\text{Payout}(S_T) = \sum_K \text{OI}_{\text{call}, K} \max(0, S_T - K) + \sum_K \text{OI}_{\text{put}, K} \max(0, K - S_T)$$

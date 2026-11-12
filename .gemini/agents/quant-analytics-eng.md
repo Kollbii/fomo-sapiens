@@ -38,7 +38,7 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 - `anomalies.py`: `volume > open_interest` (OI > 0) with `vol_oi_ratio`; `(expiry, right)` Volume Z-score `>= zscore_threshold` (default `2.0`). Guard `std == 0` / single row.
 - `term_greeks.py`: align Calls/Puts by strike across all weekly expirations in `[dte_min, dte_max]` (no fixed buckets); per-expiry `atm_strike`, `atm_iv`.
 
-## 4. Strategy Lab (`strategies.py`)
+## 4. Strategy Lab (`strategies/`: `models`, `chain`, `builders`, `engine`)
 - Presets `BULL_PUT_SPREAD`, `BULL_CALL_SPREAD`, `DIAGONAL_SPREAD`, `IRON_CONDOR`, plus `CUSTOM`. Wall-anchored auto-builder must only pick strikes that exist in the frame.
 - Pricing `Mid` / `Natural` / slippage / limit ladder; risk `max_profit`, `max_loss`, `max_loss_unbounded` (naked short calls => unbounded, never a finite number), RoR, breakevens, log-normal POP, `±1σ` move `S * IV_atm * sqrt(DTE/365)`; net Greeks x qty x 100.
 - Payoff curves `T+0`, midpoint, expiration, simulated `T+n` with `ΔIV`; diagonals price the far leg with remaining time at near expiry.

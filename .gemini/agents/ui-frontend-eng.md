@@ -24,9 +24,13 @@ You own the HTTP adapter and the browser. `src/web/` may import only `src.core` 
 `src/services/` (owned by `broker-storage-eng`) and math/socket logic never enters `src/web/`.
 
 ## 1. Navigating Large Files (mandatory token rule)
-`dashboard.js` is ~7.4k lines, `tokens.css` ~1.8k, `index.html` ~800. Never read them whole.
-- Find: `grep -n "function renderStrategyPayoff\|function apiJson" src/web/static/js/dashboard.js`
+Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (ES modules, 50–1.4k lines;
+`main.js` entry) and `src/web/static/css/*.css` (one file per dashboard row). Open only the module
+for the panel you touch; `index.html` (~900 lines) is still large.
+- Find: `grep -rn "function renderStrategyPayoffChart" src/web/static/js/dashboard/`
 - Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
+- New cross-module function: `export` it and add it to the importer's `import { ... }` list;
+  `make js-check` fails on unresolved imports.
 
 ## 2. Backend Rules (`src/web/api.py`, `src/web/errors.py`, `src/main.py`)
 - Routes stay thin: parse HTTP input, call one `AnalyzerService` method (which runs `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `422` ticker/request (`INVALID_TICKER`, `INVALID_REQUEST`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`), `502` fetch/spot, `429` pacing, `403` security. Never leak tracebacks to the browser.
@@ -37,11 +41,11 @@ You own the HTTP adapter and the browser. `src/web/` may import only `src.core` 
 
 ## 3. Frontend Rules
 - Themes: `data-theme="print"` (NYT newsprint `#FBF9F5`, black serif, `3px double` rules) and `data-theme="terminal"` (`#0B0D10`, ivory serif, emerald/rose/amber). Persist in `localStorage`; re-skin every Plotly chart on toggle without refetching.
-- Colors/fonts only via CSS custom properties in `tokens.css`; numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
+- Colors/fonts only via CSS custom properties defined in `tokens.css` (row styles live in the matching `css/*.css` file); numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
 - Keep `#editorial-banner-slot` structural; keep `.panel-toggle-pill` as the only panel-toggle style.
 - Network to IBKR only on explicit user click/toggle (Refresh, Corridor). Strategy Lab auto-build is cache-only.
 - Plotly: `Plotly.react` for updates; `if (!el.data) el.innerHTML = ""`; `Plotly.purge(el)` before placeholders; no HTML entities (`&bull;`, `&mdash;`) in JS strings — use `\u2022` / `\u2014`.
-- After any CSS/JS edit, bump `?v=` cache-busters in `base.html` (`tokens.css`) and `index.html` (`dashboard.js`).
+- After any CSS/JS edit, bump the `?v=` cache-busters in `base.html` (stylesheet loop) and `index.html` (`dashboard/main.js`).
 - Ticker input: `maxlength="5"`, `pattern="^[A-Za-z]{1,5}$"`, auto-uppercase, inline `422` banner.
 
 ## 4. Testing

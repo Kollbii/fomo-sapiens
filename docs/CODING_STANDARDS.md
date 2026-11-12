@@ -42,13 +42,18 @@ Coding agents must enforce strict boundaries between the 6 layers in `src/` (enf
 - Tests never open sockets or real sleeps; inject `noop_sleep`, fixed clocks, and fake `IB` factories.
 - Commands: `make test` (quiet), `make coverage` (`pytest-cov`, branch coverage over `src/`, report only), `make js-check` (`node --check` on `src/web/static/js/**/*.js`; skipped when Node.js is absent).
 
+### 4.0.1 Module Size & Frontend Module Rules
+- Keep source files focused (guideline: `< ~800` lines). When a module grows past that, split it along responsibility seams into a package (e.g. `src/broker/corridor/`, `src/analytics/strategies/`) whose `__init__.py` re-exports the public API with `__all__`; cross-module helpers drop the leading underscore.
+- Dashboard JS is native ES modules without a bundler: `main.js` is the only entry (`<script type="module">` in `index.html`). Module top-level code may only declare bindings or read bindings from modules evaluated earlier; `init()` runs from `main.js` after the whole graph is evaluated. Never reassign an imported binding (mutate `state` / `dom` instead). `make js-check` verifies every relative import resolves to an exported name.
+- CSS is split per dashboard row; `base.html` links the files in cascade order (`tokens.css` first, `responsive.css` last). Static files are served with `Cache-Control: no-cache` (`RevalidatingStaticFiles`) so imported modules are always revalidated; still bump the `?v=` busters on `main.js` and the stylesheet loop after frontend edits.
+
 ### 4.1 Required Test Modules
 Every feature phase requires automated tests in `pytest`:
 1. **`tests/unit/test_security.py`:**
    - Tests `TickerValidator.validate()` against valid symbols (`NVDA`, `AVGO`, `CRDO`, `PLTR`, `SPY`) and malicious inputs (`../etc`, `NVDA;rm`, `BRK.A`, `12345`, `""`, `"ABCDEFG"`).
    - Tests `ReadOnlyIBGuard.lock()` ensuring `placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, and `whatIfOrder` raise `SecurityViolationError`.
-2. **`tests/unit/test_contracts_and_pagination.py`:**
-   - Verifies strict `[30, 120]` weekly DTE matching, `+-X%` moneyness filtering, grid-aligned `$ strike_step` striding (and Auto step selection), and `<= 80` contracts/page splitting.
+2. **`tests/unit/test_broker_client.py`, `test_contracts.py`, `test_parser.py`, `test_fetcher.py`** (shared fake `FakeChainIB` in `tests/support/ib_fakes.py`):
+   - Verify read-only client locking and error-code handling, strict `[30, 120]` weekly DTE matching, `+-X%` moneyness filtering, grid-aligned `$ strike_step` striding (and Auto step selection), and `<= 80` contracts/page splitting.
 3. **`tests/unit/test_bsm_and_analytics.py`:**
    - Verifies vectorized BSM implied volatility and Greeks against known analytical option values.
    - Verifies Put/Call Wall detection (both OI mode and Volume fallback mode) and `Volume > OI` anomaly detection.
@@ -59,7 +64,7 @@ Every feature phase requires automated tests in `pytest`:
 6. **`tests/unit/test_corridor.py` & `tests/integration/test_corridor_api.py`:**
    - Verifies `select_wall_corridor` Tier `0..3` prioritization and hard `<= 60` subscription cap (`PacingViolationError` above 60), pre-qualified `conId` reuse (`qualifyContractsAsync` skipped), Type `3 -> 4` and `LIVE` `1 -> 2` fallback + BSM Greeks enrichment, and 100% `cancelMktData` cleanup across one-shot pulls, normal stream termination, `stop_all_streams()`, `gen.aclose()`, and mid-stream Gateway disconnects.
    - Verifies REST/SSE Corridor endpoints (`/api/corridor/quotes`, `/api/corridor/stop`, `/api/corridor/stream/{ticker}`), `503 GATEWAY_OFFLINE` handling, Strategy Lab live quote overlay without mutating Mode 1 CSVs, and pure `_run()` coroutine stepping without Windows loopback sockets.
-   - Keep JavaScript templates inside `src/web/static/js/dashboard.js` free of HTML entities `&bull;` / `&mdash;` (use `\u2022` / `\u2014`).
+   - Keep JavaScript strings inside `src/web/static/js/dashboard/*.js` free of HTML entities `&bull;` / `&mdash;` (use `\u2022` / `\u2014`).
 7. **Dynamic Config & UI/API Verification (`tests/unit/test_config.py`, `tests/integration/test_web_api.py`):**
    - Verifies `.env` `MARKET_DATA_MODE` / `DEFAULT_MARKET_DATA_TYPE` / `FALLBACK_MARKET_DATA_TYPE` reconciliation, `LIVE` (`1 -> 2` & mid-page `10089` fallback), server-reported `Ticker.marketDataType` observation, and non-default `IBKR_HOST:IBKR_PORT` + `LIVE` rendering across HTML, `/api/status`, and offline `503` responses.
 

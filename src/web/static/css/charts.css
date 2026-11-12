@@ -1,0 +1,274 @@
+/* Row 4 KPI strip and Row 5 snap-to-grid Plotly chart cards. Loaded after tokens.css (order: base.html). */
+
+/* --------------------------------------------------------------------------
+   Row 4: Headline KPI Strip (4 Cards)
+   -------------------------------------------------------------------------- */
+.kpi-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpi-card {
+  padding: 12px 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-top: 2px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.kpi-card--call {
+  border-top-color: var(--accent-call);
+}
+
+.kpi-card--put {
+  border-top-color: var(--accent-put);
+}
+
+.kpi-card--anomaly {
+  border-top-color: var(--accent-anomaly);
+}
+
+.kpi-label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.kpi-value {
+  font-family: var(--font-mono);
+  font-size: 24px;
+  font-weight: 700;
+  line-height: 1.15;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.kpi-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------------------
+   Row 5: Multi-DTE Plotly Chart Grid (Snap-to-Grid Resizable 12-Col Cards)
+   -------------------------------------------------------------------------- */
+.chart-grid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  grid-auto-flow: row dense;
+  align-items: stretch;
+  gap: 12px;
+}
+
+.panel-card {
+  position: relative;
+  grid-column: span 6;
+  width: 100%;
+  min-width: 260px;
+  max-width: 100%;
+  height: 410px;
+  min-height: 290px;
+  max-height: 920px;
+  resize: none;
+  overflow: hidden;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  padding: 12px 14px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-card.is-hidden {
+  display: none !important;
+}
+
+.panel-card--span-4 {
+  grid-column: span 4;
+}
+
+.panel-card--span-6 {
+  grid-column: span 6;
+}
+
+.panel-card--span-8 {
+  grid-column: span 8;
+}
+
+.panel-card--span-12 {
+  grid-column: span 12;
+}
+
+.panel-card.is-snapping-drag {
+  max-width: none;
+  z-index: 20;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 1px var(--accent-primary), var(--shadow-card);
+  user-select: none;
+}
+
+.panel-card.is-snapping-drag::after {
+  content: attr(data-snap-hint);
+  position: absolute;
+  right: 10px;
+  bottom: 20px;
+  z-index: 26;
+  padding: 3px 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-primary);
+  pointer-events: none;
+}
+
+.panel-resize-handle {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  z-index: 25;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  cursor: nwse-resize;
+  touch-action: none;
+  background:
+    linear-gradient(
+      135deg,
+      transparent 52%,
+      var(--border-strong) 52%,
+      var(--border-strong) 59%,
+      transparent 59%,
+      transparent 73%,
+      var(--border-strong) 73%,
+      var(--border-strong) 80%,
+      transparent 80%
+    );
+  opacity: 0.65;
+  transition: opacity 0.12s ease, background-color 0.12s ease;
+}
+
+.panel-resize-handle:hover,
+.panel-card.is-snapping-drag .panel-resize-handle {
+  opacity: 1;
+  background-color: var(--bg-surface);
+}
+
+.panel-span-btn {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
+.panel-span-btn:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--bg-hover);
+}
+
+.btn-icon-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 2px 9px;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.btn-icon-copy.is-copied {
+  border-color: var(--accent-call);
+  color: var(--accent-call);
+  background: var(--accent-call-bg);
+}
+
+.panel-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panel-title-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.panel-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.panel-controls .select-control {
+  height: 26px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+.field-group--checkbox {
+  cursor: pointer;
+  user-select: none;
+}
+
+.field-group--checkbox.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.panel-title {
+  margin: 0;
+  font-family: var(--font-editorial);
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.panel-meta {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  word-break: break-word;
+}
+
+.chart-canvas {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 190px;
+  height: 100%;
+}
+

@@ -1,0 +1,315 @@
+/* Row 6 option chain table. Loaded after tokens.css (order: base.html). */
+
+/* --------------------------------------------------------------------------
+   Row 6: High-Density Option Chain Table
+   -------------------------------------------------------------------------- */
+.chain-panel {
+  grid-column: 1 / -1;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  box-shadow: var(--shadow-card);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.table-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dte-bucket-tabs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.dte-tab-btn {
+  padding: 4px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.dte-tab-btn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.dte-tab-btn.active,
+.dte-tab-btn[aria-pressed="true"] {
+  border-color: var(--accent-focus);
+  background: rgba(29, 78, 216, 0.1);
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+html[data-theme="terminal"] .dte-tab-btn.active,
+html[data-theme="terminal"] .dte-tab-btn[aria-pressed="true"] {
+  border-color: var(--accent-focus);
+  background: rgba(56, 189, 248, 0.14);
+  color: var(--accent-focus);
+}
+
+.dte-tab-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.table-scroll {
+  width: 100%;
+  max-height: 560px;
+  overflow: auto;
+  border: 1px solid var(--border-subtle);
+}
+
+#chain-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#chain-table thead tr:first-child th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  height: 31px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  box-shadow: inset 0 -1px 0 var(--border-hairline);
+  padding: 0;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: right;
+  white-space: nowrap;
+}
+
+#chain-table thead tr:first-child th.text-left {
+  text-align: left;
+}
+
+#chain-table thead tr:first-child th[aria-sort="ascending"],
+#chain-table thead tr:first-child th[aria-sort="descending"] {
+  color: var(--accent-focus);
+  box-shadow: inset 0 -2px 0 var(--accent-focus);
+}
+
+.th-sort-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  width: 100%;
+  height: 31px;
+  padding: 0 7px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+#chain-table thead tr:first-child th.text-left .th-sort-btn {
+  justify-content: flex-start;
+}
+
+.th-sort-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.th-sort-btn:focus-visible {
+  outline: 1px solid var(--accent-focus);
+  outline-offset: -2px;
+}
+
+.th-sort-ind {
+  font-size: 10px;
+  opacity: 0.45;
+  min-width: 10px;
+  text-align: center;
+}
+
+#chain-table thead tr:first-child th[aria-sort="ascending"] .th-sort-ind,
+#chain-table thead tr:first-child th[aria-sort="descending"] .th-sort-ind {
+  opacity: 1;
+  color: var(--accent-focus);
+}
+
+#chain-table thead tr.table-filter-row th {
+  position: sticky;
+  top: 31px;
+  z-index: 2;
+  background: var(--bg-surface);
+  box-shadow: inset 0 -2px 0 var(--border-strong);
+  padding: 4px 5px;
+  text-align: right;
+  vertical-align: middle;
+}
+
+#chain-table thead tr.table-filter-row th.text-left {
+  text-align: left;
+}
+
+.th-filter-input,
+.th-filter-select {
+  width: 100%;
+  min-width: 52px;
+  height: 22px;
+  padding: 1px 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.th-filter-select {
+  min-width: 62px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.th-filter-input::placeholder {
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.th-filter-input:focus,
+.th-filter-select:focus {
+  outline: none;
+  border-color: var(--accent-focus);
+}
+
+.th-filter-input.is-filtered,
+.th-filter-select.is-filtered {
+  border-color: var(--accent-focus);
+  box-shadow: inset 0 0 0 1px var(--accent-focus);
+  color: var(--accent-focus);
+  font-weight: 600;
+}
+
+#chain-table tbody td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+#chain-table tbody td.text-left {
+  text-align: left;
+}
+
+#chain-table tbody tr:nth-child(even) {
+  background: var(--bg-table-stripe);
+}
+
+#chain-table tbody tr:hover {
+  background: var(--bg-hover);
+}
+
+#chain-table tbody tr.row-atm {
+  background: var(--accent-atm-bg);
+}
+
+#chain-table tbody tr.row-anomaly {
+  box-shadow: inset 3px 0 0 var(--accent-anomaly);
+}
+
+.right-pill {
+  display: inline-block;
+  min-width: 24px;
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+  text-align: center;
+  font-weight: 700;
+  font-size: 11px;
+}
+
+.right-pill--C {
+  color: var(--accent-call);
+  background: var(--accent-call-bg);
+}
+
+.right-pill--P {
+  color: var(--accent-put);
+  background: var(--accent-put-bg);
+}
+
+.anomaly-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 4px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-anomaly-bg);
+  color: var(--accent-anomaly);
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.vol-oi-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.vol-oi-bar {
+  width: 42px;
+  height: 5px;
+  background: var(--border-subtle);
+  border-radius: 1px;
+  overflow: hidden;
+  display: inline-block;
+}
+
+.vol-oi-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-anomaly);
+}
+
+.source-tag {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+}
+
+#chain-table th.chain-leg-col,
+#chain-table td.chain-leg-col {
+  text-align: center;
+  width: 52px;
+  padding: 2px 6px;
+}
+
+.chain-add-leg-btn {
+  padding: 2px 6px;
+  font-size: 10px;
+  line-height: 1.2;
+}
+

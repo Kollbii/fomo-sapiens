@@ -11,6 +11,8 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.responses import Response
+from starlette.types import Scope
 
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
@@ -25,6 +27,20 @@ logger = logging.getLogger(__name__)
 WEB_DIR = Path(__file__).resolve().parent / "web"
 TEMPLATES_DIR = WEB_DIR / "templates"
 STATIC_DIR = WEB_DIR / "static"
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """Static files served with `Cache-Control: no-cache` (ETag revalidation on every load).
+
+    The dashboard is split into native ES modules imported without `?v=` cache-busters, so
+    browsers must revalidate each module to never mix stale and fresh files; unchanged
+    files still return cheap `304 Not Modified` responses.
+    """
+
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
 
 
 def _format_feed_summary(cfg: Settings) -> str:
@@ -84,7 +100,7 @@ def create_app(
 
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
-    application.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    application.mount("/static", RevalidatingStaticFiles(directory=str(STATIC_DIR)), name="static")
     templates = Jinja2Templates(directory=str(TEMPLATES_DIR))
 
     register_exception_handlers(application)
