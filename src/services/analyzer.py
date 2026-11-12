@@ -6,10 +6,13 @@ it is the only module allowed to do so. It knows nothing about HTTP.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from datetime import UTC
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 
@@ -34,9 +37,16 @@ from src.broker.corridor import (
     select_wall_corridor,
 )
 from src.broker.fetcher import PagedOptionChainFetcher
+from src.core.calendar import ALLOWED_INTERVALS_MIN
 from src.core.config import Settings, get_settings
-from src.core.exceptions import InvalidRequestError, InvalidTickerError, SnapshotNotFoundError
+from src.core.exceptions import (
+    InvalidRequestError,
+    InvalidTickerError,
+    RefreshBusyError,
+    SnapshotNotFoundError,
+)
 from src.core.security import TickerValidator
+from src.services.collector import CollectorService, CollectorStatus
 from src.services.corridor import (
     CorridorQuoteCache,
     make_bsm_greeks_fallback,
@@ -45,6 +55,7 @@ from src.services.corridor import (
 from src.services.schemas import (
     ChainAnalyticsResponse,
     ChainMetadataPayload,
+    CollectorSettingsRequest,
     CorridorQuotesRequest,
     CorridorStopResponse,
     GatewayStatusResponse,
@@ -54,8 +65,27 @@ from src.services.schemas import (
     StrategySuggestRequest,
     StrategySuggestResponse,
 )
+from src.services.tracker import TrackerService
+from src.storage.collector_store import CollectorSettings, CollectorStore, TickerPin
 from src.storage.csv_repository import CSVRepository
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, infer_chain_step_and_range
+from src.storage.quality import evaluate_snapshot, measure_quote_quality
+from src.storage.schema import (
+    OPTION_CHAIN_POLARS_SCHEMA,
+    CollectionMode,
+    SpotSource,
+    infer_chain_step_and_range,
+)
+from src.storage.tracker_store import TrackerStore
+
+logger = logging.getLogger(__name__)
+
+# A manual refresh waits this long for another manual refresh; a running scheduled
+# collection cycle is reported immediately (HTTP 409 COLLECTOR_BUSY) so the UI can show it.
+MANUAL_REFRESH_WAIT_SEC = 90.0
+REFRESH_OWNER_MANUAL = "manual"
+REFRESH_OWNER_COLLECTOR = "collector"
+# Rough time per ticker for the busy hint (5 pages, see docs/ARCHITECTURE.md).
+REFRESH_EST_SEC_PER_TICKER = 40
 
 
 class AnalyzerService:
@@ -90,6 +120,41 @@ class AnalyzerService:
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
         self.corridor_cache = CorridorQuoteCache()
+        # One chain refresh at a time (manual or scheduled collection).
+        self.refresh_lock = asyncio.Lock()
+        self.refresh_owner: str | None = None
+        self.refresh_busy_hint_sec = REFRESH_EST_SEC_PER_TICKER
+        # Last time a refresh stopped corridor streams: {at_utc, lines, by, ticker}.
+        self.last_corridor_stop: dict[str, Any] | None = None
+        self._collector: CollectorService | None = None
+        self._tracker: TrackerService | None = None
+
+    def get_tracker(self) -> TrackerService:
+        """The position tracker (runs inside the collector's slots)."""
+        if self._tracker is None:
+            tracked = Path(self.settings.tracker.tracked_dir)
+            if not tracked.is_absolute():
+                tracked = self.repo.root / tracked
+            self._tracker = TrackerService(
+                settings=self.settings,
+                repo=self.repo,
+                fetcher=self.fetcher,
+                store=TrackerStore(self.repo.index_path.parent, tracked),
+                clock=self.fetcher.clock,
+                validate_ticker=self.validate_ticker,
+            )
+        return self._tracker
+
+    def get_collector(self) -> CollectorService:
+        """The scheduled collector (created on first use; the loop starts in the lifespan)."""
+        if self._collector is None:
+            self._collector = CollectorService(
+                self,
+                CollectorStore(self.repo.index_path.parent),
+                clock=self.fetcher.clock,
+                tracker=self.get_tracker(),
+            )
+        return self._collector
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -170,8 +235,11 @@ class AnalyzerService:
         exchange_native_verified: bool | None = None,
         available_strike_steps: list[float] | None = None,
         available_range_pcts: list[float] | None = None,
+        spot_source: SpotSource | None = None,
+        collection_mode: CollectionMode | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
+        quality = measure_quote_quality(enriched)
         first = enriched.row(0, named=True)
         source_counts = dict(Counter(str(s) for s in enriched["greeks_source"].to_list()))
         expirations = sorted(str(e) for e in enriched["expiry"].unique().to_list())
@@ -233,6 +301,11 @@ class AnalyzerService:
             greeks_source_counts=source_counts,
             source=source,
             notices=list(notices or []),
+            spot_source=spot_source,
+            quoted_contract_count=quality.quoted_contract_count,
+            quote_coverage=quality.quote_coverage,
+            prior_close_only_count=quality.prior_close_only_count,
+            collection_mode=collection_mode,
         )
 
         walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
@@ -292,6 +365,8 @@ class AnalyzerService:
             exchange_native_verified=(snap_meta.exchange_native_verified if snap_meta else None),
             available_strike_steps=(snap_meta.available_strike_steps if snap_meta else None),
             available_range_pcts=(snap_meta.available_range_pcts if snap_meta else None),
+            spot_source=snap_meta.spot_source if snap_meta else None,
+            collection_mode=snap_meta.collection_mode if snap_meta else None,
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -471,8 +546,63 @@ class AnalyzerService:
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
 
+    async def acquire_refresh(self, owner: str, timeout_sec: float) -> bool:
+        """Take the single refresh lock; False if it stayed busy for `timeout_sec`."""
+        if not self.refresh_lock.locked():
+            await self.refresh_lock.acquire()  # free: returns at once, no timer needed
+        else:
+            try:
+                await asyncio.wait_for(self.refresh_lock.acquire(), timeout=timeout_sec)
+            except TimeoutError:
+                return False
+        self.refresh_owner = owner
+        return True
+
+    def release_refresh(self) -> None:
+        self.refresh_owner = None
+        self.refresh_lock.release()
+
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
+        """Manual refresh (`POST /api/refresh`)."""
+        self.validate_ticker(req.ticker)  # invalid tickers fail with 422 even while busy
+        if self.refresh_lock.locked() and self.refresh_owner == REFRESH_OWNER_COLLECTOR:
+            raise RefreshBusyError(
+                "Waiting for scheduled collection: a collection cycle is running.",
+                owner=REFRESH_OWNER_COLLECTOR,
+                retry_after_sec=self.refresh_busy_hint_sec,
+            )
+        if not await self.acquire_refresh(REFRESH_OWNER_MANUAL, MANUAL_REFRESH_WAIT_SEC):
+            owner = self.refresh_owner or REFRESH_OWNER_MANUAL
+            raise RefreshBusyError(
+                f"Another refresh ({owner}) is still running.",
+                owner=owner,
+                retry_after_sec=self.refresh_busy_hint_sec,
+            )
+        try:
+            return await self.refresh_chain_locked(req, collection_mode="MANUAL")
+        finally:
+            self.release_refresh()
+
+    async def refresh_chain_locked(
+        self,
+        req: RefreshRequest,
+        *,
+        collection_mode: CollectionMode,
+    ) -> ChainAnalyticsResponse:
+        """Refresh one ticker; the caller must hold `refresh_lock` (see `acquire_refresh`)."""
         symbol = self.validate_ticker(req.ticker)
+        # IBKR allows 100 simultaneous market-data lines by default (shared with TWS). A page of
+        # 80 contracts plus a corridor stream of up to 60 would exceed it, so stop streams first.
+        stopped_lines = 0
+        if self.corridor.active_stream_count:
+            stopped_lines = await self.corridor.stop_all_streams()
+            logger.info("refresh %s stopped corridor streams (%d lines)", symbol, stopped_lines)
+            self.last_corridor_stop = {
+                "at_utc": self.fetcher.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lines": stopped_lines,
+                "by": self.refresh_owner or REFRESH_OWNER_MANUAL,
+                "ticker": symbol,
+            }
         fetch_res = await self.fetcher.fetch_option_chain(
             symbol,
             range_pct=req.range_pct,
@@ -496,6 +626,11 @@ class AnalyzerService:
         )
         req_step = fetch_res.plan.strikes.requested_step
         notices = list(fetch_res.notices)
+        if stopped_lines:
+            notices.append(
+                f"Stopped the corridor stream ({stopped_lines} market-data lines) before the "
+                "refresh to stay under the IBKR line limit."
+            )
         if actual_step > plan_step + 1e-6:
             notices.append(
                 f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."
@@ -517,13 +652,20 @@ class AnalyzerService:
             else len({float(r.strike) for r in fetch_res.rows})
         )
         self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
-        self.repo.save_snapshot(
+        saved_meta = self.repo.save_snapshot(
             symbol,
             enriched_df.to_dicts(),
             range_pct=plan.range_pct,
             strike_step=actual_step,
             requested_strike_step=req_step,
+            spot_source=plan.underlying.spot_source,
+            collection_mode=collection_mode,
         )
+        quality_verdict = evaluate_snapshot(saved_meta)
+        if not quality_verdict.usable:
+            notices.append(
+                "Snapshot saved but not usable for history: " + "; ".join(quality_verdict.reasons)
+            )
         return self.build_analytics_payload(
             enriched_df,
             source="LIVE_REFRESH",
@@ -535,4 +677,46 @@ class AnalyzerService:
             exchange_native_verified=bool(plan.exchange_native_verified),
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
+            spot_source=saved_meta.spot_source,
+            collection_mode=saved_meta.collection_mode,
         )
+
+    # ------------------------------------------------------------------ scheduled collection
+    def update_collector_settings(self, payload: CollectorSettingsRequest) -> CollectorStatus:
+        """Validate and apply `PUT /api/collector/settings` (bad input: `InvalidRequestError`)."""
+        oc = self.settings.options_chain
+        if payload.interval_min not in ALLOWED_INTERVALS_MIN:
+            raise InvalidRequestError(
+                f"interval_min must be one of {list(ALLOWED_INTERVALS_MIN)} (0 = closing only)"
+            )
+        pins: list[TickerPin] = []
+        for item in payload.tickers:
+            symbol = self.validate_ticker(item.symbol)
+            if not any(abs(item.range_pct - r) < 1e-9 for r in oc.allowed_range_pcts):
+                raise InvalidRequestError(
+                    f"{symbol}: range_pct must be one of {list(oc.allowed_range_pcts)}"
+                )
+            if not any(abs(item.strike_step - s) < 1e-9 for s in oc.allowed_strike_steps):
+                raise InvalidRequestError(
+                    f"{symbol}: strike_step must be one of {list(oc.allowed_strike_steps)}"
+                )
+            if item.dte_min > item.dte_max:
+                raise InvalidRequestError(f"{symbol}: dte_min must be <= dte_max")
+            pins.append(
+                TickerPin(
+                    symbol=symbol,
+                    range_pct=item.range_pct,
+                    strike_step=item.strike_step,
+                    dte_min=item.dte_min,
+                    dte_max=item.dte_max,
+                )
+            )
+        try:
+            new = CollectorSettings(
+                enabled=payload.enabled, interval_min=payload.interval_min, tickers=pins
+            )
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
+        collector = self.get_collector()
+        collector.update_settings(new)
+        return collector.status()

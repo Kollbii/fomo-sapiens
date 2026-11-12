@@ -8,12 +8,15 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, StreamingResponse
 
 from src.core.exceptions import GatewayConnectionError, OptionChainFetchError, PacingViolationError
 from src.services.analyzer import AnalyzerService
+from src.services.collector import CollectorStatus
 from src.services.schemas import (
     ChainAnalyticsResponse,
+    CollectorSettingsRequest,
     CorridorLegRef,
     CorridorQuoteFrame,
     CorridorQuotesRequest,
@@ -21,11 +24,16 @@ from src.services.schemas import (
     GatewayStatusResponse,
     RefreshRequest,
     SnapshotsListResponse,
+    SpreadStatus,
     StrategyEvaluateRequest,
     StrategyEvaluationResponse,
     StrategySuggestRequest,
     StrategySuggestResponse,
+    TrackedSpread,
+    TrackedSpreadsResponse,
+    TrackSpreadRequest,
 )
+from src.services.tracker import DuplicateSpreadError, TrackerCapError, TrackerStateError
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
 
@@ -125,6 +133,64 @@ async def api_refresh(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return await svc.refresh_chain(payload)
+
+
+@router.get("/collector/status", response_model=CollectorStatus)
+async def api_collector_status(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> CollectorStatus:
+    return svc.get_collector().status()
+
+
+@router.put("/collector/settings", response_model=CollectorStatus)
+async def api_collector_settings(
+    payload: CollectorSettingsRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> CollectorStatus:
+    return svc.update_collector_settings(payload)
+
+
+_SPREAD_ID_PATTERN = r"^[A-Z]{1,5}-\d{8}-[0-9a-f]{8}$"
+
+
+@router.get("/tracker/spreads", response_model=TrackedSpreadsResponse)
+async def api_tracker_spreads(
+    status: SpreadStatus | None = Query(default=None),  # noqa: B008
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpreadsResponse:
+    tracker = svc.get_tracker()
+    spreads = [s for s in tracker.spreads() if status is None or s.status == status]
+    return TrackedSpreadsResponse(
+        active_count=len(tracker.active()),
+        max_active_spreads=svc.settings.tracker.max_active_spreads,
+        spreads=spreads,
+    )
+
+
+@router.post("/tracker/spreads", response_model=TrackedSpread, status_code=201)
+async def api_tracker_register(
+    payload: TrackSpreadRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpread:
+    try:
+        return svc.get_tracker().register_user(payload.ticker, payload.snapshot_id, payload.legs)
+    except (DuplicateSpreadError, TrackerCapError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/tracker/spreads/{spread_id}/stop", response_model=TrackedSpread)
+async def api_tracker_stop(
+    spread_id: str = ApiPath(pattern=_SPREAD_ID_PATTERN),
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpread:
+    try:
+        return svc.get_tracker().stop(spread_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown spread {spread_id}") from exc
+    except TrackerStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)

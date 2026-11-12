@@ -20,6 +20,7 @@ export var DEFAULT_PANEL_VISIBILITY = {
   greeks: false,
   corridor: true,
   strategy: true,
+  backtest: true,
 };
 
 export function cloneDefaultPanelVisibility() {
@@ -30,6 +31,7 @@ export function cloneDefaultPanelVisibility() {
     greeks: DEFAULT_PANEL_VISIBILITY.greeks,
     corridor: DEFAULT_PANEL_VISIBILITY.corridor,
     strategy: DEFAULT_PANEL_VISIBILITY.strategy,
+    backtest: DEFAULT_PANEL_VISIBILITY.backtest,
   };
 }
 

@@ -14,12 +14,13 @@ from src.core.exceptions import (
     InvalidTickerError,
     OptionChainFetchError,
     PacingViolationError,
+    RefreshBusyError,
     SecurityViolationError,
     SnapshotNotFoundError,
     StorageSchemaError,
     UnderlyingPriceUnavailableError,
 )
-from src.services.analyzer import AnalyzerService
+from src.services.analyzer import REFRESH_OWNER_COLLECTOR, AnalyzerService
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -70,6 +71,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=502,
             content={"error_code": "UNDERLYING_PRICE_UNAVAILABLE", "message": str(exc)},
+        )
+
+    @app.exception_handler(RefreshBusyError)
+    async def _handle_refresh_busy(_req: Request, exc: RefreshBusyError) -> JSONResponse:
+        code = "COLLECTOR_BUSY" if exc.owner == REFRESH_OWNER_COLLECTOR else "REFRESH_BUSY"
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_code": code,
+                "message": str(exc),
+                "retry_after_sec": exc.retry_after_sec,
+            },
+            headers={"Retry-After": str(exc.retry_after_sec)},
         )
 
     @app.exception_handler(OptionChainFetchError)

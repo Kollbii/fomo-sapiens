@@ -52,12 +52,12 @@ Google Fonts `Newsreader`, `JetBrains Mono`, `Inter` with system fallbacks:
 
 1. **Masthead & telemetry:** serif title; Gateway badge (`host:port`, connected vs. `OFFLINE CACHE`); market-data badge `#md-type-badge` showing the *observed* type (`TYPE 1: LIVE OPRA`, `TYPE 2: FROZEN`, `TYPE 3: 15M DELAYED`, `TYPE 4: DELAYED-FROZEN`); Greeks source badge; theme switch.
 2. **Reserved editorial banner `#editorial-banner-slot`:** full width, editorial double rules, kept structurally ready for future narrative modules (`docs/FUTURE_IMPROVEMENTS.md` §6); currently shows feed/DTE summary and snapshot metadata in `#editorial-banner-copy`.
-3. **Control strip:** watchlist pills (`NVDA`, `AVGO`, `CRDO`, `PLTR`); custom ticker input (`maxlength="5"`, `pattern="[A-Za-z]{1,5}"`, auto-uppercase, inline `422` error); Range % (default `±20%`), Strike Step (default `Auto`), DTE ceiling (default `30–120d`) — options the exchange cannot serve are shown disabled `(N/A)`; historical snapshot selector; `[REFRESH FROM IBKR]`; dismissible `#alert-banner`; `PANELS:` bar.
+3. **Control strip:** watchlist pills (`NVDA`, `AVGO`, `CRDO`, `PLTR`); custom ticker input (`maxlength="5"`, `pattern="[A-Za-z]{1,5}"`, auto-uppercase, inline `422` error); Range % (default `±20%`), Strike Step (default `Auto`), DTE ceiling (default `30–120d`) — options the exchange cannot serve are shown disabled `(N/A)`; historical snapshot selector; `[REFRESH FROM IBKR]`; dismissible `#alert-banner`; `PANELS:` bar. Scheduled-collection control `#collector-control` (toggle + settings/status popover); historical snapshot picker `#snapshot-picker` grouping snapshots by exchange day, with off-session snapshots marked.
 4. **KPI strip (4 cards):** spot + pull scope + active expirations; Primary Call Wall; Primary Put Wall; unusual-activity count.
-5. **Panel grid (snap-to-grid, resizable):** `#chart-walls` (Put/Call Walls), IV smile, unusual activity, Greeks structure, `#wall-corridor-card` (Wall Corridor), `#strategy-lab-card` (Strategy Lab). Spans snap to `4/6/8/12` columns; layout persists in `localStorage`.
+5. **Panel grid (snap-to-grid, resizable):** `#chart-walls` (Put/Call Walls), IV smile, unusual activity, Greeks structure, `#wall-corridor-card` (Wall Corridor), `#strategy-lab-card` (Strategy Lab), `#backtest-card` (Option Backtest Analyzer: one bull put spread held to expiry, P&L per time step on an evenly spaced, not time-proportional axis; click-only). Spans snap to `4/6/8/12` columns; layout persists in `localStorage`.
 6. **Option chain table `#chain-table`:** 18 monospaced columns, sortable headers (nulls last), per-column filters, DTE bucket tabs, `+Leg` buttons feeding Strategy Lab.
 
-**Defaults:** panels `walls`, `anomalies`, `corridor`, `strategy` visible; `iv_smile`, `greeks` hidden.
+**Defaults:** panels `walls`, `anomalies`, `corridor`, `strategy`, `backtest` visible; `iv_smile`, `greeks` hidden.
 
 ---
 

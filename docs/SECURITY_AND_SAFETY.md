@@ -74,3 +74,28 @@ When running inside Docker on Windows or macOS (`make docker-up`):
 ## 4. Credential & Account Privacy Isolation
 - **No Credentials Stored:** The application never requests, stores, or logs IBKR usernames, passwords, or 2FA codes.
 - **No Account Queries:** The application never calls `reqAccountSummary`, `reqPositions`, `reqPnL`, or `managedAccounts`. Local CSV files contain exclusively market option chain data.
+
+---
+
+## 5. Market-Data Pacing and Line Budget (`src/broker/fetcher.py`, `src/web/api.py`)
+- **Message rate:** `ib_async` sends at most `45` messages per `1s` window (`Client.MaxRequests`) and queues the rest; IBKR allows half the account's market-data lines per second (`50` with the default `100` lines). The chain fetcher sends `reqMktData` and `cancelMktData` in bursts of `20` with a `0.55s` pause before each burst (`<= 40` per second), so its requests never wait in the `ib_async` queue.
+- **Line budget:** IBKR grants `100` simultaneous market-data lines by default, shared with TWS watchlists and every API client (error `101` when exceeded). One chain page uses `<= 80` lines; the underlying spot subscription is cancelled before the first page; all page lines are cancelled before the next page starts. `POST /api/refresh` stops any corridor stream (`<= 60` lines) before fetching. Lines used in TWS itself still count against the same `100`.
+- **Cancels are guaranteed:** every subscription is cancelled in `finally`; an interrupted pause never skips a cancel.
+
+---
+
+## 6. Scheduled Collection Background Task (`src/services/collector.py`, `src/core/calendar.py`, `src/storage/collector_store.py`)
+- **Same read-only path:** the collector only calls `AnalyzerService.refresh_chain_locked`, the code behind `POST /api/refresh`: `ReadOnlyIBGuard`, chain filtering (DTE window, `range_pct`, `strike_step`), pages of `<= 80`, pacing and `finally` cancels all apply unchanged. It never places, modifies or cancels orders.
+- **Tickers:** every collected ticker is validated by `TickerValidator` when the settings are saved (`TickerPin`) and again before each refresh (`validate_ticker`).
+- **No overlap:** one `asyncio.Lock` serializes manual and scheduled refreshes, so only one page (`<= 80` lines) is subscribed at a time; corridor streams are stopped before a refresh (after up to 10 min of postponement).
+- **Event loop:** the task uses `asyncio` waits only; no blocking calls. Errors are caught per ticker and logged; the loop never stops on an error.
+- **Files:** collector state lives in `data/metadata/collector_settings.json` and `data/metadata/collector_runs.jsonl`; nothing is written to `data/snapshots/` except new immutable snapshots through `CSVRepository`.
+
+---
+
+## 7. Position Tracker (`src/services/tracker.py`, `PagedOptionChainFetcher.fetch_exact_contracts`)
+- **Only market data for specific contracts:** the tracker's one broker call is `fetch_exact_contracts(ticker, specs, underlying_conid=...)`: one stock `reqMktData` for the spot (cancelled in `finally`), then `reqMktData` / `cancelMktData` for the listed leg contracts through the same paced pages as a chain refresh (bursts of `20`, `0.55s` pauses, pages of `<= 80`, cap `80 x 5 = 400`, `finally` cancels, Type 3 -> 4 / 1 -> 2 fallback). `qualifyContractsAsync` is called only for a contract without a known `conId` (tracked legs always carry the `conId` from the snapshot). It never calls `reqSecDefOptParams` or requests a chain, and it never places, modifies or cancels orders: all calls go through `ReadOnlyIBGuard`.
+- **Tickers:** validated with `TickerValidator` when a spread is registered, again before every quote request and in `make_snapshot_id` / `TrackerStore.quote_path` before any file path.
+- **No overlap:** quoting runs inside the collector's slot while it holds `refresh_lock`, after the ticker's snapshot (all chain-page lines are already cancelled), so line use stays under the `100`-line budget.
+- **Failures:** a tracker error is caught and logged (`FAILED` record); it never stops the collector, never triggers a collector or tracker retry and never leaves a partial file.
+- **Files:** `data/tracked/` (validated to be inside `data/` and outside `data/snapshots/`) plus `data/metadata/tracked_spreads.json` and `tracker_runs.jsonl`; tracked-quote files are immutable.

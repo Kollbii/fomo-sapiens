@@ -8,6 +8,17 @@ milestones in git history.
 ## [Unreleased]
 
 ### Added
+- Snapshot quality metadata (`spot_source`, quote coverage, prior-close-only count, `collection_mode`) and the usable-for-history rule; manual refreshes stop corridor streams first.
+- Day-grouped snapshot picker with off-session markers.
+- Scheduled snapshot collection during the US session (NYSE calendar, closing snapshot, run log, `GET /api/collector/status`, `PUT /api/collector/settings`, collector control in the dashboard).
+- Position tracker: keeps quoting the legs of tracked bull put spreads below 30 DTE (`/api/tracker/spreads`), AUTO picks from the Strategy Lab Auto-Builder.
+- Bull put spread backtest engine (version 2 reads tracked quotes; calendar-aware settlement incl. early closes).
+- Option Backtest Analyzer panel (`GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`).
+
+### Changed
+- Chain page requests are paced in bursts of 20 with a 0.55 s pause (under the ib_async 45 msg/s throttle).
+
+### Added
 - Static read-only security guard `scripts/security_guard.py` (`make security-guard`): blocks order/mutation APIs, account/position queries, `time.sleep`, and `pandas` imports in `src/`.
 - Multi-platform sub-agents: canonical specs in `.agent/`, generated Claude Code (`.claude/agents/`) and Gemini CLI (`.gemini/agents/`, `.gemini/settings.json`) adapters with per-agent model/reasoning routing (`make agents-sync`, `make agents-check`); new read-only `safety-reviewer` agent.
 - Shared test support (`tests/support/`), `tests/conftest.py` fixtures, golden snapshot fixture with an offline end-to-end smoke test, `make coverage` (pytest-cov), and `make js-check` (`node --check`).

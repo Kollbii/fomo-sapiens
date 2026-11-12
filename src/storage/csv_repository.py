@@ -18,13 +18,16 @@ from pydantic import ValidationError
 from src.core.config import PROJECT_ROOT, StorageSettings
 from src.core.exceptions import SnapshotNotFoundError, StorageSchemaError
 from src.core.security import TickerValidator
+from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     COLUMNS,
     NON_NULLABLE_COLUMNS,
     OPTION_CHAIN_POLARS_SCHEMA,
     SNAPSHOT_ID_RE,
+    CollectionMode,
     OptionContractRow,
     SnapshotMeta,
+    SpotSource,
     infer_chain_step_and_range,
 )
 
@@ -112,6 +115,8 @@ class CSVRepository:
         range_pct: float | None = None,
         strike_step: float | None = None,
         requested_strike_step: float | None = None,
+        spot_source: SpotSource | None = None,
+        collection_mode: CollectionMode | None = None,
     ) -> SnapshotMeta:
         """Validate rows and archive them as a new immutable snapshot (never overwrites)."""
         symbol = TickerValidator.validate(ticker)
@@ -143,7 +148,7 @@ class CSVRepository:
             range_pct,
             strike_step,
             requested_strike_step=requested_strike_step,
-        )
+        ).model_copy(update={"spot_source": spot_source, "collection_mode": collection_mode})
 
         with self._lock:
             if target.exists():
@@ -224,6 +229,7 @@ class CSVRepository:
                 resolved_step = inf_step
             if resolved_range is None:
                 resolved_range = inf_range
+        quality = measure_quote_quality(df)
         return SnapshotMeta(
             snapshot_id=first["snapshot_id"],
             file_path=self._rel(path),
@@ -236,6 +242,9 @@ class CSVRepository:
             range_pct=resolved_range,
             strike_step=resolved_step,
             requested_strike_step=requested_strike_step,
+            quoted_contract_count=quality.quoted_contract_count,
+            quote_coverage=quality.quote_coverage,
+            prior_close_only_count=quality.prior_close_only_count,
         )
 
     def _write_index(self, tickers: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -264,6 +273,8 @@ class CSVRepository:
                         snap["range_pct"] = meta.range_pct
                         snap["strike_step"] = meta.strike_step
                         snap["requested_strike_step"] = meta.requested_strike_step
+                        snap["spot_source"] = meta.spot_source
+                        snap["collection_mode"] = meta.collection_mode
                 self._write_index(rebuilt["tickers"])
             return
         existing = [

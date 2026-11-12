@@ -1,6 +1,9 @@
 /* IBKR Options Analyzer dashboard — Entry point: boots the dashboard once the DOM is ready. */
 
 import {
+  startCollectorPolling,
+} from "./collector.js";
+import {
   state,
 } from "./state.js";
 import {
@@ -45,6 +48,7 @@ function init() {
   bindEvents();
   initChartResizeHandling();
   fetchStatus();
+  startCollectorPolling();
   loadChain(state.ticker, "");
 }
 

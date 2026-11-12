@@ -1,6 +1,10 @@
 /* IBKR Options Analyzer dashboard — Wall Strike Corridor: preview, one-shot quotes, SSE streaming and ladder chart. */
 
 import {
+  collectorEtTime,
+  corridorStoppedByCollector,
+} from "./collector.js";
+import {
   dom,
   state,
 } from "./state.js";
@@ -955,10 +959,24 @@ export function startCorridorStream() {
     }
   });
 
-  es.onerror = function () {
+  es.onerror = async function () {
     if (!state.corridorStreaming) return;
     stopCorridorStream({ silent: true, modeLabel: "STREAM DISCONNECTED" });
     fetchStatus();
+    var byCollector = await corridorStoppedByCollector();
+    if (byCollector) {
+      updateCorridorStatusUI(state.corridorFrame, "STOPPED BY SCHEDULED COLLECTION");
+      showBanner(
+        "info",
+        "Live corridor stream was stopped by scheduled collection (" +
+          byCollector.ticker +
+          " snapshot at " +
+          collectorEtTime(byCollector.at_utc) +
+          ") to stay under the IBKR 100-line limit. Re-enable streaming when it finishes.",
+        { phase: "CORRIDOR", ticker: state.ticker }
+      );
+      return;
+    }
     showBanner(
       "warn",
       "Live corridor stream interrupted or IBKR Gateway unreachable (" +

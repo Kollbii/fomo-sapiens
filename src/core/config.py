@@ -173,6 +173,42 @@ class StorageSettings(_StrictModel):
     logs_dir: str = "data/logs"
 
 
+class TrackerSettings(_StrictModel):
+    """Position tracker: quotes the legs of open bull put spreads on every collection slot."""
+
+    max_active_spreads: int = Field(default=120, ge=1, le=200)
+    auto_pick: bool = True
+    # First usable snapshot of the day at/after this ET time creates the AUTO pick.
+    auto_pick_not_before_et: str = "10:45"
+    tracked_dir: str = "data/tracked"
+
+    @field_validator("auto_pick_not_before_et")
+    @classmethod
+    def _check_hhmm(cls, value: str) -> str:
+        text = value.strip()
+        parts = text.split(":")
+        if (
+            len(parts) != 2
+            or len(parts[0]) != 2
+            or len(parts[1]) != 2
+            or not (parts[0].isdigit() and parts[1].isdigit())
+            or int(parts[0]) > 23
+            or int(parts[1]) > 59
+        ):
+            raise ValueError(f"auto_pick_not_before_et must be HH:MM (24h), got {value!r}")
+        return text
+
+    def not_before_minutes(self) -> int:
+        hh, mm = self.auto_pick_not_before_et.split(":")
+        return int(hh) * 60 + int(mm)
+
+
+def resolve_project_path(value: str) -> Path:
+    """Resolve a configured path (relative paths are relative to the project root)."""
+    path = Path(value)
+    return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+
+
 class Settings(_StrictModel):
     app: AppSettings = AppSettings()
     ibkr: IBKRSettings = IBKRSettings()
@@ -181,6 +217,25 @@ class Settings(_StrictModel):
     analytics: AnalyticsSettings = AnalyticsSettings()
     corridor: CorridorSettings = CorridorSettings()
     storage: StorageSettings = StorageSettings()
+    tracker: TrackerSettings = TrackerSettings()
+
+    @model_validator(mode="after")
+    def _check_tracked_dir(self) -> Settings:
+        """`tracker.tracked_dir` must lie inside `storage.data_dir` and outside the snapshots."""
+        tracked = resolve_project_path(self.tracker.tracked_dir)
+        data_dir = resolve_project_path(self.storage.data_dir)
+        snapshots = resolve_project_path(self.storage.snapshots_dir)
+        if tracked == data_dir or not tracked.is_relative_to(data_dir):
+            raise ValueError(
+                f"tracker.tracked_dir must be a folder inside {self.storage.data_dir}/, "
+                f"got {self.tracker.tracked_dir!r}"
+            )
+        if tracked == snapshots or tracked.is_relative_to(snapshots):
+            raise ValueError(
+                f"tracker.tracked_dir must not be {self.storage.snapshots_dir} or inside it, "
+                f"got {self.tracker.tracked_dir!r}"
+            )
+        return self
 
 
 class _EnvOverrides(BaseSettings):

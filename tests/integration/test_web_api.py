@@ -13,6 +13,7 @@ import anyio.to_thread
 import httpx
 import pytest
 
+from src.analytics.strategies import StrategyLegInput
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import IBKRSettings, Settings, StorageSettings
@@ -362,6 +363,8 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="range-pct-select"',
                 'id="strike-step-select"',
                 'id="snapshot-select"',
+                'id="snapshot-picker-toggle"',
+                'id="snapshot-picker-panel"',
                 'id="refresh-btn"',
                 'id="alert-banner"',
                 'id="kpi-spot"',
@@ -427,7 +430,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261112b"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261112c"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -452,7 +455,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".alert-banner.is-fresh" in r_css.text
             assert ".alert-banner-close" in r_css.text
             assert ".chain-add-leg-btn" in r_css.text
-            assert len(sheets) == 8
+            assert len(sheets) == 11
 
             # Dashboard ES modules: crawl the import graph from the served entry point.
             r_main = await client.get("/static/js/dashboard/main.js")
@@ -493,7 +496,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261112a">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261112c">' in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
             assert "Port 4001" not in r_js.text
             for js_hook in (
@@ -570,7 +573,10 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'data-panel-target="strategy"' in html
             assert 'data-panel-target="corridor"' in html
             assert "panel-toggle-btn" not in html
-            assert html.count('class="panel-toggle-pill') == 6
+            assert html.count('class="panel-toggle-pill') == 7
+            assert 'data-panel-target="backtest"' in html
+            assert 'id="backtest-card"' in html and 'data-panel-id="backtest"' in html
+            assert "Steps are evenly spaced, not to time scale." in html
             assert 'data-panel-id="corridor"' in html
             assert 'id="wall-corridor-card"' in html
             assert 'id="corridor-refresh-btn"' in html
@@ -872,3 +878,752 @@ def test_service_level_validation_errors_map_to_structured_422(tmp_path: Path) -
                 assert body["message"] == body["detail"] == "dte_min must be <= dte_max"
 
     run_coro(_exercise())
+    run_coro(_exercise())
+
+
+def test_refresh_records_quality_metadata_and_legacy_entries_load(tmp_path: Path) -> None:
+    app, repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            meta = r_ok.json()["meta"]
+            assert meta["spot_source"] == "LAST"
+            assert meta["collection_mode"] == "MANUAL"
+            assert meta["quote_coverage"] == pytest.approx(1.0)
+            assert meta["quoted_contract_count"] == meta["contract_count"]
+            assert meta["prior_close_only_count"] == 0
+            assert not any("not usable" in n for n in meta["notices"])
+
+            r_snaps = await client.get("/api/snapshots/NVDA")
+            assert r_snaps.status_code == 200
+            snaps = {s["snapshot_id"]: s for s in r_snaps.json()["snapshots"]}
+            fresh = snaps["NVDA_20261111_160000"]
+            assert fresh["spot_source"] == "LAST"
+            assert fresh["collection_mode"] == "MANUAL"
+            assert fresh["quote_coverage"] == pytest.approx(1.0)
+            # The seeded snapshot was saved without spot_source / collection_mode
+            seeded = snaps["NVDA_20261111_150000"]
+            assert seeded["spot_source"] is None
+            assert seeded["collection_mode"] is None
+
+            r_chain = await client.get(
+                "/api/chain/NVDA", params={"snapshot_id": "NVDA_20261111_160000"}
+            )
+            assert r_chain.status_code == 200
+            assert r_chain.json()["meta"]["spot_source"] == "LAST"
+            assert r_chain.json()["meta"]["collection_mode"] == "MANUAL"
+
+    run_coro(_exercise())
+    assert len(repo.list_snapshots("NVDA")) == 2
+
+
+def test_refresh_flags_unusable_snapshot_in_notices(tmp_path: Path) -> None:
+    app, repo, mock_ib = _build_test_app(tmp_path)
+    original = mock_ib.reqMktData
+
+    def _close_only_spot(contract: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(contract, "secType", "") == "STK":
+            return SimpleNamespace(contract=contract, bid=-1.0, ask=-1.0, last=-1.0, close=139.5)
+        return original(contract, *args, **kwargs)
+
+    mock_ib.reqMktData = _close_only_spot  # type: ignore[method-assign]
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            meta = r_ok.json()["meta"]
+            assert meta["spot_source"] == "CLOSE"
+            assert any(
+                "not usable for history" in n and "spot_source CLOSE" in n for n in meta["notices"]
+            )
+
+    run_coro(_exercise())
+    # Saved with a flag, not refused
+    assert repo.list_snapshots("NVDA")[0].spot_source == "CLOSE"
+
+
+def test_refresh_stops_running_corridor_streams_first(tmp_path: Path) -> None:
+    import asyncio
+
+    app, _repo, mock_ib = _build_test_app(tmp_path)
+    corridor = app.state.service.corridor
+    stream_contracts = [SimpleNamespace(conId=900 + i) for i in range(60)]
+    session = SimpleNamespace(
+        session_id="tab-2",
+        stop_event=asyncio.Event(),
+        cleaned_up=False,
+        subscribed_contracts=stream_contracts,
+        ib=mock_ib,
+    )
+    corridor._active_sessions["tab-2"] = session
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            assert any(
+                "Stopped the corridor stream (60" in n for n in r_ok.json()["meta"]["notices"]
+            )
+
+    run_coro(_exercise())
+    assert corridor.active_stream_count == 0
+    # The 60 stream lines were cancelled before the first option page was subscribed
+    assert mock_ib.cancelled[:60] == stream_contracts
+
+
+# ------------------------------------------------------------------ scheduled collection
+def test_collector_status_and_settings_persist_across_restart(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r0 = await client.get("/api/collector/status")
+            assert r0.status_code == 200
+            st0 = r0.json()
+            assert st0["enabled"] is False and st0["restored_on_startup"] is False
+            assert [(t["symbol"], t["range_pct"], t["strike_step"]) for t in st0["tickers"]] == [
+                ("NVDA", 0.35, 5.0),
+                ("AVGO", 0.35, 10.0),
+            ]
+            assert st0["calendar_source_url"] == "https://www.nyse.com/markets/hours-calendars"
+
+            body = {
+                "enabled": True,
+                "interval_min": 30,
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.35,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                    {
+                        "symbol": "aapl",
+                        "range_pct": 0.20,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                ],
+            }
+            r1 = await client.put("/api/collector/settings", json=body)
+            assert r1.status_code == 200, r1.text
+            st1 = r1.json()
+            assert st1["enabled"] is True and st1["interval_min"] == 30
+            assert [t["symbol"] for t in st1["tickers"]] == ["NVDA", "AAPL"]
+            assert all(t["pinned_since_utc"] for t in st1["tickers"])
+
+    run_coro(_exercise())
+    assert (tmp_path / "data" / "metadata" / "collector_settings.json").is_file()
+    assert not any((tmp_path / "data" / "snapshots").rglob("collector*"))
+
+    app2, _repo2, _ = _build_test_app(tmp_path / "restart-copy")
+    # Simulate a restart on the same data directory.
+    restarted = create_app(
+        settings=app2.state.service.settings,
+        repo=CSVRepository(StorageSettings(), root=tmp_path),
+        broker_client=app2.state.service.broker_client,
+        fetcher=app2.state.service.fetcher,
+    )
+
+    async def _after_restart() -> None:
+        transport = httpx.ASGITransport(app=restarted)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            st = (await client.get("/api/collector/status")).json()
+            assert st["enabled"] is True and st["restored_on_startup"] is True
+            assert [t["symbol"] for t in st["tickers"]] == ["NVDA", "AAPL"]
+
+    run_coro(_after_restart())
+
+
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        ({"interval_min": 45}, 422),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "../etc",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.33,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 7.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 90,
+                        "dte_max": 30,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 121,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                    {
+                        "symbol": "nvda",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": s,
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                    for s in ("A", "B", "C", "D", "E", "F", "G")
+                ]
+            },
+            422,
+        ),
+    ],
+)
+def test_collector_settings_validation(tmp_path: Path, change: dict[str, Any], status: int) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+    body: dict[str, Any] = {"enabled": True, "interval_min": 60, "tickers": []}
+    body.update(change)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.put("/api/collector/settings", json=body)
+            assert r.status_code == status, r.text
+
+    run_coro(_exercise())
+    assert not (tmp_path / "data" / "metadata" / "collector_settings.json").exists()
+
+
+def test_manual_refresh_reports_a_running_collection_cycle(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+    svc = app.state.service
+    assert run_coro(svc.acquire_refresh("collector", 1.0)) is True
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/refresh", json={"ticker": "NVDA", "range_pct": 0.2})
+            assert r.status_code == 409
+            body = r.json()
+            assert body["error_code"] == "COLLECTOR_BUSY"
+            assert body["retry_after_sec"] > 0
+            assert "Waiting for scheduled collection" in body["message"]
+            r_bad = await client.post("/api/refresh", json={"ticker": "../etc", "range_pct": 0.2})
+            assert r_bad.status_code == 422  # validation still comes first
+
+    run_coro(_exercise())
+    svc.release_refresh()
+    assert svc.refresh_lock.locked() is False
+
+
+def test_scheduled_cycle_uses_the_real_refresh_path(tmp_path: Path) -> None:
+    import asyncio
+
+    from src.core.calendar import Slot
+    from src.storage.collector_store import CollectorSettings, TickerPin
+
+    app, repo, _ = _build_test_app(tmp_path)
+    collector = app.state.service.get_collector()
+    collector.settings = CollectorSettings(
+        enabled=True,
+        tickers=[
+            TickerPin(symbol="NVDA", range_pct=0.20, strike_step=5.0, dte_min=30, dte_max=120)
+        ],
+    )
+    slot = Slot("INTERVAL", datetime(2026, 11, 11, 16, 0, 0, tzinfo=UTC))
+    records = asyncio.run(collector.run_slot(slot))
+
+    assert [(r.status, r.pin_drift, r.snapshot_id) for r in records] == [
+        ("OK", False, "NVDA_20261111_160000")
+    ]
+    meta = next(m for m in repo.list_snapshots("NVDA") if m.snapshot_id == "NVDA_20261111_160000")
+    assert meta.collection_mode == "SCHEDULED"
+    assert meta.range_pct == pytest.approx(0.20)
+    assert app.state.service.refresh_lock.locked() is False
+    snap_files = list((tmp_path / "data" / "snapshots").rglob("*"))
+    assert not [p for p in snap_files if p.name.startswith(".") or p.suffix == ".tmp"]
+
+
+# ------------------------------------------------------------------ position tracker
+_TRACK_EXPIRY = "2026-12-18"  # seeded snapshot: 2026-11-11 + 37 days
+_TRACK_BODY: dict[str, Any] = {
+    "ticker": "NVDA",
+    "snapshot_id": "NVDA_20261111_150000",
+    "legs": [
+        {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 140.0},
+        {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+    ],
+}
+
+
+def test_tracker_endpoints_register_list_and_stop(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            empty = (await client.get("/api/tracker/spreads")).json()
+            assert empty == {"active_count": 0, "max_active_spreads": 120, "spreads": []}
+
+            r = await client.post("/api/tracker/spreads", json=_TRACK_BODY)
+            assert r.status_code == 201, r.text
+            spread = r.json()
+            assert spread["source"] == "USER" and spread["status"] == "ACTIVE"
+            assert [leg["strike"] for leg in spread["legs"]] == [140.0, 135.0]
+            assert all(leg["option_conid"] > 0 for leg in spread["legs"])
+
+            dup = await client.post("/api/tracker/spreads", json=_TRACK_BODY)
+            assert dup.status_code == 409
+
+            listed = (await client.get("/api/tracker/spreads?status=ACTIVE")).json()
+            assert listed["active_count"] == 1 and listed["spreads"][0]["id"] == spread["id"]
+            assert listed["spreads"][0]["last_quote_utc"] is None
+
+            st = (await client.get("/api/collector/status")).json()
+            assert st["tracker"]["active_count"] == 1
+            assert st["tracker"]["max_active_spreads"] == 120
+            assert st["tracker"]["last_result"] is None
+
+            stop = await client.post(f"/api/tracker/spreads/{spread['id']}/stop")
+            assert stop.status_code == 200 and stop.json()["status"] == "STOPPED"
+            again = await client.post(f"/api/tracker/spreads/{spread['id']}/stop")
+            assert again.status_code == 409
+            unknown = await client.post("/api/tracker/spreads/NVDA-20261111-0000abcd/stop")
+            assert unknown.status_code == 404
+            bad_id = await client.post("/api/tracker/spreads/..%2Fx/stop")
+            assert bad_id.status_code in (404, 422)
+            stopped = (await client.get("/api/tracker/spreads?status=STOPPED")).json()
+            assert [s["id"] for s in stopped["spreads"]] == [spread["id"]]
+
+    run_coro(_exercise())
+    assert (tmp_path / "data" / "metadata" / "tracked_spreads.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        ({"ticker": "nvda1"}, 422),
+        ({"ticker": "AVGO", "snapshot_id": "AVGO_20261111_150000"}, 404),
+        ({"snapshot_id": "NVDA_20261111_150001"}, 404),
+        ({"snapshot_id": "../etc"}, 422),
+        ({"legs": []}, 422),
+        ({"extra": 1}, 422),
+        (
+            {
+                "legs": [
+                    {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+                    {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 140.0},
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "legs": [
+                    {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 141.0},
+                    {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+                ]
+            },
+            422,
+        ),
+    ],
+)
+def test_tracker_register_validation(tmp_path: Path, change: dict[str, Any], status: int) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> int:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/tracker/spreads", json={**_TRACK_BODY, **change})
+            return r.status_code
+
+    assert run_coro(_exercise()) == status
+    assert not (tmp_path / "data" / "metadata" / "tracked_spreads.json").exists()
+
+
+def test_scheduled_cycle_quotes_tracked_legs_through_the_broker(tmp_path: Path) -> None:
+    import asyncio
+
+    from src.core.calendar import Slot
+    from src.storage.collector_store import CollectorSettings, TickerPin
+
+    app, _repo, mock_ib = _build_test_app(tmp_path)
+    subscribed: list[Any] = []
+    real_req = mock_ib.reqMktData
+
+    def _recording_req(contract: Any, *args: Any, **kwargs: Any) -> Any:
+        subscribed.append(contract)
+        return real_req(contract, *args, **kwargs)
+
+    mock_ib.reqMktData = _recording_req  # type: ignore[method-assign]
+    svc = app.state.service
+    tracker = svc.get_tracker()
+    spread = tracker.register_user(
+        "NVDA",
+        "NVDA_20261111_150000",
+        [StrategyLegInput.model_validate(leg) for leg in _TRACK_BODY["legs"]],
+    )
+    leg_conids = {leg.option_conid for leg in spread.legs}
+    collector = svc.get_collector()
+    collector.settings = CollectorSettings(
+        enabled=True,
+        tickers=[
+            TickerPin(symbol="NVDA", range_pct=0.20, strike_step=5.0, dte_min=30, dte_max=120)
+        ],
+    )
+    slot = Slot("INTERVAL", datetime(2026, 11, 11, 16, 0, 0, tzinfo=UTC))
+    asyncio.run(collector.run_slot(slot))
+
+    runs = [r for r in tracker.store.read_runs() if r.kind == "QUOTE"]
+    assert [(r.spread_id, r.status, r.spot_source) for r in runs] == [
+        (spread.id, "OK", runs[0].spot_source)
+    ]
+    assert runs[0].underlying_price and runs[0].market_data_type in (1, 2, 3, 4)
+    files = list((tmp_path / "data" / "tracked" / "NVDA").glob("*.csv"))
+    assert len(files) == 1
+    # The tracker's option subscriptions are exactly the two leg conIds.
+    option_subs = [c for c in subscribed if getattr(c, "secType", "") == "OPT"]
+    assert {getattr(c, "conId", 0) for c in option_subs[-2:]} == leg_conids
+    assert getattr(subscribed[-3], "secType", "") == "STK"  # tracker spot, then the two legs
+    assert all(c in mock_ib.cancelled for c in subscribed)
+    assert svc.refresh_lock.locked() is False
+
+
+# ------------------------------------------------------------------ backtest panel API
+@pytest.fixture(autouse=True)
+def _backtest_inline_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the backtest API's worker-thread calls inline (these tests use no real event loop)."""
+    from src.web import backtest_api
+
+    async def _inline(func: Callable[..., Any], *args: Any) -> Any:
+        return func(*args)
+
+    monkeypatch.setattr(backtest_api, "_in_thread", _inline)
+
+
+def _backtest_app(world: Any, **tracker_cfg: Any) -> Any:
+    from src.core.config import TrackerSettings
+
+    settings = Settings(storage=StorageSettings(), tracker=TrackerSettings(**tracker_cfg))
+    client = IBKRBrokerClient(settings, ib_factory=lambda: _MockIB(offline=True))
+    return create_app(settings=settings, repo=world.repo, broker_client=client)
+
+
+def _bt_post(app: Any, body: dict[str, Any]) -> httpx.Response:
+    async def _go() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/api/backtest/run", json=body)
+
+    return run_coro(_go())
+
+
+def _bt_get(app: Any, url: str) -> httpx.Response:
+    async def _go() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(url)
+
+    return run_coro(_go())
+
+
+def _legs_body(world: Any, **change: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "source": "LEGS",
+        "ticker": "NVDA",
+        "entry_snapshot_id": world.entry_id,
+        "expiry": "2026-12-18",
+        "short_strike": 100.0,
+        "long_strike": 95.0,
+        "qty": 1,
+    }
+    body.update(change)
+    return body
+
+
+def test_backtest_entries_are_newest_first_with_quality(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World
+
+    w = World(tmp_path)
+    later = w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",), md_type=4)
+    body = _bt_get(_backtest_app(w), "/api/backtest/entries/nvda").json()
+    assert body["ticker"] == "NVDA"
+    assert [e["snapshot_id"] for e in body["entries"]] == [later, w.entry_id]
+    newest = body["entries"][0]
+    assert newest["usable"] is False
+    assert any("market_data_type" in r for r in newest["quality_reasons"])
+    assert body["entries"][1]["usable"] is True
+    assert newest["ts_et"].endswith(" ET") and newest["ts_poland"].endswith(" PL")
+    assert _bt_get(_backtest_app(w), "/api/backtest/entries/NVDA1").status_code == 422
+
+
+def test_backtest_my_spread_open_trade(tmp_path: Path) -> None:
+    from tests.unit.test_backtest import ENTRY_QUOTES
+    from tests.unit.test_backtest_tracked import World, _et
+
+    w = World(tmp_path)
+    w.snapshot(_et(date(2026, 11, 20), 11, 45), 103.0, ENTRY_QUOTES)
+    r = _bt_post(_backtest_app(w), _legs_body(w, qty=2))
+    assert r.status_code == 200, r.text
+    data = r.json()
+    res = data["result"]
+    assert data["source"] == "LEGS" and data["outcome"] == "OPEN"
+    assert [(leg["side"], leg["strike"], leg["qty"]) for leg in res["entry"]["legs"]] == [
+        ("SELL", 100.0, 2),
+        ("BUY", 95.0, 2),
+    ]
+    assert res["entry"]["entry_cash_mid_dollars"] == pytest.approx(220.0)
+    assert len(data["ts_poland"]) == len(res["steps"]) == 2
+    assert [x["code"] for x in data["warnings"]] == ["TRADE_OPEN"]
+    assert data["tracked"] is None
+    assert data["collector"] == {"enabled": False, "ever_enabled": True}
+    assert data["days_held"] == pytest.approx(4.0, abs=0.01)
+    assert res["summary"]["steps_gap"] == 0
+    assert len(data["assumptions"]) == 6
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "fragment"),
+    [
+        ({"long_strike": 105.0}, 422, "below the short"),
+        ({"short_strike": 101.0}, 422, "not found"),
+        ({"ticker": "NVDA1"}, 422, ""),
+        ({"entry_snapshot_id": "NVDA_20261116_000000"}, 404, ""),
+        ({"qty": 101}, 422, ""),
+        ({"expiry": None}, 422, "needs expiry"),
+    ],
+)
+def test_backtest_my_spread_validation(
+    tmp_path: Path, change: dict[str, Any], status: int, fragment: str
+) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    r = _bt_post(_backtest_app(w), _legs_body(w, **change))
+    assert r.status_code == status, r.text
+    assert fragment.lower() in r.text.lower()
+
+
+def test_backtest_auto_build_and_no_valid_spread(tmp_path: Path) -> None:
+    import polars as pl
+
+    from tests.unit.test_backtest import _auto_chain
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    first = _auto_chain("2026-11-11T15:30:00", 100.0)
+    w.repo.save_snapshot("NVDA", first.to_dicts(), spot_source="LAST")
+    w.repo.save_snapshot(
+        "NVDA", _auto_chain("2026-11-11T18:30:00", 103.0).to_dicts(), spot_source="LAST"
+    )
+    sid = str(first["snapshot_id"][0])
+    app = _backtest_app(w)
+    r = _bt_post(app, {"source": "AUTO_BUILD", "ticker": "NVDA", "entry_snapshot_id": sid})
+    assert r.status_code == 200, r.text
+    entry = r.json()["result"]["entry"]
+    assert [leg["side"] for leg in entry["legs"]] == ["SELL", "BUY"] and entry["rationale"]
+
+    calls_only = _auto_chain("2026-11-11T20:30:00", 100.0).filter(pl.col("right") == "C")
+    w.repo.save_snapshot("NVDA", calls_only.to_dicts(), spot_source="LAST")
+    bad = _bt_post(
+        app,
+        {"source": "AUTO_BUILD", "ticker": "NVDA", "entry_snapshot_id": "NVDA_20261111_203000"},
+    )
+    assert bad.status_code == 422 and "no valid bull put spread" in bad.text
+
+
+def test_backtest_single_snapshot_warns_few_snapshots(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    codes = [x["code"] for x in data["warnings"]]
+    assert "FEW_SNAPSHOTS" in codes and "TRADE_OPEN" in codes
+    assert data["history_snapshot_count"] == 1
+
+
+def test_backtest_settled_and_unresolved(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World, _et
+
+    expiry = date(2026, 12, 18)
+    w = World(tmp_path / "settled")
+    w.snapshot(_et(expiry, 16, 15), 104.0, expiries=("2027-01-15",))
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    s = data["result"]["settlement"]
+    assert data["outcome"] == "SETTLED" and s["spot_from"] == "SNAPSHOT"
+    assert (s["spot"], s["spot_source"], s["market_data_type"]) == (104.0, "LAST", 3)
+    assert data["settlement_ts_poland"] == "2026-12-18 22:15 PL"
+
+    w2 = World(tmp_path / "unresolved")
+    w2.snapshot(_et(expiry, 16, 5), 104.0, expiries=("2027-01-15",), scheduled=False)
+    w2.snapshot(_et(date(2026, 12, 21), 10, 0), 104.0, expiries=("2027-01-15",), scheduled=False)
+    data2 = _bt_post(_backtest_app(w2), _legs_body(w2)).json()
+    assert data2["outcome"] == "UNRESOLVED"
+    assert "SETTLEMENT_UNRESOLVED" in [x["code"] for x in data2["warnings"]]
+
+
+def test_backtest_tracked_spread_by_id_and_already_tracked(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, SPREAD_ID, World
+
+    w = World(tmp_path)
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    w.track(SLOT_OUT)
+    app = _backtest_app(w)
+    by_id = _bt_post(app, {"source": "TRACKED", "spread_id": SPREAD_ID})
+    assert by_id.status_code == 200, by_id.text
+    legs = _bt_post(app, _legs_body(w)).json()
+    assert by_id.json()["result"] == legs["result"]  # same as mode A with the registry legs
+    assert legs["tracked"] == {"spread_id": SPREAD_ID, "source": "USER", "status": "ACTIVE"}
+    assert legs["result"]["reproducibility"]["tracked_data_used"] is True
+    unknown = _bt_post(app, {"source": "TRACKED", "spread_id": "NVDA-20261116-00000000"})
+    assert unknown.status_code == 404
+    assert _bt_post(app, {"source": "TRACKED"}).status_code == 422
+
+
+def test_backtest_passes_tracked_dir_and_serializes_gap_steps(tmp_path: Path) -> None:
+    from src.storage.tracker_store import TrackerStore
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World, _et
+
+    w = World(tmp_path)
+    w.tracker = TrackerStore(w.repo.index_path.parent, tmp_path / "data" / "tracked_alt")
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    tid = w.track(SLOT_OUT)
+    w.track(_et(date(2026, 11, 25), 13, 45), status="MISSED", write_file=False)
+    data = _bt_post(_backtest_app(w, tracked_dir="data/tracked_alt"), _legs_body(w)).json()
+    res = data["result"]
+    assert res["reproducibility"]["tracked_files"] == [tid]  # read from the configured folder
+    gap = next(s for s in res["steps"] if s["kind"] == "GAP")
+    assert (gap["spot"], gap["market_data_type"], gap["quote_coverage"]) == (None, None, None)
+    assert gap["pnl_dollars"] is None and gap["status"] == "INCOMPLETE"
+    assert res["summary"]["steps_gap"] == 1
+    # With the default folder the tracked file is not found: the leg stays missing.
+    default = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    assert default["result"]["reproducibility"]["tracked_files"] == []
+
+
+def test_backtest_warns_when_the_collector_log_is_missing(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World
+
+    w = World(tmp_path)
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    w.track(SLOT_OUT)
+    (tmp_path / "data" / "metadata" / "collector_runs.jsonl").unlink()
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    assert "COLLECTOR_LOG_MISSING" in [x["code"] for x in data["warnings"]]
+    kinds = [s["kind"] for s in data["result"]["steps"]]
+    assert kinds.count("TRACKED_ONLY") == 1  # the doubled step the warning explains
+
+
+def test_tracking_the_same_legs_twice_is_refused(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    app = _backtest_app(w)
+    body = {
+        "ticker": "NVDA",
+        "snapshot_id": w.entry_id,
+        "legs": [
+            {"side": "SELL", "right": "P", "expiry": "2026-12-18", "strike": 100.0},
+            {"side": "BUY", "right": "P", "expiry": "2026-12-18", "strike": 95.0},
+        ],
+    }
+
+    async def _go() -> tuple[int, int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            a = await client.post("/api/tracker/spreads", json=body)
+            b = await client.post("/api/tracker/spreads", json=body)
+            return a.status_code, b.status_code
+
+    assert run_coro(_go()) == (201, 409)
+    data = _bt_post(app, _legs_body(w)).json()
+    assert data["tracked"] is not None and data["tracked"]["status"] == "ACTIVE"

@@ -53,6 +53,16 @@ def normalize_right(raw: str) -> Literal["C", "P"]:
     raise ValueError(f"Option right must be 'C' or 'P', got {raw!r}")
 
 
+def has_real_quote(ticker: Any) -> bool:
+    """Return True if the contract has a current quote: a valid positive `bid` or `ask`.
+
+    `last` and `close` do not count (`close` is the previous session). A zero or `-1` bid is an
+    IBKR "no bid" value, so a far out-of-the-money option with bid `0` and a valid ask still
+    counts as quoted.
+    """
+    return any(sanitize_price(getattr(ticker, attr, None)) is not None for attr in ("bid", "ask"))
+
+
 def has_usable_quote(ticker: Any) -> bool:
     """Return True if at least one of `bid`, `ask`, `last`, or `close` is a valid positive price."""
     return any(

@@ -1,6 +1,13 @@
 /* IBKR Options Analyzer dashboard — Network requests: status, chain loading, refresh and snapshot fetches. */
 
 import {
+  REFRESH_COLLECTOR_WAIT_MS,
+  postRefreshWaitingForCollector,
+} from "./collector.js";
+import {
+  backtestOnSnapshotsLoaded,
+} from "./backtest.js";
+import {
   bootstrap,
   dom,
   state,
@@ -143,9 +150,10 @@ async function fetchSnapshots(ticker) {
   var res = await apiJson("/api/snapshots/" + encodeURIComponent(ticker));
   if (res.ok && res.body) {
     renderSnapshotSelect(res.body);
-    return;
+  } else {
+    renderSnapshotSelect({ snapshots: [] });
   }
-  renderSnapshotSelect({ snapshots: [] });
+  backtestOnSnapshotsLoaded(ticker);
 }
 
 export async function loadChain(ticker, snapshotId) {
@@ -283,22 +291,17 @@ export async function refreshFromIBKR() {
     // Stage 1: HTTP / IBKR Gateway Pull
     var res;
     try {
-      res = await apiJson("/api/refresh", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        timeoutMs: 120000,
-        body: JSON.stringify({
-          ticker: state.ticker,
-          range_pct: rangeVal,
-          strike_step: stepVal,
-          dte_min:
-            state.status && state.status.dte_min !== null && state.status.dte_min !== undefined
-              ? Number(state.status.dte_min)
-              : bootstrap.dteMin !== null && bootstrap.dteMin !== undefined
-                ? Number(bootstrap.dteMin)
-                : 30,
-          dte_max: dteMaxVal,
-        }),
+      res = await postRefreshWaitingForCollector({
+        ticker: state.ticker,
+        range_pct: rangeVal,
+        strike_step: stepVal,
+        dte_min:
+          state.status && state.status.dte_min !== null && state.status.dte_min !== undefined
+            ? Number(state.status.dte_min)
+            : bootstrap.dteMin !== null && bootstrap.dteMin !== undefined
+              ? Number(bootstrap.dteMin)
+              : 30,
+        dte_max: dteMaxVal,
       });
     } catch (httpErr) {
       await fetchStatus();
@@ -322,6 +325,17 @@ export async function refreshFromIBKR() {
             gatewayAddressLabel() +
             ") and FastAPI server availability; cached snapshot remains active.",
       });
+      return;
+    }
+
+    if (res.collectorWaitTimedOut) {
+      showBanner(
+        "warn",
+        "Scheduled collection was still running after " +
+          Math.round(REFRESH_COLLECTOR_WAIT_MS / 60000) +
+          " minutes; your refresh was not sent. Try again shortly.",
+        { ticker: state.ticker, pullScope: pullScope, phase: "REFRESH_WAIT", status: res.status }
+      );
       return;
     }
 

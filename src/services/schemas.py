@@ -20,11 +20,15 @@ from src.analytics.strategies import (
 from src.analytics.term_greeks import MultiDTEProfilesReport
 from src.analytics.walls import ChainWallsReport
 from src.broker.corridor import CorridorLegRef, CorridorQuoteFrame
-from src.storage.schema import SnapshotMeta
+from src.storage.collector_store import MAX_COLLECTOR_TICKERS
+from src.storage.schema import CollectionMode, SnapshotMeta, SpotSource
+from src.storage.tracker_store import SpreadStatus, TrackedSpread
 
 __all__ = [
     "ChainAnalyticsResponse",
     "ChainMetadataPayload",
+    "CollectorSettingsRequest",
+    "CollectorTickerInput",
     "CorridorLegRef",
     "CorridorQuoteFrame",
     "CorridorQuotesRequest",
@@ -32,11 +36,15 @@ __all__ = [
     "GatewayStatusResponse",
     "RefreshRequest",
     "SnapshotsListResponse",
+    "SpreadStatus",
     "StrategyEvaluateRequest",
     "StrategyEvaluationResponse",
     "StrategySuggestRequest",
     "StrategySuggestResponse",
     "SystemStatusResponse",
+    "TrackSpreadRequest",
+    "TrackedSpread",
+    "TrackedSpreadsResponse",
 ]
 
 
@@ -106,6 +114,11 @@ class ChainMetadataPayload(BaseModel):
     greeks_source_counts: dict[str, int]
     source: Literal["CACHE", "LIVE_REFRESH"]
     notices: list[str] = Field(default_factory=list)
+    spot_source: SpotSource | None = None
+    quoted_contract_count: int | None = None
+    quote_coverage: float | None = None
+    prior_close_only_count: int | None = None
+    collection_mode: CollectionMode | None = None
 
 
 class ChainAnalyticsResponse(BaseModel):
@@ -136,6 +149,48 @@ class RefreshRequest(BaseModel):
         if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
             raise ValueError("dte_min must be <= dte_max")
         return self
+
+
+class CollectorTickerInput(BaseModel):
+    """One collected ticker with its pinned refresh parameters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    range_pct: float
+    strike_step: float
+    dte_min: int = Field(ge=0, le=120)
+    dte_max: int = Field(ge=1, le=120)
+
+
+class CollectorSettingsRequest(BaseModel):
+    """Request body for `PUT /api/collector/settings`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    interval_min: int
+    tickers: list[CollectorTickerInput] = Field(max_length=MAX_COLLECTOR_TICKERS)
+
+
+class TrackSpreadRequest(BaseModel):
+    """Request body for `POST /api/tracker/spreads` (a user-held bull put spread)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str = Field(min_length=1, max_length=10)
+    snapshot_id: str = Field(pattern=r"^[A-Z]{1,5}_\d{8}_\d{6}$")
+    legs: list[StrategyLegInput] = Field(min_length=1, max_length=4)
+
+
+class TrackedSpreadsResponse(BaseModel):
+    """Response for `GET /api/tracker/spreads`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_count: int
+    max_active_spreads: int
+    spreads: list[TrackedSpread]
 
 
 class StrategySuggestRequest(BaseModel):

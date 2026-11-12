@@ -78,3 +78,9 @@ storage:
   latest_dir: "data/latest"
   metadata_index_file: "data/metadata/snapshot_index.json"
   logs_dir: "data/logs"   # rotating analyzer.log lives here
+
+tracker:
+  max_active_spreads: 120        # cap on ACTIVE tracked spreads (1-200); AUTO picks skipped at the cap
+  auto_pick: true                # register the Strategy Lab BULL_PUT_SPREAD pick once per ticker per day
+  auto_pick_not_before_et: "10:45"  # first usable snapshot at/after this ET time (opening quotes are noisy)
+  tracked_dir: "data/tracked"    # inside data/, never data/snapshots

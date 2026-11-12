@@ -148,6 +148,10 @@ def test_client_configured_types_ticker_observation_and_live_midpage_downgrade()
         return SimpleNamespace(
             contract=contract,
             marketDataType=3,
+            # ib_async maps delayed ticks 66/67/68 onto Ticker.bid / ask / last.
+            bid=4.1,
+            ask=4.3,
+            last=4.2,
             delayedBid=4.1,
             delayedAsk=4.3,
             delayedLast=4.2,

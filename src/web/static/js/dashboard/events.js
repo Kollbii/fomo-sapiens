@@ -1,6 +1,16 @@
 /* IBKR Options Analyzer dashboard — DOM event bindings for controls, panels, table and Strategy Lab. */
 
 import {
+  btRenderChart,
+  wireBacktest,
+} from "./backtest.js";
+import {
+  wireCollector,
+} from "./collector.js";
+import {
+  wireSnapshotPicker,
+} from "./snapshots.js";
+import {
   DEFAULT_PANEL_VISIBILITY,
   STRATEGY_AUTO_POPULATE_KEY,
   cloneDefaultPanelVisibility,
@@ -63,6 +73,9 @@ import {
 
 // ------------------------------------------------------------------ Event Bindings
 export function bindEvents() {
+  wireSnapshotPicker();
+  wireCollector();
+  wireBacktest();
   if (dom.themeToggle) {
     dom.themeToggle.addEventListener("click", function () {
       var next = currentTheme() === "terminal" ? "print" : "terminal";
@@ -76,6 +89,7 @@ export function bindEvents() {
       if (state.chainData) {
         renderAllCharts(state.chainData);
       }
+      btRenderChart();
     });
   }
 

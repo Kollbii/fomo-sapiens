@@ -1,0 +1,2922 @@
+{
+ "auto_build": {
+  "entry": {
+   "breakevens": [
+    89.38
+   ],
+   "entry_cash_mid_dollars": 62.0,
+   "entry_cash_natural_dollars": 52.0,
+   "legs": [
+    {
+     "ask": 0.99,
+     "bid": 0.89,
+     "delta": -0.1518,
+     "dte": 38,
+     "expiry": "2026-12-19",
+     "gamma": 0.02081,
+     "iv": 0.35,
+     "mid": 0.94,
+     "natural_fill": 0.89,
+     "open_interest": 12000,
+     "option_conid": 500006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": "Short Put near Put Wall $90",
+     "side": "SELL",
+     "spread_pct": 10.64,
+     "strike": 90.0,
+     "theta": -0.033,
+     "vega": 0.0758,
+     "volume": 3400
+    },
+    {
+     "ask": 0.37,
+     "bid": 0.27,
+     "delta": -0.0624,
+     "dte": 38,
+     "expiry": "2026-12-19",
+     "gamma": 0.01088,
+     "iv": 0.35,
+     "mid": 0.32,
+     "natural_fill": 0.37,
+     "open_interest": 400,
+     "option_conid": 500004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": "Protective Put wing",
+     "side": "BUY",
+     "spread_pct": 31.25,
+     "strike": 85.0,
+     "theta": -0.0175,
+     "vega": 0.0396,
+     "volume": 120
+    }
+   ],
+   "max_loss_dollars": 438.0,
+   "max_profit_dollars": 62.0,
+   "natural_slippage_dollars": 10.0,
+   "net_mid_per_share": 0.62,
+   "rationale": [
+    "Short Put $90 anchored to Put Wall $90 (Delta=-0.15, Mid=$0.94).",
+    "Long Put wing $85 caps risk across $5 spread width."
+   ],
+   "snapshot_id": "NVDA_20261111_153000",
+   "spot": 100.0,
+   "ts_et": "2026-11-11 10:30 ET",
+   "ts_utc": "2026-11-11T15:30:00Z"
+  },
+  "mode": "AUTO_BUILD",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261111_153000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261111_153000",
+    "NVDA_20261111_183000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-19",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 0.99,
+      "bid": 0.89,
+      "delta": -0.15183176670184184,
+      "expiry": "2026-12-19",
+      "gamma": 0.020813591956177855,
+      "price": 0.94,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 90.0,
+      "theta": -0.033049800294807155,
+      "vega": 0.07584130767593575
+     },
+     {
+      "ask": 0.37,
+      "bid": 0.27,
+      "delta": -0.06242332869387113,
+      "expiry": "2026-12-19",
+      "gamma": 0.010879761248197102,
+      "price": 0.32,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 85.0,
+      "theta": -0.01749308578138325,
+      "vega": 0.039644061534526424
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-11",
+    "net_greeks": {
+     "delta_shares": 8.94,
+     "gamma_shares": -0.99,
+     "theta_daily_dollars": 1.56,
+     "vega_per_1pct_dollars": -3.62
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -62.0,
+    "quote_coverage": 1.0,
+    "short_dte": 38,
+    "snapshot_id": "NVDA_20261111_153000",
+    "spot": 100.0,
+    "spot_source": null,
+    "spread_value_per_share": 0.62,
+    "status": "OK",
+    "ts_et": "2026-11-11 10:30 ET",
+    "ts_utc": "2026-11-11T15:30:00Z"
+   },
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 0.62,
+      "bid": 0.52,
+      "delta": -0.09846443981569553,
+      "expiry": "2026-12-19",
+      "gamma": 0.014917915311366872,
+      "price": 0.57,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 90.0,
+      "theta": -0.025311115551855293,
+      "vega": 0.05766885959066499
+     },
+     {
+      "ask": 0.22,
+      "bid": 0.12,
+      "delta": -0.036208607119890046,
+      "expiry": "2026-12-19",
+      "gamma": 0.006830405334565364,
+      "price": 0.17,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 85.0,
+      "theta": -0.011705433531972254,
+      "vega": 0.026404606673577326
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-11",
+    "net_greeks": {
+     "delta_shares": 6.23,
+     "gamma_shares": -0.81,
+     "theta_daily_dollars": 1.36,
+     "vega_per_1pct_dollars": -3.13
+    },
+    "pnl_dollars": 22.0,
+    "pnl_pct_of_max_risk": 5.02,
+    "position_value_dollars": -40.0,
+    "quote_coverage": 1.0,
+    "short_dte": 38,
+    "snapshot_id": "NVDA_20261111_183000",
+    "spot": 103.0,
+    "spot_source": null,
+    "spread_value_per_share": 0.4,
+    "status": "OK",
+    "ts_et": "2026-11-11 13:30 ET",
+    "ts_utc": "2026-11-11T18:30:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 22.0,
+   "last_ok_snapshot_id": "NVDA_20261111_183000",
+   "max_ok_pnl_dollars": 22.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 2,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "entry_only": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [
+   "Only the entry snapshot is available; there are no later steps."
+  ],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 1,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "fallback_and_quality": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_233000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED",
+     "FROZEN_DATA",
+     "LEG_FALLBACK_PRICE",
+     "LOW_QUOTE_COVERAGE",
+     "OFF_SESSION",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 1.6,
+      "bid": 1.4,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.5,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": null,
+      "bid": null,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 0.7,
+      "price_source": "LAST",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 4,
+    "market_date": "2026-11-20",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 30.0,
+    "pnl_pct_of_max_risk": 7.69,
+    "position_value_dollars": -80.0,
+    "quote_coverage": 0.1,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_233000",
+    "spot": 104.0,
+    "spot_source": null,
+    "spread_value_per_share": 0.8,
+    "status": "UNRELIABLE",
+    "ts_et": "2026-11-20 18:30 ET",
+    "ts_utc": "2026-11-20T23:30:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 2,
+   "steps_unreliable": 1
+  },
+  "ticker": "NVDA"
+ },
+ "from_repo": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_180000",
+    "NVDA_20261218_213000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": 0.0,
+   "note": "Settled at intrinsic value using the closing-time spot of the expiry date.",
+   "pnl_dollars": 110.0,
+   "pnl_pct_of_max_risk": 28.21,
+   "snapshot_id": "NVDA_20261218_213000",
+   "spot": 104.0,
+   "status": "SETTLED",
+   "ts_et": "2026-12-18 16:30 ET"
+  },
+  "steps": [
+   {
+    "flags": [],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": "LAST",
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED"
+    ],
+    "legs": [
+     {
+      "ask": 1.05,
+      "bid": 0.95,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 0.45,
+      "bid": 0.35,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 0.4,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-20",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 50.0,
+    "pnl_pct_of_max_risk": 12.82,
+    "position_value_dollars": -60.0,
+    "quote_coverage": 1.0,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_180000",
+    "spot": 106.0,
+    "spot_source": "MID",
+    "spread_value_per_share": 0.6,
+    "status": "OK",
+    "ts_et": "2026-11-20 13:00 ET",
+    "ts_utc": "2026-11-20T18:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 50.0,
+   "last_ok_snapshot_id": "NVDA_20261120_180000",
+   "max_ok_pnl_dollars": 50.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 2,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "losing": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_180000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 4.1,
+      "bid": 3.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 4.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.6,
+      "bid": 1.4,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.5,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-20",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": -140.0,
+    "pnl_pct_of_max_risk": -35.9,
+    "position_value_dollars": -250.0,
+    "quote_coverage": 1.0,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_180000",
+    "spot": 97.0,
+    "spot_source": null,
+    "spread_value_per_share": 2.5,
+    "status": "OK",
+    "ts_et": "2026-11-20 13:00 ET",
+    "ts_utc": "2026-11-20T18:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": -140.0,
+   "last_ok_snapshot_id": "NVDA_20261120_180000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": -140.0,
+   "steps_incomplete": 0,
+   "steps_ok": 2,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "not_listed": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_180000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED",
+     "LEG_MISSING_NOT_LISTED:95P",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.1,
+      "bid": 1.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": null,
+      "bid": null,
+      "delta": null,
+      "expiry": "2026-12-18",
+      "gamma": null,
+      "price": null,
+      "price_source": null,
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "MISSING_NOT_LISTED",
+      "strike": 95.0,
+      "theta": null,
+      "vega": null
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-20",
+    "net_greeks": null,
+    "pnl_dollars": null,
+    "pnl_pct_of_max_risk": null,
+    "position_value_dollars": null,
+    "quote_coverage": 1.0,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_180000",
+    "spot": 101.0,
+    "spot_source": null,
+    "spread_value_per_share": null,
+    "status": "INCOMPLETE",
+    "ts_et": "2026-11-20 13:00 ET",
+    "ts_utc": "2026-11-20T18:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 1,
+   "steps_ok": 1,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "outside_dte_window": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261125_160000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "LEG_MISSING_OUTSIDE_DTE_WINDOW:100P",
+     "LEG_MISSING_OUTSIDE_DTE_WINDOW:95P",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": null,
+      "bid": null,
+      "delta": null,
+      "expiry": "2026-12-18",
+      "gamma": null,
+      "price": null,
+      "price_source": null,
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "MISSING_OUTSIDE_DTE_WINDOW",
+      "strike": 100.0,
+      "theta": null,
+      "vega": null
+     },
+     {
+      "ask": null,
+      "bid": null,
+      "delta": null,
+      "expiry": "2026-12-18",
+      "gamma": null,
+      "price": null,
+      "price_source": null,
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "MISSING_OUTSIDE_DTE_WINDOW",
+      "strike": 95.0,
+      "theta": null,
+      "vega": null
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-25",
+    "net_greeks": null,
+    "pnl_dollars": null,
+    "pnl_pct_of_max_risk": null,
+    "position_value_dollars": null,
+    "quote_coverage": 1.0,
+    "short_dte": 23,
+    "snapshot_id": "NVDA_20261125_160000",
+    "spot": 101.0,
+    "spot_source": null,
+    "spread_value_per_share": null,
+    "status": "INCOMPLETE",
+    "ts_et": "2026-11-25 11:00 ET",
+    "ts_utc": "2026-11-25T16:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 1,
+   "steps_ok": 1,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "qty3": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 330.0,
+   "entry_cash_natural_dollars": 270.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 3,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 3,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 1170.0,
+   "max_profit_dollars": 330.0,
+   "natural_slippage_dollars": 60.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 3,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_180000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 3,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 3,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -330.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 1.05,
+      "bid": 0.95,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 3,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 0.45,
+      "bid": 0.35,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 0.4,
+      "price_source": "BID_ASK",
+      "qty": 3,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-20",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 150.0,
+    "pnl_pct_of_max_risk": 12.82,
+    "position_value_dollars": -180.0,
+    "quote_coverage": 1.0,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_180000",
+    "spot": 106.0,
+    "spot_source": null,
+    "spread_value_per_share": 0.6,
+    "status": "OK",
+    "ts_et": "2026-11-20 13:00 ET",
+    "ts_utc": "2026-11-20T18:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 150.0,
+   "last_ok_snapshot_id": "NVDA_20261120_180000",
+   "max_ok_pnl_dollars": 150.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 2,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "settle_close_spot": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261218_213000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "No snapshot on the expiry date at/after 16:15 ET with a non-CLOSE spot; the settlement price is unknown and was not estimated.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "UNRESOLVED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 1,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "settle_itm": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261218_213000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": 3.0,
+   "note": "Settled at intrinsic value using the closing-time spot of the expiry date.",
+   "pnl_dollars": -190.0,
+   "pnl_pct_of_max_risk": -48.72,
+   "snapshot_id": "NVDA_20261218_213000",
+   "spot": 97.0,
+   "status": "SETTLED",
+   "ts_et": "2026-12-18 16:30 ET"
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 1,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "settle_unresolved": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261218_210500",
+    "NVDA_20261221_150000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "No snapshot on the expiry date at/after 16:15 ET with a non-CLOSE spot; the settlement price is unknown and was not estimated.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "UNRESOLVED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 1,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "settle_worthless": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261218_213000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": 0.0,
+   "note": "Settled at intrinsic value using the closing-time spot of the expiry date.",
+   "pnl_dollars": 110.0,
+   "pnl_pct_of_max_risk": 28.21,
+   "snapshot_id": "NVDA_20261218_213000",
+   "spot": 104.0,
+   "status": "SETTLED",
+   "ts_et": "2026-12-18 16:30 ET"
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 0.0,
+   "last_ok_snapshot_id": "NVDA_20261116_150000",
+   "max_ok_pnl_dollars": 0.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 1,
+   "steps_total": 1,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ },
+ "winning": {
+  "entry": {
+   "breakevens": [
+    98.9
+   ],
+   "entry_cash_mid_dollars": 110.0,
+   "entry_cash_natural_dollars": 90.0,
+   "legs": [
+    {
+     "ask": 2.2,
+     "bid": 2.0,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 2.1,
+     "natural_fill": 2.0,
+     "open_interest": 1000,
+     "option_conid": 1006,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "SELL",
+     "spread_pct": 9.52,
+     "strike": 100.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    },
+    {
+     "ask": 1.1,
+     "bid": 0.9,
+     "delta": -0.3,
+     "dte": 32,
+     "expiry": "2026-12-18",
+     "gamma": 0.02,
+     "iv": 0.3,
+     "mid": 1.0,
+     "natural_fill": 1.1,
+     "open_interest": 1000,
+     "option_conid": 1004,
+     "qty": 1,
+     "right": "P",
+     "selection_reason": null,
+     "side": "BUY",
+     "spread_pct": 20.0,
+     "strike": 95.0,
+     "theta": -0.05,
+     "vega": 0.1,
+     "volume": 100
+    }
+   ],
+   "max_loss_dollars": 390.0,
+   "max_profit_dollars": 110.0,
+   "natural_slippage_dollars": 20.0,
+   "net_mid_per_share": 1.1,
+   "rationale": [
+    "Evaluating 2 user-selected option leg(s)."
+   ],
+   "snapshot_id": "NVDA_20261116_150000",
+   "spot": 102.0,
+   "ts_et": "2026-11-16 10:00 ET",
+   "ts_utc": "2026-11-16T15:00:00Z"
+  },
+  "mode": "LEGS",
+  "notes": [],
+  "qty": 1,
+  "reproducibility": {
+   "end_snapshot_id": null,
+   "engine_version": "1",
+   "entry_snapshot_id": "NVDA_20261116_150000",
+   "quality_thresholds": {
+    "min_quote_coverage": 0.9,
+    "reliable_market_data_types": [
+     1,
+     3
+    ],
+    "reliable_price_sources": [
+     "BID_ASK"
+    ],
+    "session_et": "09:30-16:00 Mon-Fri (exchange holidays not detected)",
+    "settlement_min_time_et": "16:15",
+    "spread_bounds_tolerance_per_share": 0.005
+   },
+   "risk_free_rate": 0.0425,
+   "step_snapshot_ids": [
+    "NVDA_20261116_150000",
+    "NVDA_20261120_180000"
+   ],
+   "strategies_sha256": "bb867d536005ebf732ee28ba133a45823bb9c801e158c26b44dfba59090b567e",
+   "strategy_lab_constants": {
+    "bull_put_anchor_fallback_pct_of_spot": 0.95,
+    "bull_put_short_delta_target": 0.28,
+    "bull_put_wall_max_pct_of_spot": 1.02,
+    "entry_price": "mid",
+    "fallback_iv": 0.35,
+    "target_dte": 38,
+    "wall_bonus": 22.0,
+    "wing_width_pct_of_spot": 0.025
+   },
+   "walls_top_n": 3
+  },
+  "settlement": {
+   "expiry": "2026-12-18",
+   "intrinsic_spread_per_share": null,
+   "note": "The data (or the end step) ends before the short expiry closed.",
+   "pnl_dollars": null,
+   "pnl_pct_of_max_risk": null,
+   "snapshot_id": null,
+   "spot": null,
+   "status": "NOT_REACHED",
+   "ts_et": null
+  },
+  "steps": [
+   {
+    "flags": [
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 2.2,
+      "bid": 2.0,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 2.1,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 1.1,
+      "bid": 0.9,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-16",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 0.0,
+    "pnl_pct_of_max_risk": 0.0,
+    "position_value_dollars": -110.0,
+    "quote_coverage": 1.0,
+    "short_dte": 32,
+    "snapshot_id": "NVDA_20261116_150000",
+    "spot": 102.0,
+    "spot_source": null,
+    "spread_value_per_share": 1.1,
+    "status": "OK",
+    "ts_et": "2026-11-16 10:00 ET",
+    "ts_utc": "2026-11-16T15:00:00Z"
+   },
+   {
+    "flags": [
+     "FILTER_CHANGED",
+     "SPOT_SOURCE_UNKNOWN"
+    ],
+    "legs": [
+     {
+      "ask": 1.05,
+      "bid": 0.95,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 1.0,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "SELL",
+      "status": "PRICED",
+      "strike": 100.0,
+      "theta": -0.05,
+      "vega": 0.1
+     },
+     {
+      "ask": 0.45,
+      "bid": 0.35,
+      "delta": -0.3,
+      "expiry": "2026-12-18",
+      "gamma": 0.02,
+      "price": 0.4,
+      "price_source": "BID_ASK",
+      "qty": 1,
+      "right": "P",
+      "side": "BUY",
+      "status": "PRICED",
+      "strike": 95.0,
+      "theta": -0.05,
+      "vega": 0.1
+     }
+    ],
+    "market_data_type": 3,
+    "market_date": "2026-11-20",
+    "net_greeks": {
+     "delta_shares": 0.0,
+     "gamma_shares": 0.0,
+     "theta_daily_dollars": 0.0,
+     "vega_per_1pct_dollars": 0.0
+    },
+    "pnl_dollars": 50.0,
+    "pnl_pct_of_max_risk": 12.82,
+    "position_value_dollars": -60.0,
+    "quote_coverage": 1.0,
+    "short_dte": 28,
+    "snapshot_id": "NVDA_20261120_180000",
+    "spot": 106.0,
+    "spot_source": null,
+    "spread_value_per_share": 0.6,
+    "status": "OK",
+    "ts_et": "2026-11-20 13:00 ET",
+    "ts_utc": "2026-11-20T18:00:00Z"
+   }
+  ],
+  "strategy": "BULL_PUT_SPREAD",
+  "summary": {
+   "last_ok_pnl_dollars": 50.0,
+   "last_ok_snapshot_id": "NVDA_20261120_180000",
+   "max_ok_pnl_dollars": 50.0,
+   "min_ok_pnl_dollars": 0.0,
+   "steps_incomplete": 0,
+   "steps_ok": 2,
+   "steps_total": 2,
+   "steps_unreliable": 0
+  },
+  "ticker": "NVDA"
+ }
+}

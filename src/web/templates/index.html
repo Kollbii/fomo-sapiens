@@ -97,12 +97,20 @@
       </select>
     </label>
 
-    <label class="field-group">
-      <span class="field-label">Snapshot</span>
-      <select id="snapshot-select" class="select-control" aria-label="Historical Snapshot Archive">
+    <div class="field-group">
+      <span class="field-label" id="snapshot-picker-label">Snapshot</span>
+      <!-- Source of truth for the selected snapshot; the picker below drives it. -->
+      <select id="snapshot-select" class="select-control snap-picker__native" aria-label="Historical Snapshot Archive" tabindex="-1" aria-hidden="true">
         <option value="">Latest Archive</option>
       </select>
-    </label>
+      <div class="snap-picker" id="snapshot-picker">
+        <button type="button" id="snapshot-picker-toggle" class="select-control snap-picker__toggle" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="snapshot-picker-label snapshot-picker-current">
+          <span id="snapshot-picker-current" class="snap-picker__current">Latest Archive</span>
+          <span class="snap-picker__caret" aria-hidden="true"></span>
+        </button>
+        <div id="snapshot-picker-panel" class="snap-picker__panel" role="listbox" aria-label="Snapshots by day" hidden></div>
+      </div>
+    </div>
 
     <button id="refresh-btn" class="btn btn-primary" type="button">
       REFRESH FROM IBKR
@@ -110,6 +118,47 @@
     <a id="export-csv-btn" class="btn" href="/api/csv/{{ default_ticker }}" download>
       EXPORT CSV
     </a>
+    <div class="collector-control" id="collector-control">
+      <button type="button" id="collector-toggle-btn" class="btn collector-toggle" aria-haspopup="dialog" aria-expanded="false" aria-controls="collector-panel" title="Scheduled snapshot collection during the US session">
+        <span id="collector-toggle-dot" class="collector-dot" aria-hidden="true"></span>
+        <span id="collector-toggle-label">COLLECTOR: OFF</span>
+      </button>
+      <div id="collector-panel" class="collector-panel" role="dialog" aria-label="Scheduled collection" hidden>
+        <div class="collector-panel__head">
+          <span class="collector-panel__title">Scheduled collection</span>
+          <label class="collector-switch">
+            <input type="checkbox" id="collector-enabled" />
+            <span>Collect automatically</span>
+          </label>
+        </div>
+        <label class="collector-row">
+          <span class="field-label">Interval</span>
+          <select id="collector-interval" class="select-control" aria-label="Collection interval">
+            <option value="15">Every 15 min</option>
+            <option value="30">Every 30 min</option>
+            <option value="60" selected>Every 60 min</option>
+            <option value="120">Every 120 min</option>
+            <option value="0">Closing snapshot only</option>
+          </select>
+        </label>
+        <div class="collector-section-label">Tickers &amp; pinned parameters</div>
+        <table class="collector-tickers">
+          <thead>
+            <tr><th>Ticker</th><th>Range</th><th>Step</th><th>DTE</th><th>Pinned since</th><th><span class="sr-only">Remove</span></th></tr>
+          </thead>
+          <tbody id="collector-tickers-body"></tbody>
+        </table>
+        <div class="collector-add">
+          <input id="collector-add-input" class="input-control" type="text" maxlength="5" placeholder="E.G. AAPL" aria-label="Add a ticker to collect" autocomplete="off" />
+          <button type="button" id="collector-add-btn" class="btn">ADD</button>
+        </div>
+        <div class="collector-actions">
+          <span id="collector-dirty" class="collector-hint" aria-live="polite"></span>
+          <button type="button" id="collector-save-btn" class="btn btn-primary">SAVE</button>
+        </div>
+        <div id="collector-status" class="collector-status" aria-live="polite"></div>
+      </div>
+    </div>
   </div>
 
   <div
@@ -173,6 +222,15 @@
       >
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Strategy Lab</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="backtest"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Backtest</span>
       </button>
     </div>
     <button
@@ -635,6 +693,81 @@
       </div>
     </div>
   </article>
+  <!-- Option Backtest Analyzer: replay one bull put spread over the collected history -->
+  <article
+    id="backtest-card"
+    class="panel-card panel-card--span-12 panel-card--backtest"
+    data-panel-id="backtest"
+    data-default-span="12"
+    aria-labelledby="backtest-title"
+  >
+    <header class="panel-header">
+      <div class="panel-title-stack">
+        <h2 id="backtest-title" class="panel-title">Option Backtest Analyzer &mdash; Bull Put Spread, Held to Expiry</h2>
+        <span id="backtest-badge" class="panel-meta">IDLE &bull; CLICK RUN</span>
+      </div>
+    </header>
+    <div class="backtest-body">
+      <div class="backtest-sources watchlist-pills" role="group" aria-label="Spread source">
+        <button type="button" class="pill-btn backtest-source-btn active" data-backtest-source="LEGS" aria-pressed="true">My spread</button>
+        <button type="button" class="pill-btn backtest-source-btn" data-backtest-source="AUTO_BUILD" aria-pressed="false">Auto-Build (Strategy Lab)</button>
+        <button type="button" class="pill-btn backtest-source-btn" data-backtest-source="TRACKED" aria-pressed="false">Tracked spread</button>
+      </div>
+      <form id="backtest-form" class="backtest-form" autocomplete="off">
+        <label class="backtest-field backtest-field--entry" data-backtest-for="LEGS AUTO_BUILD">
+          <span class="field-label">Entry step (<span id="backtest-ticker">&mdash;</span>)</span>
+          <select id="backtest-entry" class="select-control" aria-describedby="backtest-entry-hint"></select>
+          <span id="backtest-entry-hint" class="backtest-hint"></span>
+        </label>
+        <label class="backtest-field" data-backtest-for="LEGS">
+          <span class="field-label">Expiry</span>
+          <select id="backtest-expiry" class="select-control"></select>
+        </label>
+        <label class="backtest-field" data-backtest-for="LEGS">
+          <span class="field-label">Short put (sell)</span>
+          <select id="backtest-short" class="select-control"></select>
+        </label>
+        <label class="backtest-field" data-backtest-for="LEGS">
+          <span class="field-label">Long put (buy)</span>
+          <select id="backtest-long" class="select-control"></select>
+        </label>
+        <label class="backtest-field backtest-field--qty" data-backtest-for="LEGS AUTO_BUILD">
+          <span class="field-label">Qty</span>
+          <input id="backtest-qty" class="input-control" type="number" min="1" max="100" step="1" value="1" inputmode="numeric" />
+        </label>
+        <label class="backtest-field backtest-field--tracked" data-backtest-for="TRACKED" hidden>
+          <span class="field-label">Tracked spread</span>
+          <select id="backtest-tracked" class="select-control"></select>
+        </label>
+        <div class="backtest-actions">
+          <button id="backtest-run-btn" type="submit" class="btn btn-primary">RUN BACKTEST</button>
+          <button id="backtest-track-btn" type="button" class="btn" disabled>TRACK THIS SPREAD</button>
+        </div>
+      </form>
+      <p id="backtest-track-note" class="backtest-note" aria-live="polite"></p>
+      <div id="backtest-warnings" class="backtest-warnings" role="status" aria-live="polite"></div>
+      <div id="backtest-kpis" class="backtest-kpis" aria-label="Backtest summary"></div>
+      <div id="backtest-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Backtest P&amp;L over time">
+        <div class="strategy-empty-state">Choose a source and click <strong>RUN BACKTEST</strong> to replay one bull put spread over the saved snapshots.</div>
+      </div>
+      <p class="backtest-note backtest-axis-note">Steps are evenly spaced, not to time scale.</p>
+      <div id="backtest-entry-info" class="backtest-entry-info"></div>
+      <div class="backtest-table-wrap">
+        <table id="backtest-table" class="backtest-table">
+          <caption class="sr-only">Backtest steps: time, data source, value and flags</caption>
+          <thead>
+            <tr>
+              <th scope="col">ET</th><th scope="col">Poland</th><th scope="col">Kind</th><th scope="col">DTE</th>
+              <th scope="col">Spot</th><th scope="col">Spread</th><th scope="col">P&amp;L $</th><th scope="col">% risk</th>
+              <th scope="col">Status</th><th scope="col">Quotes</th><th scope="col">Flags</th>
+            </tr>
+          </thead>
+          <tbody id="backtest-table-body"></tbody>
+        </table>
+      </div>
+      <p id="backtest-assumptions" class="backtest-note backtest-assumptions"></p>
+    </div>
+  </article>
 </section>
 
 <!-- Row 6: High-Density Option Chain Table -->
@@ -805,5 +938,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261112a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261112c"></script>
 {% endblock %}

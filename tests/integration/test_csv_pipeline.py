@@ -277,3 +277,62 @@ def test_ensure_layout_creates_dirs_idempotently_without_touching_files(tmp_path
     sentinel.write_text("x", encoding="utf-8")
     repo.ensure_layout()
     assert sentinel.read_text(encoding="utf-8") == "x"
+
+
+# ------------------------------------------------------------------ quality metadata
+def test_quality_meta_saved_indexed_and_reloaded(repo: CSVRepository) -> None:
+    rows = make_rows()
+    for r in rows[:4]:  # 4 of 32 rows: previous close only
+        r.update(bid=None, ask=None, last=None)
+    rows[4].update(bid=0.0, ask=0.05)  # far OTM: zero bid, valid ask -> quoted
+    meta = repo.save_snapshot("NVDA", rows, spot_source="LAST", collection_mode="MANUAL")
+
+    assert meta.contract_count == 32
+    assert meta.quoted_contract_count == 28
+    assert meta.quote_coverage == pytest.approx(28 / 32, abs=1e-4)
+    assert meta.prior_close_only_count == 4
+    assert (meta.spot_source, meta.collection_mode) == ("LAST", "MANUAL")
+
+    index = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    entry = index["tickers"]["NVDA"]["snapshots"][0]
+    assert entry["spot_source"] == "LAST"
+    assert entry["quote_coverage"] == pytest.approx(0.875)
+    assert repo.list_snapshots("NVDA")[0] == meta
+
+
+def test_legacy_index_entry_without_quality_fields_loads(repo: CSVRepository) -> None:
+    meta = repo.save_snapshot("NVDA", make_rows(), spot_source="MID", collection_mode="MANUAL")
+    index = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    legacy = index["tickers"]["NVDA"]["snapshots"][0]
+    for key in (
+        "spot_source",
+        "quoted_contract_count",
+        "quote_coverage",
+        "prior_close_only_count",
+        "collection_mode",
+    ):
+        legacy.pop(key)
+    repo.index_path.write_text(json.dumps(index), encoding="utf-8")
+
+    loaded = repo.list_snapshots("NVDA")[0]
+    assert loaded.snapshot_id == meta.snapshot_id
+    assert loaded.spot_source is None
+    assert loaded.quote_coverage is None
+    assert loaded.collection_mode is None
+
+
+def test_rebuild_recomputes_csv_derivable_quality_only(repo: CSVRepository) -> None:
+    rows = make_rows()
+    rows[0].update(bid=None, ask=None, last=None)
+    saved = repo.save_snapshot("NVDA", rows, spot_source="LAST", collection_mode="MANUAL")
+    csv_bytes = (repo.root / saved.file_path).read_bytes()
+    repo.index_path.unlink()
+
+    rebuilt = repo.list_snapshots("NVDA")[0]
+    assert rebuilt.quoted_contract_count == 31
+    assert rebuilt.prior_close_only_count == 1
+    # Not stored in the CSV, so unknown after a rebuild
+    assert rebuilt.spot_source is None
+    assert rebuilt.collection_mode is None
+    # The snapshot file itself is never rewritten
+    assert (repo.root / saved.file_path).read_bytes() == csv_bytes

@@ -20,6 +20,7 @@ from src.core.config import Settings, get_settings
 from src.services.analyzer import AnalyzerService
 from src.storage.csv_repository import CSVRepository
 from src.web.api import get_web_service, router
+from src.web.backtest_api import backtest_router
 from src.web.errors import register_exception_handlers
 
 logger = logging.getLogger(__name__)
@@ -82,9 +83,16 @@ def create_app(
             cfg.ibkr.port,
             cfg.ibkr.market_data_mode,
         )
+        collector = service.get_collector()
+        try:
+            collector.record_missed_slots()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("collector missed-slot check failed; continuing")
+        await collector.start()
         try:
             yield
         finally:
+            await collector.stop()
             try:
                 await service.stop_corridor_streams()
             except Exception:  # pragma: no cover - defensive shutdown
@@ -105,6 +113,7 @@ def create_app(
 
     register_exception_handlers(application)
     application.include_router(router)
+    application.include_router(backtest_router)
 
     @application.get("/", response_class=HTMLResponse)
     async def index(

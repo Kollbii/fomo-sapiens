@@ -1,6 +1,9 @@
 /* IBKR Options Analyzer dashboard — Panel visibility bar (`.panel-toggle-pill`) and persistence. */
 
 import {
+  btRenderChart,
+} from "./backtest.js";
+import {
   DEFAULT_PANEL_VISIBILITY,
   PANEL_VISIBILITY_KEY,
   cloneDefaultPanelVisibility,
@@ -100,6 +103,8 @@ function renderPanelChartById(panelId, data, t) {
   else if (panelId === "corridor") {
     var preview = state.corridorFrame || buildLocalCorridorPreview(data);
     if (preview) renderCorridorChart(preview, theme);
+  } else if (panelId === "backtest") {
+    btRenderChart();
   } else if (panelId === "strategy") {
     if (state.strategyEvaluation) {
       renderStrategyPayoffChart(state.strategyEvaluation, theme);

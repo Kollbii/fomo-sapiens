@@ -3,16 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
-from ib_async import Option
+from ib_async import Option, Stock
 
 from src.broker.client import (
     IBKRBrokerClient,
@@ -20,17 +19,19 @@ from src.broker.client import (
     market_data_type_label,
     poll_until,
 )
-from src.broker.contracts import ChainPlan, ContractDiscoveryService
+from src.broker.contracts import ChainPlan, ContractDiscoveryService, market_date_for
 from src.broker.parser import (
     SnapshotContext,
     TickerParser,
     has_live_opra_data,
+    has_real_quote,
     has_usable_quote,
 )
 from src.core.config import Settings
 from src.core.exceptions import OptionChainFetchError, PacingViolationError
+from src.core.security import TickerValidator
 from src.storage.csv_repository import make_snapshot_id
-from src.storage.schema import OptionContractRow
+from src.storage.schema import OptionContractRow, SpotSource
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +39,11 @@ DELAYED_GENERIC_TICKS = "100,101,106"
 LIVE_OPRA_GENERIC_TICKS = "100,101,104,106"
 EMPTY_QUOTE_FALLBACK_THRESHOLD = 0.80
 PACING_COOLDOWN_SEC = 1.0
+# ib_async sends at most 45 messages per 1 s window (`Client.MaxRequests`) and queues the rest.
+# Requests and cancels go out in bursts of 20 with a 0.55 s pause before each burst, so any
+# 1 s window holds at most 2 bursts (40 messages) and nothing waits in the ib_async queue.
 PAGE_PACING_CHUNK_SIZE = 20
-PAGE_PACING_YIELD_SEC = 0.01
+PAGE_PACING_PAUSE_SEC = 0.55
 
 
 @dataclass(frozen=True)
@@ -55,6 +59,41 @@ class FetchResult:
     pages_fetched: int
     elapsed_ms: float
     notices: tuple[str, ...] = ()
+    page_quote_counts: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExactContractSpec:
+    """One specific option contract to quote (no chain discovery)."""
+
+    option_conid: int
+    expiry: str  # ISO YYYY-MM-DD
+    strike: float
+    right: Literal["C", "P"]
+
+    def key(self) -> tuple[str, float, str]:
+        return (self.expiry, round(self.strike, 4), self.right)
+
+
+@dataclass(frozen=True)
+class ExactQuoteResult:
+    """Quotes for specific contracts: rows in the normal 27-column schema plus the spot."""
+
+    snapshot_id: str
+    snapshot_ts_utc: str
+    market_date: str
+    market_data_type: int
+    underlying_price: float
+    spot_source: SpotSource
+    rows: tuple[OptionContractRow, ...]
+    missing: tuple[ExactContractSpec, ...]
+    notices: tuple[str, ...] = ()
+
+
+def _contract_key(contract: Any) -> tuple[str, float, str]:
+    raw = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
+    iso = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if len(raw) == 8 else raw
+    return (iso, round(float(getattr(contract, "strike", 0.0)), 4), str(contract.right))
 
 
 def paginate_contracts(
@@ -80,6 +119,14 @@ def empty_quote_ratio(tickers: Sequence[Any]) -> float:
     if not tickers:
         return 0.0
     empty = sum(1 for t in tickers if not has_usable_quote(t))
+    return empty / len(tickers)
+
+
+def empty_real_quote_ratio(tickers: Sequence[Any]) -> float:
+    """Fraction of tickers on a page without a current quote (no valid `bid` and no valid `ask`)."""
+    if not tickers:
+        return 0.0
+    empty = sum(1 for t in tickers if not has_real_quote(t))
     return empty / len(tickers)
 
 
@@ -239,6 +286,8 @@ class PagedOptionChainFetcher:
         tickers: list[Any] = []
         try:
             for idx, contract in enumerate(page_contracts):
+                if idx % PAGE_PACING_CHUNK_SIZE == 0:
+                    await self.sleep(PAGE_PACING_PAUSE_SEC)
                 ticker = ib.reqMktData(
                     contract,
                     genericTickList=generic_tick_list,
@@ -247,9 +296,8 @@ class PagedOptionChainFetcher:
                 )
                 subscribed.append(contract)
                 tickers.append(ticker)
-                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(page_contracts):
-                    await self.sleep(PAGE_PACING_YIELD_SEC)
 
+            # The poll window starts only after the last request of the page was sent.
             await poll_until(
                 lambda: all(ready_predicate(t) for t in tickers),
                 oc.page_collect_timeout_sec,
@@ -262,14 +310,32 @@ class PagedOptionChainFetcher:
             self.client.handle_stage_error(exc, stage=stage)
             raise
         finally:
-            for idx, contract in enumerate(subscribed):
+            await self._cancel_paced(subscribed)
+
+    async def _cancel_paced(self, subscribed: Sequence[Any]) -> None:
+        """Cancel every subscription in paced bursts; never skips a cancel.
+
+        If a pause is interrupted, the remaining cancels are sent without pauses. A
+        `CancelledError` (or other `BaseException`) is re-raised after all cancels are sent.
+        """
+        ib = self.client.ib
+        pacing = True
+        deferred: BaseException | None = None
+        for idx, contract in enumerate(subscribed):
+            if pacing and idx % PAGE_PACING_CHUNK_SIZE == 0:
                 try:
-                    ib.cancelMktData(contract)
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("cancelMktData failed for %s", contract)
-                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(subscribed):
-                    with contextlib.suppress(Exception):
-                        await self.sleep(PAGE_PACING_YIELD_SEC)
+                    await self.sleep(PAGE_PACING_PAUSE_SEC)
+                except Exception:
+                    pacing = False
+                except BaseException as exc:  # e.g. asyncio.CancelledError
+                    pacing = False
+                    deferred = exc
+            try:
+                ib.cancelMktData(contract)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cancelMktData failed for %s", contract)
+        if deferred is not None:
+            raise deferred
 
     async def _collect_page_with_fallback(
         self,
@@ -305,13 +371,13 @@ class PagedOptionChainFetcher:
         if (
             allow_fallback
             and self.client.can_fallback()
-            and empty_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
+            and empty_real_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
         ):
             prev_type = self.client.current_type
             new_type = self.client.switch_to_fallback_data_type()
             notice = (
-                f"Over 80% of Type {prev_type} ({market_data_type_label(prev_type)}) quotes were "
-                f"empty; switched to MarketDataType({new_type}) "
+                f"Over 80% of Type {prev_type} ({market_data_type_label(prev_type)}) contracts "
+                f"had no bid/ask; switched to MarketDataType({new_type}) "
                 f"{market_data_type_label(new_type)}"
             )
             self._notices.append(notice)
@@ -319,7 +385,7 @@ class PagedOptionChainFetcher:
             tickers = await self._collect_page_once(
                 page_contracts,
                 generic_tick_list=generic_tick_list,
-                ready_predicate=has_usable_quote,
+                ready_predicate=has_real_quote,
             )
 
         self.client.observe_tickers_market_data_type(tickers)
@@ -335,7 +401,7 @@ class PagedOptionChainFetcher:
         return await self._collect_page_with_fallback(
             page_contracts,
             generic_tick_list=DELAYED_GENERIC_TICKS,
-            initial_ready=has_usable_quote,
+            initial_ready=has_real_quote,
             allow_fallback=allow_fallback,
             check_live_downgrade=False,
         )
@@ -436,13 +502,19 @@ class PagedOptionChainFetcher:
                 )
             )
 
+        page_size = self.max_contracts_per_page
+        page_quote_counts = tuple(
+            sum(1 for tk in tickers[i : i + page_size] if has_real_quote(tk))
+            for i in range(0, len(tickers), page_size)
+        )
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         source_counts = dict(Counter(r.greeks_source for r in rows))
         dtes_matched = [m.dte for m in plan.expirations]
         logger.info(
             "refresh_summary ticker=%s market_data_type=%d spot_price=%.4f "
             "dtes_matched=%s range_pct=%.4f strike_step=%.4f total_contracts=%d "
-            "pages_fetched=%d elapsed_ms=%.2f greeks_source_counts=%s snapshot_id=%s",
+            "pages_fetched=%d page_quote_counts=%s spot_source=%s elapsed_ms=%.2f "
+            "greeks_source_counts=%s snapshot_id=%s",
             plan.underlying.symbol,
             active_md_type,
             plan.underlying.spot,
@@ -451,6 +523,8 @@ class PagedOptionChainFetcher:
             plan.strikes.effective_step,
             len(rows),
             pages_fetched,
+            list(page_quote_counts),
+            plan.underlying.spot_source,
             elapsed_ms,
             source_counts,
             snapshot_id,
@@ -467,4 +541,111 @@ class PagedOptionChainFetcher:
             pages_fetched=pages_fetched,
             elapsed_ms=elapsed_ms,
             notices=notices,
+            page_quote_counts=page_quote_counts,
+        )
+
+    async def fetch_exact_contracts(
+        self,
+        ticker: str,
+        specs: Sequence[ExactContractSpec],
+        *,
+        underlying_conid: int = 0,
+    ) -> ExactQuoteResult:
+        """Quote specific contracts only (tracked spread legs); never requests a chain.
+
+        Read-only: `reqMktData` / `cancelMktData` through the same paced pages as a chain
+        refresh, plus `qualifyContractsAsync` only for a contract without a known `conId`.
+        Expired contracts are not requested and are returned in `missing`.
+        """
+        symbol = TickerValidator.validate(ticker)
+        if not specs:
+            raise OptionChainFetchError(f"No contracts to quote for {symbol}")
+        cap = self.max_contracts_per_page * self.max_pages_per_refresh
+        if len(specs) > cap:
+            raise PacingViolationError(
+                f"{len(specs)} tracked contracts for {symbol} exceed the {cap}-contract cap"
+            )
+        self._notices = []
+        await self.client.ensure_connected()
+        self.client.reset_market_data_type()
+
+        if underlying_conid > 0:
+            stock: Any = Stock(
+                conId=underlying_conid, symbol=symbol, exchange="SMART", currency="USD"
+            )
+        else:
+            stock = await self.discovery.qualify_underlying(symbol)
+        spot, spot_source = await self.discovery.resolve_spot_with_source(stock)
+
+        market_day = market_date_for(self.clock())
+        missing: list[ExactContractSpec] = []
+        candidates: list[Option] = []
+        for spec in specs:
+            expiry = date.fromisoformat(spec.expiry)
+            if expiry < market_day:
+                missing.append(spec)
+                continue
+            candidates.append(
+                Option(
+                    conId=spec.option_conid if spec.option_conid > 0 else 0,
+                    symbol=symbol,
+                    lastTradeDateOrContractMonth=expiry.strftime("%Y%m%d"),
+                    strike=spec.strike,
+                    right=spec.right,
+                    exchange="SMART",
+                    multiplier="100",
+                    currency="USD",
+                )
+            )
+        if not candidates:
+            raise OptionChainFetchError(f"Every requested {symbol} contract has expired")
+        qualified = await self.qualify_option_contracts(candidates)
+        found = {_contract_key(c) for c in qualified}
+        missing.extend(s for s in specs if s not in missing and s.key() not in found)
+        tickers, _pages = await self.fetch_pages(qualified)
+
+        sub_notice = self.client.consume_subscription_fallback_notice()
+        if sub_notice and sub_notice not in self._notices:
+            self._notices.append(sub_notice)
+        md_type = self.client.get_active_market_data_type()
+        now_utc = self.clock().astimezone(UTC)
+        ctx = SnapshotContext(
+            snapshot_id=make_snapshot_id(symbol, now_utc),
+            snapshot_ts_utc=now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            market_date=market_day.isoformat(),
+            market_data_type=md_type,
+            underlying=symbol,
+            underlying_conid=int(getattr(stock, "conId", 0) or underlying_conid),
+            underlying_price=spot,
+        )
+        rows = tuple(
+            TickerParser.parse_ticker(
+                tk,
+                contract=contract,
+                context=ctx,
+                dte=(date.fromisoformat(_contract_key(contract)[0]) - market_day).days,
+            )
+            for contract, tk in zip(qualified, tickers, strict=True)
+        )
+        logger.info(
+            "exact_quotes ticker=%s contracts=%d missing=%d market_data_type=%d spot=%.4f "
+            "spot_source=%s snapshot_id=%s",
+            symbol,
+            len(rows),
+            len(missing),
+            md_type,
+            spot,
+            spot_source,
+            ctx.snapshot_id,
+        )
+        return ExactQuoteResult(
+            snapshot_id=ctx.snapshot_id,
+            snapshot_ts_utc=ctx.snapshot_ts_utc,
+            market_date=ctx.market_date,
+            market_data_type=md_type,
+            underlying_price=spot,
+            spot_source=spot_source,
+            rows=rows,
+            missing=tuple(missing),
+            notices=tuple(self._notices),
         )
