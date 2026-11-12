@@ -21,12 +21,18 @@ from src.analytics.backtest import (
 from src.core.config import StorageSettings
 from src.storage.csv_repository import CSVRepository
 from src.storage.schema import SnapshotMeta
-from tests.unit.test_backtest import LEGS, _auto_chain, _chain, _entry, _step, _ts
+from tests.unit.test_backtest import LEGS, Quote, _auto_chain, _chain, _entry, _step, _ts
 
 GOLDEN_PATH = Path(__file__).resolve().parents[1] / "fixtures" / "backtest_v1_golden.json"
 
-WIN = {(100.0, "P"): (0.95, 1.05, 1.0, 1.0), (95.0, "P"): (0.35, 0.45, 0.4, 0.4)}
-LOSE = {(100.0, "P"): (3.90, 4.10, 4.0, 4.0), (95.0, "P"): (1.40, 1.60, 1.5, 1.5)}
+WIN: dict[tuple[float, str], Quote] = {
+    (100.0, "P"): (0.95, 1.05, 1.0, 1.0),
+    (95.0, "P"): (0.35, 0.45, 0.4, 0.4),
+}
+LOSE: dict[tuple[float, str], Quote] = {
+    (100.0, "P"): (3.90, 4.10, 4.0, 4.0),
+    (95.0, "P"): (1.40, 1.60, 1.5, 1.5),
+}
 
 
 def _settle(spot: float, when: str = "2026-12-18T21:30:00") -> BacktestStep:
