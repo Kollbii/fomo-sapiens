@@ -6,7 +6,7 @@ build-backend = "hatchling.build"
 name = "ibkr-options-analyzer"
 version = "0.1.0"
 description = "Local read-only IBKR Options Analyzer & Dashboard with NYT Editorial + Terminal UI"
-readme = "AGENTS.md"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "ib-async>=1.0.3",

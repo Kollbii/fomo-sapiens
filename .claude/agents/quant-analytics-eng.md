@@ -48,7 +48,8 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 
 **Reads (context diet — nothing else on startup):**
 - docs/DATA_SCHEMA.md (section 2 columns only)
-- docs/ARCHITECTURE.md (sections 4 and 8 only)
+- docs/ARCHITECTURE.md (section 4 only)
+- docs/reference/IMPLEMENTATION_NOTES.md (section 4 only)
 - docs/FUTURE_IMPROVEMENTS.md (only the section being implemented)
 - `src/storage/schema.py`
 - `src/analytics/`

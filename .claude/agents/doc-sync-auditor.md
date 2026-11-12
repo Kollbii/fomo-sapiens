@@ -26,13 +26,14 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 | Changed path | Update |
 | :--- | :--- |
 | `Makefile`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `pyproject.toml` | `AGENTS.md` §2/§5, `docs/CODING_STANDARDS.md` (commands) |
-| `src/core/security.py`, `src/core/config.py` | `docs/SECURITY_AND_SAFETY.md`, `AGENTS.md` §4 Phase 1, `docs/ARCHITECTURE.md` §6 |
-| `src/storage/*` | `docs/DATA_SCHEMA.md` |
-| `src/broker/*` | `docs/ARCHITECTURE.md` §3/§5/§7, `docs/DATA_SCHEMA.md` §3 (parser) |
-| `src/analytics/*` | `docs/ARCHITECTURE.md` §4/§8, `docs/FUTURE_IMPROVEMENTS.md` |
-| `src/web/api.py`, `src/main.py` | `docs/ARCHITECTURE.md` §9, `AGENTS.md` Phase 5 endpoint list |
-| `src/web/templates/*`, `src/web/static/*` | `docs/UI_UX_GUIDELINES.md` (incl. cache-buster versions) |
+| `src/core/security.py`, `src/core/config.py` | `docs/SECURITY_AND_SAFETY.md`, `AGENTS.md` §4 module map, `docs/reference/IMPLEMENTATION_NOTES.md` §1 |
+| `src/storage/*` | `docs/DATA_SCHEMA.md` (contract), `docs/reference/IMPLEMENTATION_NOTES.md` §2 |
+| `src/broker/*` | `docs/ARCHITECTURE.md` §3/§5, `docs/DATA_SCHEMA.md` §3 (parser), `docs/reference/IMPLEMENTATION_NOTES.md` §3 |
+| `src/analytics/*` | `docs/ARCHITECTURE.md` §4, `docs/reference/IMPLEMENTATION_NOTES.md` §4, `docs/FUTURE_IMPROVEMENTS.md` |
+| `src/web/api.py`, `src/main.py` | `docs/reference/IMPLEMENTATION_NOTES.md` §5, `AGENTS.md` §4 API surface |
+| `src/web/templates/*`, `src/web/static/*` | `docs/UI_UX_GUIDELINES.md`, `docs/reference/IMPLEMENTATION_NOTES.md` §5 (cache-buster versions) |
 | `tests/*` (new test files) | `docs/CODING_STANDARDS.md` §4 |
+| any user-visible change | `CHANGELOG.md` `## [Unreleased]` |
 | new module / responsibility shift | `.agent/agents/<owner>.md` `owns:` list + `make agents-sync` |
 
 ## 3. Style Rules
@@ -45,6 +46,8 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 **Owns (may edit):**
 - `AGENTS.md`
 - `docs/`
+- `CHANGELOG.md`
+- `README.md`
 - .agent/agents/*.md (canonical specs only, then run `make agents-sync`)
 
 **Reads (context diet — nothing else on startup):**

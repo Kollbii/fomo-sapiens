@@ -29,66 +29,30 @@ Before concluding any task, PR, or implementation phase, the agent MUST perform 
 4. Did you change CSS tokens, font pairings, layout grids, or Plotly templates? -> Update `docs/UI_UX_GUIDELINES.md`.
 5. Did you change coding conventions, typing rules, or test commands? -> Update `docs/CODING_STANDARDS.md`.
 6. Did you implement a feature listed in `docs/FUTURE_IMPROVEMENTS.md`? -> Move its specification from `docs/FUTURE_IMPROVEMENTS.md` into `docs/ARCHITECTURE.md` and mark its status as `[IMPLEMENTED]`.
+7. Did you add or change classes, helpers, element inventories, or cache-buster versions? -> Update the matching layer section of `docs/reference/IMPLEMENTATION_NOTES.md` (contracts stay in the files above).
+8. Is the change user-visible (feature, fix, command, config key)? -> Add a line under `## [Unreleased]` in `CHANGELOG.md`.
 
 *Never leave documentation out of sync with code.*
 
 ---
 
-## 4. Phased Implementation Protocol
-Agents MUST build the system incrementally following the 5 phases below. **Do NOT skip ahead or write monolithic untested code.** Each phase must pass `make check` (`ruff`, `mypy`, `pytest`) and a documentation sync check before moving to the next phase.
+## 4. Module Map, Status & Change Protocol
+All five core phases are `[IMPLEMENTED]`; their delivery history lives in `CHANGELOG.md` and per-module details in `docs/reference/IMPLEMENTATION_NOTES.md`.
 
-### Phase 1: Scaffolding, Configuration & Security Guardrails
-- **Scope:** Verify project tree, `pyproject.toml`, `Dockerfile`, `docker-compose.yml`, `Makefile`, `config/settings.yaml`, `.env.example`, and implement `src/core/config.py`, `src/core/exceptions.py`, and `src/core/security.py`.
-- **Key Deliverables:**
-  - `TickerValidator`: Enforces hardcoded watchlist (`NVDA`, `AVGO`, `CRDO`, `PLTR`) + strict regex validation (`^[A-Z]{1,5}$`) for custom stock symbols.
-  - `ReadOnlyIBGuard`: Wraps `ib_async.IB` and hard-blocks all order/mutation methods (`placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, `whatIfOrder`) by raising `SecurityViolationError`.
-- **Exit Gate:** 100% passing unit tests in `tests/unit/test_security.py` and `tests/unit/test_config.py`.
+| Phase | Layer | Modules | Tests | Contract docs |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | Core: config, exceptions, read-only guard, ticker validation | `src/core/{config,exceptions,security}.py` | `test_config.py`, `test_security.py`, `test_security_guard.py` | `docs/SECURITY_AND_SAFETY.md` |
+| 2 | Storage: 27-column schema, Mode 1 atomic CSV archive, snapshot index | `src/storage/{schema,csv_repository}.py` | `test_csv_pipeline.py`, `test_offline_fixture_smoke.py` | `docs/DATA_SCHEMA.md` |
+| 3 | Broker: ib-async client, `DELAYED 3->4` / `LIVE 1->2` cascade, weekly `[30, 120]` DTE discovery, `<= 80`/page fetcher, `<= 60` Wall Corridor | `src/broker/{client,contracts,parser,fetcher,corridor}.py` | `test_contracts_and_pagination.py`, `test_corridor.py` | `docs/ARCHITECTURE.md` §3, §5 |
+| 4 | Analytics: BSM IV/Greeks fallback, walls, anomalies, multi-DTE profiles, Strategy Lab | `src/analytics/{bsm_fallback,walls,anomalies,term_greeks,strategies}.py` | `test_bsm_and_analytics.py`, `test_strategies.py` | `docs/ARCHITECTURE.md` §4 |
+| 5 | Web: FastAPI routes + SSE, NYT Print / Obsidian Terminal UI, Plotly panels, Corridor & Strategy Lab cards, chain table | `src/main.py`, `src/web/` | `test_web_api.py`, `test_corridor_api.py` | `docs/UI_UX_GUIDELINES.md` |
 
-- **Status: `[IMPLEMENTED]`** — `src/core/{config,exceptions,security}.py` with `tests/unit/test_config.py` and `tests/unit/test_security.py`. Config is `config/settings.yaml` (new key `storage.logs_dir`) + env overrides `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, `FALLBACK_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`, `APP_HOST`, `APP_PORT` with automatic mode/type reconciliation across YAML and `.env`.
+**API surface:** `GET /api/status`, `POST /api/refresh`, `GET /api/chain/{ticker}`, `GET /api/snapshots/{ticker}`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`.
 
-### Phase 2: CSV Storage Engine & Offline Cache Layer
-- **Scope:** Implement `src/storage/schema.py` and `src/storage/csv_repository.py`.
-- **Key Deliverables:**
-  - Pydantic contract row validator (`OptionContractRow`) and Polars strict schema (`OPTION_CHAIN_POLARS_SCHEMA`).
-  - **Mode 1 Archival Writer:** Saves immutable timestamped snapshots (`data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`), updates `data/latest/{TICKER}_latest.csv` atomically, and updates `data/metadata/snapshot_index.json`.
-  - Offline reader capable of serving historical and latest snapshots when IBKR Gateway is closed.
-- **Exit Gate:** Unit and integration tests verifying atomic writes, schema enforcement, and corrupt-file rejection using synthetic fixture data.
-- **Status: `[IMPLEMENTED]`** — `src/storage/{schema,csv_repository}.py`, `tests/integration/test_csv_pipeline.py`; new exception `SnapshotNotFoundError` (see `docs/DATA_SCHEMA.md` §5).
-
-### Phase 3: IBKR Broker Client, Type 3/4 Handler & Paged Fetcher
-- **Scope:** Implement `src/broker/client.py`, `src/broker/contracts.py`, `src/broker/fetcher.py`, and `src/broker/parser.py`.
-- **Key Deliverables:**
-  - Connection manager targeting configured `IBKR_HOST:IBKR_PORT` (default `127.0.0.1:4001`) with `ReadOnlyIBGuard` enforced.
-  - Dynamic market data mode & primary/fallback selector derived from config (`DELAYED`: Type 3 -> 4; `LIVE`: Type 1 -> 2, with `Error 10089`/`354` live-subscription downgrade and ticker-level `marketDataType` observation).
-  - DTE filter selecting every weekly expiration inside `[30, 120]` DTE (`dte_min <= dte <= dte_max`, one per ISO week preferring Friday).
-  - Moneyness filter (`+-20%` default around underlying spot, adjustable in UI) and grid-aligned canonical strike step striding (`Auto` default, or `$1` / `$2.5` / `$5` / `$10` / `$25` adjustable in UI), backed by bounded (`asyncio.Semaphore(3)` in active event loops) TTL-cached per-expiration `reqContractDetailsAsync` exact-strike pre-fetching (with pooled `reqSecDefOptParams` fallback) so monthly/weekly differences avoid `Error 200` phantom strikes and redundant qualification.
-  - Paged micro-batch downloader (`options_chain.max_contracts_per_page = 80`, `max_pages_per_refresh = 5`) respecting IBKR's 100-line ceiling and pacing limits (with chunked 20-contract `0.01s` subscribe/cancel yields and mid-batch `GatewayConnectionError` transport recovery), plus a modular collector/placeholder for generic tick `101` (Open Interest).
-  - Targeted **Wall Strike Corridor & Live Streaming (`src/broker/corridor.py`)**: selects `±k` strikes (`±5` default) around Primary Put & Call Walls plus active Strategy Lab legs and ATM strikes, strictly capped at `<= 60` contracts (default `56`), reusing CSV/cached `conId > 0` without re-qualification, with one-shot pull (`fetch_corridor_quotes`) and throttled continuous streaming (`stream_corridor_quotes`) enforcing `finally: cancelMktData` 100% teardown.
-- **Exit Gate:** Mocked `ib-async` integration tests proving pagination math, pacing compliance, `<= 60` corridor subscription cap, 100% `cancelMktData` cleanup, and graceful disconnect recovery.
-- **Status: `[IMPLEMENTED]`** — `src/broker/{client,contracts,parser,fetcher,corridor}.py` with `tests/unit/test_contracts_and_pagination.py` and `tests/unit/test_corridor.py` (see `docs/ARCHITECTURE.md` §7).
-
-### Phase 4: Quantitative Analytics & BSM Fallback Engine
-- **Scope:** Implement `src/analytics/bsm_fallback.py`, `src/analytics/walls.py`, `src/analytics/anomalies.py`, and `src/analytics/term_greeks.py`.
-- **Key Deliverables:**
-  - Vectorized Black-Scholes-Merton (BSM) solver that populates Implied Volatility, Delta, Gamma, Theta, and Vega whenever IBKR Type 3/4 delayed ticks omit `modelGreeks` (using configurable `risk_free_rate: 0.0425`).
-  - Call Wall and Put Wall identification (by Open Interest and by Volume, with automatic Volume Wall fallback when Type 3 delayed data omits OI).
-  - Unusual activity detector (`Volume > Open Interest` and cross-strike Volume Z-score outliers across strikes and DTEs).
-  - Multi-DTE aggregation profiles overlaying weekly expirations inside `[30, 120]` DTE.
-  - Multi-leg strategy evaluator & Wall-anchored auto-builder (`src/analytics/strategies.py`): supports `Bull Put Spread`, `Bull Call Spread`, `Diagonal Spread`, `Iron Condor`, and arbitrary `CUSTOM` legs with `Mid`/`Natural`/Slippage/Limit Ladder, Risk/RoR/Breakevens/POP%/`±1σ` Expected Move, net Greeks, and BSM `T+n` / `ΔIV` curves.
-- **Exit Gate:** Deterministic mathematical unit tests verifying BSM Greeks accuracy, wall/anomaly rankings, and strategy pricing/payoffs.
-- **Status: `[IMPLEMENTED]`** — `src/analytics/{bsm_fallback,walls,anomalies,term_greeks,strategies}.py` with `tests/unit/test_bsm_and_analytics.py` and `tests/unit/test_strategies.py` (see `docs/ARCHITECTURE.md` §8).
-
-### Phase 5: FastAPI Backend & NYT/Terminal Dual-Theme UI
-- **Scope:** Implement `src/main.py`, `src/web/api.py`, `src/web/templates/`, and `src/web/static/`.
-- **Key Deliverables:**
-  - FastAPI endpoints for server status (`GET /api/status`), on-demand refresh (`POST /api/refresh`), cached snapshot loading (`GET /api/chain/{ticker}`), historical archive switching (`GET /api/snapshots/{ticker}`), CSV download (`GET /api/csv/{ticker}`), on-demand cached Strategy Lab auto-build/evaluation (`POST /api/strategy/suggest`, `POST /api/strategy/evaluate`), and targeted Wall Strike Corridor quotes/SSE live streaming (`POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`).
-  - Reserved top-level **Editorial Banner Container** (`#editorial-banner-slot`, structural slot kept ready for future content).
-  - Dual-theme switcher (**Variant 1: NYT Print Edition** vs. **Variant 2: Obsidian Terminal**).
-  - Interactive snap-to-grid 12-column corner-resizable Plotly multi-DTE charts (with `#walls-copy-ai-btn` Polish-language AI prompt export for the active DTE scope and `Step $` / `Range %` telemetry sync), dynamic config/gateway-driven `#editorial-banner-copy` and `#app-bootstrap` metadata (`Live`/`Delayed` feed labels, dynamic `host:port`, `• Snap T<N>` banner attribution), dismissible context-rich `#alert-banner` (`#N • HH:MM:SS`, repeat badge, `.is-fresh` pulse, `timeoutMs` + non-JSON `textSnippet` + isolated Stage 1 HTTP vs. Stage 2 `UI_RENDER` error reporting), per-ticker saved pull preferences, click-only default-enabled `#wall-corridor-card` (`data-panel-id="corridor"`, `±5` strikes around Walls, `[Refresh Corridor Quotes]`, `[ ] Enable Live Constant Streaming` switch, Bid/Ask ladder + Plotly chart syncing live quotes into Strategy Lab without mutating Mode 1 CSVs), full-width `#strategy-lab-card` (`data-panel-id="strategy"`, enabled by default in `PANELS:`, cache-only `[x] Auto-Build on Load` `#strategy-auto-populate` toggle, nearest-DTE expiry snap, `CUSTOM` leg preservation on same-ticker reload, Wall auto-build + pickable legs + BSM `T+n` payoff diagram), and high-density monospaced 18-column tabular option chains with sortable headers, sticky per-column filter controls, and `+Leg` row buttons (`#chain-table`).
-- **Exit Gate:** End-to-end smoke test rendering UI from offline CSV fixtures and live/mocked refresh, corridor SSE, and disconnect cleanup triggers.
-- **Status: `[IMPLEMENTED]`** — `src/main.py`, `src/web/api.py`, `src/web/templates/{base,index}.html`, `src/web/static/css/tokens.css`, `src/web/static/js/dashboard.js` with `tests/integration/test_web_api.py` and `tests/integration/test_corridor_api.py` (see `docs/ARCHITECTURE.md` §9).
-
----
+**Change protocol for new work** (roadmap items in `docs/FUTURE_IMPROVEMENTS.md` or fixes):
+1. Work one layer at a time in dependency order (`core -> storage -> broker -> analytics -> web`); never write monolithic untested code.
+2. Every change ships with tests, passes `make check`, and completes the §3 Documentation Audit before the next step.
+3. Record user-visible changes under `## [Unreleased]` in `CHANGELOG.md`.
 
 ## 5. Standard Commands Reference
 All workflows are standardized through `Makefile` and `docker compose`:

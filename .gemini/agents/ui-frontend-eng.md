@@ -58,7 +58,7 @@ analytics; it must never contain math or socket logic itself.
 
 **Reads (context diet — nothing else on startup):**
 - docs/UI_UX_GUIDELINES.md (only the row/section you are changing)
-- docs/ARCHITECTURE.md (section 9 only)
+- docs/reference/IMPLEMENTATION_NOTES.md (section 5 only)
 - src/web/, src/main.py
 - public Pydantic models / function signatures of src/storage/csv_repository.py, src/analytics/*.py, src/broker/corridor.py
 

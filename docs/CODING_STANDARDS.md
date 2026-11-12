@@ -72,4 +72,5 @@ Every feature phase requires automated tests in `pytest`:
 Before completing any task, coding agents must verify:
 - [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, `scripts/js_check.py`, `scripts/sync_agents.py --check`, and `pytest`) passes with 0 errors.
 - [ ] `AGENTS.md` reflects any new commands, phases, or structural rules.
-- [ ] `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md`, `docs/SECURITY_AND_SAFETY.md`, `docs/UI_UX_GUIDELINES.md`, and `docs/FUTURE_IMPROVEMENTS.md` are updated to match the exact state of the codebase.
+- [ ] `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md`, `docs/SECURITY_AND_SAFETY.md`, `docs/UI_UX_GUIDELINES.md`, `docs/FUTURE_IMPROVEMENTS.md`, and `docs/reference/IMPLEMENTATION_NOTES.md` are updated to match the exact state of the codebase.
+- [ ] User-visible changes are listed under `## [Unreleased]` in `CHANGELOG.md`.

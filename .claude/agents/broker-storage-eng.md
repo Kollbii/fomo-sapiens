@@ -64,7 +64,8 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - `tests/integration/test_csv_pipeline.py`
 
 **Reads (context diet — nothing else on startup):**
-- docs/ARCHITECTURE.md (sections 3, 5, 6, 7 only)
+- docs/ARCHITECTURE.md (sections 3 and 5 only)
+- docs/reference/IMPLEMENTATION_NOTES.md (sections 1-3 only, when touching existing helpers)
 - `docs/SECURITY_AND_SAFETY.md`
 - `docs/DATA_SCHEMA.md`
 - `config/settings.yaml`

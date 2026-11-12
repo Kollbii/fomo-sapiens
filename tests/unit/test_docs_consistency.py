@@ -15,7 +15,7 @@ from src.main import create_app
 
 ROOT = Path(__file__).resolve().parents[2]
 DOC_FILES = sorted(
-    [ROOT / "AGENTS.md", *(ROOT / "docs").glob("*.md"), *(ROOT / ".agent" / "agents").glob("*.md")]
+    [ROOT / "AGENTS.md", *(ROOT / "docs").rglob("*.md"), *(ROOT / ".agent" / "agents").glob("*.md")]
 )
 WEB_DIR = ROOT / "src" / "web"
 ELEMENT_ID_RE = re.compile(r"`#([a-z][a-z0-9-]+)`")
