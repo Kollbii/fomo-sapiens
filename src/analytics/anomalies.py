@@ -2,12 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import polars as pl
 from pydantic import BaseModel, ConfigDict
 
-OptionRight = Literal["C", "P"]
+from src.storage.schema import OptionRight
 
 DEFAULT_ZSCORE_THRESHOLD: float = 2.0
 _STD_EPSILON: float = 1e-9

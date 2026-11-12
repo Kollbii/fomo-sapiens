@@ -15,8 +15,10 @@ from fastapi.templating import Jinja2Templates
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
+from src.services.analyzer import AnalyzerService
 from src.storage.csv_repository import CSVRepository
-from src.web.api import AnalyzerWebService, get_web_service, register_exception_handlers, router
+from src.web.api import get_web_service, router
+from src.web.errors import register_exception_handlers
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +44,7 @@ def create_app(
 ) -> FastAPI:
     """Create and configure the FastAPI application in Offline-First mode."""
     cfg = settings or get_settings()
-    service = AnalyzerWebService(
+    service = AnalyzerService(
         settings=cfg,
         repo=repo,
         broker_client=broker_client,
@@ -91,7 +93,7 @@ def create_app(
     @application.get("/", response_class=HTMLResponse)
     async def index(
         request: Request,
-        svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+        svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
     ) -> HTMLResponse:
         return templates.TemplateResponse(
             request=request,

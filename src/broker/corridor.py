@@ -8,24 +8,17 @@ import logging
 import math
 import time
 import uuid
-from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 import numpy as np
+import numpy.typing as npt
 import polars as pl
 from ib_async import Option, Stock
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.analytics.bsm_fallback import (
-    DAYS_PER_YEAR,
-    DEFAULT_RISK_FREE_RATE,
-    MIN_DTE_YEARS_NUMERATOR,
-    bsm_greeks,
-    solve_implied_volatility,
-)
-from src.analytics.walls import ChainWallsReport, WallBasis, compute_walls
 from src.broker.client import IBKRBrokerClient, SleepFn, market_data_type_label, poll_until
 from src.broker.contracts import extract_spot
 from src.broker.fetcher import (
@@ -42,7 +35,13 @@ from src.core.exceptions import (
     PacingViolationError,
 )
 from src.core.security import TickerValidator
-from src.storage.schema import GreeksSource, sanitize_count, sanitize_price
+from src.storage.schema import (
+    GreeksSource,
+    OptionRight,
+    WallBasis,
+    sanitize_count,
+    sanitize_price,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +50,8 @@ DEFAULT_CORRIDOR_MAX_CONTRACTS = 56
 DEFAULT_WINDOW_STRIKES = 5
 
 CorridorZone = Literal["PUT_WALL", "CALL_WALL", "BOTH_WALLS", "ATM", "STRATEGY_LEG"]
-OptionRight = Literal["C", "P"]
+FloatArray = npt.NDArray[np.float64]
+BoolArray = npt.NDArray[np.bool_]
 
 
 class CorridorLegRef(BaseModel):
@@ -168,6 +168,47 @@ class CorridorSelection:
     wall_basis: WallBasis
     atm_strike: float
     specs: tuple[CorridorContractSpec, ...]
+
+
+@dataclass(frozen=True)
+class WallAnchors:
+    """Primary Put/Call Wall strikes the corridor is centred on (computed by the caller).
+
+    The broker layer never computes walls itself; `src/services/corridor.py` derives anchors
+    from the analytics walls report. `by_expiry` maps ISO expiry -> `(put_wall, call_wall)`;
+    missing sides fall back to the aggregate walls.
+    """
+
+    basis: WallBasis
+    aggregate_put: float | None = None
+    aggregate_call: float | None = None
+    by_expiry: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
+
+    def resolve(self, expiry: str) -> tuple[float | None, float | None]:
+        put_wall, call_wall = self.by_expiry.get(expiry, (None, None))
+        return (
+            put_wall if put_wall is not None else self.aggregate_put,
+            call_wall if call_wall is not None else self.aggregate_call,
+        )
+
+
+class GreeksFallback(Protocol):
+    """Computes Greeks for quotes lacking IBKR `modelGreeks` (injected; e.g. vectorized BSM).
+
+    Returns `(iv, delta, gamma, theta, vega, usable)`; rows with `usable == False` keep their
+    cached snapshot Greeks.
+    """
+
+    def __call__(
+        self,
+        *,
+        mark_price: FloatArray,
+        spot: FloatArray,
+        strike: FloatArray,
+        dte: FloatArray,
+        is_call: BoolArray,
+        fallback_iv: FloatArray,
+    ) -> tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray, BoolArray]: ...
 
 
 @dataclass
@@ -315,12 +356,12 @@ def _row_to_spec(
 def select_wall_corridor(
     df: pl.DataFrame,
     *,
+    wall_anchors: WallAnchors,
     target_expiry: str | None = None,
     window_strikes: int = DEFAULT_WINDOW_STRIKES,
     max_contracts: int = DEFAULT_CORRIDOR_MAX_CONTRACTS,
     priority_legs: Sequence[CorridorLegRef] = (),
     include_opposite_right: bool = True,
-    walls_report: ChainWallsReport | None = None,
 ) -> CorridorSelection:
     """Select `±window_strikes` around Primary Put & Call Walls, strictly `<= 60` contracts.
 
@@ -344,8 +385,6 @@ def select_wall_corridor(
     if spot <= 0.0:
         raise OptionChainFetchError(f"Invalid spot price {spot} for {symbol}")
 
-    walls = walls_report or compute_walls(df, top_n=3)
-
     exp_rows = df.select(["expiry", "dte"]).unique().sort(["dte", "expiry"]).iter_rows(named=True)
     exps = [(str(r["expiry"]), int(r["dte"])) for r in exp_rows]
     if not exps:
@@ -358,19 +397,7 @@ def select_wall_corridor(
     else:
         resolved_expiry, resolved_dte = exps[0]
 
-    dte_wall = next((w for w in walls.by_dte if w.expiry == resolved_expiry), None)
-    put_wall = (
-        dte_wall.primary_put_wall.strike
-        if dte_wall and dte_wall.primary_put_wall
-        else (walls.aggregate_primary_put_wall.strike if walls.aggregate_primary_put_wall else None)
-    )
-    call_wall = (
-        dte_wall.primary_call_wall.strike
-        if dte_wall and dte_wall.primary_call_wall
-        else (
-            walls.aggregate_primary_call_wall.strike if walls.aggregate_primary_call_wall else None
-        )
-    )
+    put_wall, call_wall = wall_anchors.resolve(resolved_expiry)
 
     df_exp = df.filter(pl.col("expiry") == resolved_expiry).sort(["strike", "right"])
     if df_exp.height == 0:
@@ -519,7 +546,7 @@ def select_wall_corridor(
         max_contracts=eff_max,
         primary_put_wall=put_wall,
         primary_call_wall=call_wall,
-        wall_basis=walls.primary_basis,
+        wall_basis=wall_anchors.basis,
         atm_strike=atm_strike,
         specs=tuple(chosen),
     )
@@ -545,9 +572,9 @@ def _build_frame_quotes(
     *,
     spot: float,
     updated_ts_utc: str,
-    risk_free_rate: float,
+    greeks_fallback: GreeksFallback | None,
 ) -> list[CorridorQuoteRow]:
-    """Convert raw IBKR `Ticker` objects to sorted `CorridorQuoteRow` items with BSM fallback."""
+    """Convert raw IBKR `Ticker` objects to `CorridorQuoteRow` items (Greeks fallback injected)."""
     interim: list[tuple[CorridorContractSpec, dict[str, Any]]] = []
     missing_indices: list[int] = []
 
@@ -596,63 +623,43 @@ def _build_frame_quotes(
             )
         )
 
-    # Lightweight vectorized BSM Greeks pass for missing delayed modelGreeks (<= 60 rows)
-    if missing_indices and spot > 0.0:
-        n_miss = len(missing_indices)
-        mids = np.array(
-            [float(interim[i][1]["mid"] or 0.0) for i in missing_indices],
-            dtype=np.float64,
+    # Rows without IBKR modelGreeks: injected fallback (vectorized BSM, <= 60 rows) when
+    # available, otherwise / when unusable the cached snapshot Greeks are kept.
+    usable = np.zeros(len(missing_indices), dtype=np.bool_)
+    computed: tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray] | None = None
+    if missing_indices and greeks_fallback is not None and spot > 0.0:
+        miss_specs = [interim[i][0] for i in missing_indices]
+        iv_arr, d_arr, g_arr, th_arr, v_arr, usable = greeks_fallback(
+            mark_price=np.array(
+                [float(interim[i][1]["mid"] or 0.0) for i in missing_indices], dtype=np.float64
+            ),
+            spot=np.full(len(missing_indices), spot, dtype=np.float64),
+            strike=np.array([s.strike for s in miss_specs], dtype=np.float64),
+            dte=np.array([float(s.dte) for s in miss_specs], dtype=np.float64),
+            is_call=np.array([s.right == "C" for s in miss_specs], dtype=np.bool_),
+            fallback_iv=np.array(
+                [s.cached_iv if s.cached_iv is not None else np.nan for s in miss_specs],
+                dtype=np.float64,
+            ),
         )
-        spots = np.full(n_miss, spot, dtype=np.float64)
-        strikes = np.array([interim[i][0].strike for i in missing_indices], dtype=np.float64)
-        t_years = np.array(
-            [
-                max(float(interim[i][0].dte), MIN_DTE_YEARS_NUMERATOR) / DAYS_PER_YEAR
-                for i in missing_indices
-            ],
-            dtype=np.float64,
-        )
-        is_calls = np.array([interim[i][0].right == "C" for i in missing_indices], dtype=np.bool_)
-        solved_iv, solved_mask = solve_implied_volatility(
-            mark_price=mids,
-            spot=spots,
-            strike=strikes,
-            t_years=t_years,
-            risk_free_rate=risk_free_rate,
-            is_call=is_calls,
-        )
-        eff_iv = np.empty(n_miss, dtype=np.float64)
-        usable = np.zeros(n_miss, dtype=np.bool_)
-        for pos, row_idx in enumerate(missing_indices):
-            cached_iv = interim[row_idx][0].cached_iv
-            if bool(solved_mask[pos]):
-                eff_iv[pos] = float(solved_iv[pos])
-                usable[pos] = True
-            elif cached_iv is not None and 0.01 <= cached_iv <= 10.0:
-                eff_iv[pos] = float(cached_iv)
-                usable[pos] = True
-            else:
-                eff_iv[pos] = 0.30
-
-        d_arr, g_arr, th_arr, v_arr = bsm_greeks(
-            spots, strikes, t_years, risk_free_rate, eff_iv, is_calls
-        )
-        for pos, row_idx in enumerate(missing_indices):
-            spec_i, data_i = interim[row_idx]
-            if bool(usable[pos]):
-                data_i["iv"] = round(float(eff_iv[pos]), 4)
-                data_i["delta"] = round(float(d_arr[pos]), 4)
-                data_i["gamma"] = round(float(g_arr[pos]), 5)
-                data_i["theta"] = round(float(th_arr[pos]), 4)
-                data_i["vega"] = round(float(v_arr[pos]), 4)
-                data_i["greeks_source"] = "BSM_FALLBACK"
-            else:
-                data_i["iv"] = spec_i.cached_iv
-                data_i["delta"] = spec_i.cached_delta
-                data_i["gamma"] = spec_i.cached_gamma
-                data_i["theta"] = spec_i.cached_theta
-                data_i["vega"] = spec_i.cached_vega
-                data_i["greeks_source"] = spec_i.cached_greeks_source
+        computed = (iv_arr, d_arr, g_arr, th_arr, v_arr)
+    for pos, row_idx in enumerate(missing_indices):
+        spec_i, data_i = interim[row_idx]
+        if computed is not None and bool(usable[pos]):
+            iv_arr, d_arr, g_arr, th_arr, v_arr = computed
+            data_i["iv"] = round(float(iv_arr[pos]), 4)
+            data_i["delta"] = round(float(d_arr[pos]), 4)
+            data_i["gamma"] = round(float(g_arr[pos]), 5)
+            data_i["theta"] = round(float(th_arr[pos]), 4)
+            data_i["vega"] = round(float(v_arr[pos]), 4)
+            data_i["greeks_source"] = "BSM_FALLBACK"
+        else:
+            data_i["iv"] = spec_i.cached_iv
+            data_i["delta"] = spec_i.cached_delta
+            data_i["gamma"] = spec_i.cached_gamma
+            data_i["theta"] = spec_i.cached_theta
+            data_i["vega"] = spec_i.cached_vega
+            data_i["greeks_source"] = spec_i.cached_greeks_source
 
     rows: list[CorridorQuoteRow] = []
     for spec, d in interim:
@@ -710,11 +717,13 @@ class CorridorQuoteService:
         *,
         clock: Callable[[], datetime] | None = None,
         sleep: SleepFn = asyncio.sleep,
+        greeks_fallback: GreeksFallback | None = None,
     ) -> None:
         self.client = client
         self.settings = settings or client.settings
         self.clock = clock or (lambda: datetime.now(UTC))
         self.sleep = sleep
+        self.greeks_fallback = greeks_fallback
         self._active_sessions: dict[str, _ActiveCorridorSession] = {}
 
     @property
@@ -911,24 +920,13 @@ class CorridorQuoteService:
 
     async def fetch_corridor_quotes(
         self,
-        df: pl.DataFrame,
+        selection: CorridorSelection,
         *,
         snapshot_id: str,
-        target_expiry: str | None = None,
-        window_strikes: int = DEFAULT_WINDOW_STRIKES,
-        max_contracts: int = DEFAULT_CORRIDOR_MAX_CONTRACTS,
-        priority_legs: Sequence[CorridorLegRef] = (),
         on_frame: Callable[[CorridorQuoteFrame], None] | None = None,
     ) -> CorridorQuoteFrame:
         """One-shot targeted Wall Strike Corridor pull (`<= 60` contracts) with cleanup."""
         t0 = time.perf_counter()
-        selection = select_wall_corridor(
-            df,
-            target_expiry=target_expiry,
-            window_strikes=window_strikes,
-            max_contracts=max_contracts,
-            priority_legs=priority_legs,
-        )
 
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
@@ -957,7 +955,7 @@ class CorridorQuoteService:
                 option_tickers,
                 spot=float(live_spot),
                 updated_ts_utc=ts_utc,
-                risk_free_rate=self.settings.analytics.risk_free_rate or DEFAULT_RISK_FREE_RATE,
+                greeks_fallback=self.greeks_fallback,
             )
             elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
             frame = CorridorQuoteFrame(
@@ -990,27 +988,15 @@ class CorridorQuoteService:
 
     async def stream_corridor_quotes(
         self,
-        df: pl.DataFrame,
+        selection: CorridorSelection,
         *,
         snapshot_id: str,
-        target_expiry: str | None = None,
-        window_strikes: int = DEFAULT_WINDOW_STRIKES,
-        max_contracts: int = DEFAULT_CORRIDOR_MAX_CONTRACTS,
-        priority_legs: Sequence[CorridorLegRef] = (),
         poll_interval_sec: float | None = None,
         is_disconnected: Callable[[], bool | Awaitable[bool]] | None = None,
         max_frames: int | None = None,
         on_frame: Callable[[CorridorQuoteFrame], None] | None = None,
     ) -> AsyncGenerator[CorridorQuoteFrame, None]:
         """Continuously stream throttled Wall Corridor quotes until stop/disconnect/error."""
-        selection = select_wall_corridor(
-            df,
-            target_expiry=target_expiry,
-            window_strikes=window_strikes,
-            max_contracts=max_contracts,
-            priority_legs=priority_legs,
-        )
-
         # Ensure zero overlapping live streams so IBKR line count stays <= 60
         await self.stop_all_streams()
 
@@ -1038,7 +1024,6 @@ class CorridorQuoteService:
                 resubscribe_on_fallback=False,
             )
 
-            rfr = self.settings.analytics.risk_free_rate or DEFAULT_RISK_FREE_RATE
             last_sigs: dict[str, tuple[Any, ...]] = {}
             last_spot: float | None = None
             seq = 0
@@ -1062,7 +1047,7 @@ class CorridorQuoteService:
                     option_tickers,
                     spot=live_spot,
                     updated_ts_utc=ts_utc,
-                    risk_free_rate=rfr,
+                    greeks_fallback=self.greeks_fallback,
                 )
 
                 changed: list[str] = []

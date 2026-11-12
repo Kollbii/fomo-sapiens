@@ -19,7 +19,10 @@ INT_SENTINEL = 2_147_483_647
 SNAPSHOT_ID_RE = re.compile(r"[A-Z]{1,5}_\d{8}_\d{6}")
 _STANDARD_RANGE_PCTS = (0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
 
+# Shared domain literals (single definition; imported by broker, analytics and services).
 GreeksSource = Literal["IBKR_MODEL", "BSM_FALLBACK", "NONE"]
+OptionRight = Literal["C", "P"]
+WallBasis = Literal["OPEN_INTEREST", "VOLUME"]
 
 
 def _is_missing(value: Any) -> bool:

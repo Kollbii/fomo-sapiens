@@ -21,6 +21,7 @@ from src.analytics.bsm_fallback import (
     solve_implied_volatility,
 )
 from src.analytics.walls import ChainWallsReport, DTEWallSummary, compute_walls
+from src.storage.schema import OptionRight
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -37,7 +38,6 @@ PresetStrategyKind = Literal[
     "DIAGONAL_SPREAD",
     "IRON_CONDOR",
 ]
-OptionRight = Literal["C", "P"]
 LegSide = Literal["BUY", "SELL"]
 
 PRESET_STRATEGIES: tuple[PresetStrategyKind, ...] = (

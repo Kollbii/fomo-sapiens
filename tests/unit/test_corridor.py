@@ -11,6 +11,7 @@ import pytest
 from ib_async import Contract
 
 from src.analytics.bsm_fallback import DAYS_PER_YEAR, DEFAULT_RISK_FREE_RATE, bsm_greeks, bsm_price
+from src.analytics.walls import compute_walls
 from src.broker.client import IBKRBrokerClient
 from src.broker.corridor import (
     CORRIDOR_MAX_CONTRACTS,
@@ -23,6 +24,7 @@ from src.broker.corridor import (
 )
 from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import GatewayConnectionError, PacingViolationError
+from src.services.corridor import make_bsm_greeks_fallback, wall_anchors_from_report
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
 from tests.support.aio import noop_sleep, run_coro
 from tests.support.ib_fakes import FakeEvent
@@ -179,11 +181,17 @@ def _build_chain_df(
     return pl.DataFrame(rows, schema=OPTION_CHAIN_POLARS_SCHEMA)
 
 
+def _select(df: pl.DataFrame, **kwargs: Any) -> CorridorSelection:
+    """Service-equivalent selection: anchors derived from the analytics walls report."""
+    anchors = wall_anchors_from_report(compute_walls(df, top_n=3))
+    return select_wall_corridor(df, wall_anchors=anchors, **kwargs)
+
+
 def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> None:
     df = _build_chain_df()
     priority_leg = CorridorLegRef(expiry="2027-01-16", strike=100.0, right="C")
 
-    sel = select_wall_corridor(
+    sel = _select(
         df,
         target_expiry="2026-12-19",
         window_strikes=5,
@@ -206,7 +214,7 @@ def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> Non
     assert leg_spec.zone == "STRATEGY_LEG"
 
     # Attempting to raise max_contracts above 60 still strictly clamps at CORRIDOR_MAX_CONTRACTS.
-    clamped = select_wall_corridor(
+    clamped = _select(
         df,
         target_expiry="2026-12-19",
         window_strikes=7,
@@ -285,11 +293,8 @@ def test_fetch_corridor_quotes_reuses_conids_and_cancels_100pct() -> None:
 
     frame = run_coro(
         service.fetch_corridor_quotes(
-            df,
+            _select(df, target_expiry="2026-12-19", window_strikes=3, max_contracts=40),
             snapshot_id="NVDA_20261111_160000",
-            target_expiry="2026-12-19",
-            window_strikes=3,
-            max_contracts=40,
         )
     )
     assert fake_ib.qualify_calls == 0
@@ -340,15 +345,16 @@ def test_fetch_corridor_quotes_falls_back_to_type4_and_computes_bsm_greeks() -> 
 
     fake_ib.ticker_factory = _dynamic_ticker
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    service = CorridorQuoteService(client, sleep=noop_sleep)
+    service = CorridorQuoteService(
+        client,
+        sleep=noop_sleep,
+        greeks_fallback=make_bsm_greeks_fallback(DEFAULT_RISK_FREE_RATE),
+    )
 
     frame = run_coro(
         service.fetch_corridor_quotes(
-            df,
+            _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
             snapshot_id="NVDA_20261111_160000",
-            target_expiry="2026-12-19",
-            window_strikes=2,
-            max_contracts=30,
         )
     )
     assert frame.market_data_type == 4
@@ -369,11 +375,8 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     async def _collect_two() -> list[Any]:
         out: list[Any] = []
         async for frm in service.stream_corridor_quotes(
-            df,
+            _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
             snapshot_id="NVDA_20261111_160000",
-            target_expiry="2026-12-19",
-            window_strikes=2,
-            max_contracts=30,
             max_frames=2,
         ):
             out.append(frm)
@@ -403,11 +406,8 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     fake_ib.subscribed.clear()
     fake_ib.cancelled.clear()
     gen = service.stream_corridor_quotes(
-        df,
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
         snapshot_id="NVDA_20261111_160000",
-        target_expiry="2026-12-19",
-        window_strikes=2,
-        max_contracts=30,
     )
     first_frame = run_coro(anext(gen))
     assert service.active_stream_count == 1
@@ -419,11 +419,8 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     fake_ib.subscribed.clear()
     fake_ib.cancelled.clear()
     gen2 = service.stream_corridor_quotes(
-        df,
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
         snapshot_id="NVDA_20261111_160000",
-        target_expiry="2026-12-19",
-        window_strikes=2,
-        max_contracts=30,
     )
     frame2 = run_coro(anext(gen2))
     stopped = run_coro(service.stop_all_streams())
@@ -437,11 +434,8 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     fake_ib.subscribed.clear()
     fake_ib.cancelled.clear()
     gen3 = service.stream_corridor_quotes(
-        df,
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
         snapshot_id="NVDA_20261111_160000",
-        target_expiry="2026-12-19",
-        window_strikes=2,
-        max_contracts=30,
     )
     frame3 = run_coro(anext(gen3))
     fake_ib.disconnect()
@@ -496,14 +490,37 @@ def test_corridor_live_mode_falls_back_type1_to_type2_dynamically() -> None:
 
     frame = run_coro(
         service.fetch_corridor_quotes(
-            df,
+            _select(df, target_expiry="2026-12-19", window_strikes=1, max_contracts=20),
             snapshot_id="NVDA_20261111_160000",
-            target_expiry="2026-12-19",
-            window_strikes=1,
-            max_contracts=20,
         )
     )
     assert frame.market_data_type == 2
     assert any("Type 1" in n and "Type 2" in n for n in frame.notices)
     assert fake_ib.market_data_types[-2:] == [1, 2]
+    assert len(fake_ib.cancelled) == len(fake_ib.subscribed)
+
+
+def test_corridor_without_injected_greeks_fallback_keeps_cached_snapshot_greeks() -> None:
+    """The broker never computes Greeks itself; without a fallback cached values are reused."""
+    df = _build_chain_df(strikes=[90.0, 100.0, 110.0], put_wall=90.0, call_wall=110.0)
+    fake_ib = _FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
+
+    frame = run_coro(
+        service.fetch_corridor_quotes(
+            _select(df, target_expiry="2026-12-19", window_strikes=1, max_contracts=10),
+            snapshot_id="NVDA_20261111_160000",
+        )
+    )
+    cached = {
+        (r["expiry"], r["strike"], r["right"]): r
+        for r in df.filter(pl.col("expiry") == "2026-12-19").to_dicts()
+    }
+    assert frame.quotes
+    for q in frame.quotes:
+        row = cached[(q.expiry, q.strike, q.right)]
+        assert q.iv == pytest.approx(row["iv"])
+        assert q.delta == pytest.approx(row["delta"])
+        assert q.greeks_source == row["greeks_source"]
     assert len(fake_ib.cancelled) == len(fake_ib.subscribed)

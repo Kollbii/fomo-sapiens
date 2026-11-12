@@ -20,6 +20,8 @@ milestones in git history.
 - `pyproject.toml` package readme is now `README.md`.
 - Reproducible environments: `make setup` runs `uv sync --locked --extra dev`; the Docker image is multi-stage, installs runtime dependencies only from `uv.lock`, runs as non-root user `app`, ships a `HEALTHCHECK`, and uses an allow-list `.dockerignore` (no docs/tests/dev tools in the image).
 
+- Introduced the `src/services/` layer (`AnalyzerService`, corridor glue, request/response schemas); `src/web/` is now thin routes (`api.py`) + exception mapping (`errors.py`). The broker no longer imports analytics (walls passed as `WallAnchors`, BSM Greeks injected via `GreeksFallback`), and service-level validation errors return `422 INVALID_REQUEST` with `error_code`/`message`/`detail`. Import rules are enforced by `tests/unit/test_layering.py`.
+
 ### Fixed
 - Documentation no longer claims unused tooling (Tailwind, HTMX, `scipy.optimize`) or non-existent identifiers.
 

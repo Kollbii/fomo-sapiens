@@ -98,9 +98,15 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── anomalies.py
     │   │   ├── term_greeks.py
     │   │   └── strategies.py
+    │   ├── services/
+    │   │   ├── __init__.py
+    │   │   ├── analyzer.py       # AnalyzerService: refresh, chain analytics, Strategy Lab, corridor
+    │   │   ├── corridor.py       # WallAnchors / BSM GreeksFallback glue, live-quote overlay cache
+    │   │   └── schemas.py        # request/response models (public API contract)
     │   └── web/
     │       ├── __init__.py
-    │       ├── api.py
+    │       ├── api.py            # thin FastAPI routes + SSE
+    │       ├── errors.py         # domain exception -> JSON mapping
     │       ├── templates/
     │       │   ├── base.html
     │       │   └── index.html
@@ -119,6 +125,9 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 ---
 
 ## 3. Core Component Responsibilities
+
+### 3.0 Layering & Service Layer
+`src/web/` is a thin HTTP adapter over `src/services/AnalyzerService`, which is the only component composing broker, storage, and analytics (full dependency rules in `docs/CODING_STANDARDS.md` §1). The broker never imports analytics: the service derives `WallAnchors` from `compute_walls()` and injects the vectorized BSM `GreeksFallback` into `CorridorQuoteService`. Services raise domain exceptions only; `src/web/errors.py` maps them to structured JSON (`InvalidRequestError` -> `422 INVALID_REQUEST`, also echoed as `detail`).
 
 ### 3.1 FastAPI Lifespan & Shared Event Loop (`src/main.py`, `src/broker/client.py`)
 - `ib-async` requires an active `asyncio` event loop. FastAPI's `lifespan` context manager initializes a singleton `IBKRBrokerClient` bound to the Uvicorn event loop.

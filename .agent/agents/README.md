@@ -38,14 +38,14 @@ Gemini reasoning effort is applied through `.gemini/settings.json` → `agents.o
 
 | Agent | Profile | Tools | Use when the change touches… |
 | :--- | :--- | :--- | :--- |
-| `broker-storage-eng` | deep-reasoning | rw + bash | `src/core/` (except `security.py`), `src/storage/`, `src/broker/`, `config/settings.yaml`, `.env.example` |
+| `broker-storage-eng` | deep-reasoning | rw + bash | `src/core/` (except `security.py`), `src/storage/`, `src/broker/`, `src/services/` (orchestration, corridor lifecycle), `config/settings.yaml`, `.env.example` |
 | `quant-analytics-eng` | deep-reasoning | rw + bash | `src/analytics/` (BSM, walls, anomalies, term structure, Strategy Lab, roadmap GEX/diff/skew/max-pain) |
-| `ui-frontend-eng` | balanced-coding | rw + bash | `src/main.py`, `src/web/` (routes, SSE, templates, CSS, `dashboard.js`) |
+| `ui-frontend-eng` | balanced-coding | rw + bash | `src/main.py`, `src/web/` (thin routes, SSE, error mapping, templates, CSS, `dashboard.js`) |
 | `doc-sync-auditor` | precise-writer | edit + bash | after any code change: `AGENTS.md`, `docs/*.md`, `.agent/agents/*.md` |
-| `safety-reviewer` | deep-reasoning | **read-only** + bash | review gate for diffs in `src/core/`, `src/broker/`, `src/storage/`, `src/web/api.py`, `Makefile` guard |
+| `safety-reviewer` | deep-reasoning | **read-only** + bash | review gate for diffs in `src/core/`, `src/services/`, `src/broker/`, `src/storage/`, `src/web/api.py`, `Makefile` guard |
 | `qa-git-runner` | fast-executor | read + bash | `make check`, commit, tag, push (on request) |
 
-Cross-layer features (e.g. GEX: analytics + API + chart) are split by layer: `quant-analytics-eng` first (defines the Pydantic report), then `ui-frontend-eng` (route + chart), each with its own HANDOFF.
+Cross-layer features (e.g. GEX: analytics + service + API + chart) are split by layer: `quant-analytics-eng` first (defines the Pydantic report), `broker-storage-eng` wires it into `src/services/`, then `ui-frontend-eng` (route + chart), each with its own HANDOFF.
 
 `src/core/security.py` has no owner: changes require an explicit user request, `broker-storage-eng` to implement, and `safety-reviewer` APPROVE.
 
@@ -55,7 +55,7 @@ Cross-layer features (e.g. GEX: analytics + API + chart) are split by layer: `qu
 
     1. Build   -> domain agent (one per layer, in dependency order: core/storage/broker -> analytics -> web)
     2. Docs    -> doc-sync-auditor        (uses HANDOFF.docs_impact + git diff)
-    3. Review  -> safety-reviewer         (mandatory if core/broker/storage/web/api.py changed; optional otherwise)
+    3. Review  -> safety-reviewer         (mandatory if core/broker/storage/services/web/api.py changed; optional otherwise)
     4. Verify  -> qa-git-runner           (make check, commit; push only on explicit request)
 
 Every agent ends with the `[HANDOFF …]` block from `_shared/protocol.md`; the orchestrator passes only that block (not the full transcript) to the next agent.

@@ -14,6 +14,7 @@ owns:
   - src/core/exceptions.py
   - src/storage/
   - src/broker/
+  - src/services/
   - config/settings.yaml
   - .env.example
   - tests/unit/test_config.py
@@ -26,11 +27,11 @@ reads:
   - docs/SECURITY_AND_SAFETY.md
   - docs/DATA_SCHEMA.md
   - config/settings.yaml
-  - public signatures of src/analytics/bsm_fallback.py and src/analytics/walls.py (corridor imports them)
+  - public signatures of src/analytics/*.py (consumed only by src/services/)
 forbidden:
   - src/core/security.py (changes require safety-reviewer sign-off; only extend BLOCKED_METHODS, never shrink)
   - src/web/
-  - src/analytics/ (request changes from quant-analytics-eng)
+  - src/analytics/ (request changes from quant-analytics-eng); src/broker/ must never import it
   - docs/UI_UX_GUIDELINES.md (do not read)
 ---
 
@@ -65,6 +66,11 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 ## 5. Wall Corridor (`src/broker/corridor.py`)
 - Tier 0 Strategy legs -> Tier 1 primary wall side -> Tier 2 opposite right at walls -> Tier 3 ATM; `len(specs) <= max_contracts <= 60` else `PacingViolationError`.
 - One-shot (`fetch_corridor_quotes`) and single-active stream (`stream_corridor_quotes`) must cancel 100% of subscriptions on stop, SSE disconnect, `gen.aclose()`, ticker/expiry switch, gateway drop, and lifespan exit. Every new code path needs a cleanup test in `test_corridor.py`.
+
+## 5a. Service Layer (`src/services/`)
+- `AnalyzerService` is the only place that composes broker + storage + analytics; keep it HTTP-agnostic (raise `InvalidRequestError` / domain errors, never `HTTPException`).
+- Corridor: derive `WallAnchors` via `wall_anchors_from_report(compute_walls(...))`, inject `make_bsm_greeks_fallback(rfr)` into `CorridorQuoteService`, validate + `ensure_connected()` before handing a stream generator to the web layer.
+- Request/response models live in `src/services/schemas.py`; changing them is a public API change (`contracts_touched`).
 
 ## 6. Storage (`src/storage/`)
 - Exactly the 27 columns in `docs/DATA_SCHEMA.md` §2; `OptionContractRow` (Pydantic) and `OPTION_CHAIN_POLARS_SCHEMA` (Polars) must agree. Sentinels `-1.0`, `NaN`, `2147483647`, `<= 0` prices -> `null`.

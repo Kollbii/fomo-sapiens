@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import NamedTuple
+
 import numpy as np
 import numpy.typing as npt
 import polars as pl
@@ -21,6 +23,9 @@ INTRINSIC_TOLERANCE: float = 1e-6
 PRICE_CONVERGENCE_TOL: float = 1e-8
 MIN_RAW_VEGA: float = 1e-8
 SOLVER_ITERATIONS: int = 25
+FALLBACK_IV_MIN: float = 0.01
+FALLBACK_IV_MAX: float = 10.0
+_PLACEHOLDER_IV: float = 0.30
 
 _INV_SQRT_2: float = 1.0 / float(np.sqrt(2.0))
 _INV_SQRT_2PI: float = 1.0 / float(np.sqrt(2.0 * np.pi))
@@ -196,6 +201,52 @@ def solve_implied_volatility(
     iv = np.clip(iv, IV_LOWER_BOUND, IV_UPPER_BOUND)
     solved_iv[solvable] = iv
     return solved_iv, solvable
+
+
+class QuoteGreeks(NamedTuple):
+    """Per-quote BSM results; `usable[i] == False` means no trustworthy IV was available."""
+
+    iv: FloatArray
+    delta: FloatArray
+    gamma: FloatArray
+    theta: FloatArray
+    vega: FloatArray
+    usable: BoolArray
+
+
+def greeks_for_quotes(
+    *,
+    mark_price: FloatArray,
+    spot: FloatArray,
+    strike: FloatArray,
+    dte: FloatArray,
+    is_call: BoolArray,
+    fallback_iv: FloatArray,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> QuoteGreeks:
+    """BSM Greeks for live quotes lacking `modelGreeks`.
+
+    IV is solved from `mark_price`; where that fails, a previously known `fallback_iv`
+    (e.g. from the cached snapshot, NaN when unknown) inside `[0.01, 10.0]` is reused.
+    Rows with neither are flagged `usable=False` and their Greeks must be ignored.
+    """
+    t_years: FloatArray = np.maximum(dte, MIN_DTE_YEARS_NUMERATOR) / DAYS_PER_YEAR
+    solved_iv, solved = solve_implied_volatility(
+        mark_price=mark_price,
+        spot=spot,
+        strike=strike,
+        t_years=t_years,
+        risk_free_rate=risk_free_rate,
+        is_call=is_call,
+    )
+    in_range: BoolArray = (fallback_iv >= FALLBACK_IV_MIN) & (fallback_iv <= FALLBACK_IV_MAX)
+    fallback_ok: BoolArray = np.isfinite(fallback_iv) & in_range
+    usable: BoolArray = solved | fallback_ok
+    eff_iv: FloatArray = np.where(
+        solved, solved_iv, np.where(fallback_ok, fallback_iv, _PLACEHOLDER_IV)
+    )
+    delta, gamma, theta, vega = bsm_greeks(spot, strike, t_years, risk_free_rate, eff_iv, is_call)
+    return QuoteGreeks(iv=eff_iv, delta=delta, gamma=gamma, theta=theta, vega=vega, usable=usable)
 
 
 def enrich_missing_greeks(

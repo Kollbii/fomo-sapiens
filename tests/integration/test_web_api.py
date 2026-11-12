@@ -834,3 +834,19 @@ def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
             assert repo.index_path.parent.is_dir()
 
     run_coro(_exercise())
+
+
+def test_service_level_validation_errors_map_to_structured_422(tmp_path: Path) -> None:
+    app, _repo, _mock_ib = _build_test_app(tmp_path, offline=True)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+                resp = await http.get("/api/chain/NVDA?dte_min=60&dte_max=40")
+                assert resp.status_code == 422
+                body = resp.json()
+                assert body["error_code"] == "INVALID_REQUEST"
+                assert body["message"] == body["detail"] == "dte_min must be <= dte_max"
+
+    run_coro(_exercise())

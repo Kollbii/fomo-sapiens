@@ -13,6 +13,7 @@ from src.analytics.bsm_fallback import (
     bsm_greeks,
     bsm_price,
     enrich_missing_greeks,
+    greeks_for_quotes,
 )
 from src.analytics.term_greeks import MultiDTEStructureAnalyzer, build_multi_dte_profiles
 from src.analytics.walls import WallsAnalyzer, compute_walls
@@ -407,3 +408,26 @@ def test_build_multi_dte_profiles_across_weekly_expiries() -> None:
     assert e37.strikes[1].put_delta == pytest.approx(-0.48)
     assert e37.strikes[1].call_oi == 500
     assert e37.strikes[1].put_oi == 450
+
+
+def test_greeks_for_quotes_prefers_solved_iv_then_fallback_iv_then_flags_unusable() -> None:
+    spot = np.full(3, 100.0)
+    strike = np.full(3, 100.0)
+    is_call = np.ones(3, dtype=np.bool_)
+    theo = bsm_price(
+        spot[:1], strike[:1], np.array([30 / 365.0]), 0.0425, np.array([0.40]), is_call[:1]
+    )
+    marks = np.array([float(theo[0]), 0.0, 0.0])  # row 0 solvable; rows 1-2 have no usable mark
+    result = greeks_for_quotes(
+        mark_price=marks,
+        spot=spot,
+        strike=strike,
+        dte=np.full(3, 30.0),
+        is_call=is_call,
+        fallback_iv=np.array([np.nan, 0.55, np.nan]),
+        risk_free_rate=0.0425,
+    )
+    assert result.usable.tolist() == [True, True, False]
+    assert result.iv[0] == pytest.approx(0.40, abs=1e-4)
+    assert result.iv[1] == pytest.approx(0.55)
+    assert 0.0 < result.delta[0] < 1.0

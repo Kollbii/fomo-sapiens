@@ -39,5 +39,9 @@ class StorageSchemaError(AnalyzerError):
     """Raised when CSV/row data violates the storage schema contract."""
 
 
+class InvalidRequestError(AnalyzerError):
+    """Request is well-formed but semantically invalid for the current data (HTTP 422)."""
+
+
 class SnapshotNotFoundError(AnalyzerError):
     """Raised when a requested snapshot / latest CSV does not exist on disk."""

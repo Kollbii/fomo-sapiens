@@ -17,28 +17,28 @@ reads:
   - docs/UI_UX_GUIDELINES.md (only the row/section you are changing)
   - docs/reference/IMPLEMENTATION_NOTES.md (section 5 only)
   - src/web/, src/main.py
-  - public Pydantic models / function signatures of src/storage/csv_repository.py, src/analytics/*.py, src/broker/corridor.py
+  - src/services/schemas.py and the public methods of src/services/analyzer.py (`AnalyzerService`)
 forbidden:
   - src/core/security.py
-  - src/broker/ internals (call only the public client/service API)
-  - src/analytics/ (request changes from quant-analytics-eng)
+  - src/services/, src/broker/, src/analytics/ (request changes from the owning agent)
   - data/ (never hand-edit snapshots)
 ---
 
 # Role: FastAPI + NYT Editorial / Financial Terminal UI Engineer
 
-You own the orchestration layer and the browser. `src/web/api.py` composes broker, storage and
-analytics; it must never contain math or socket logic itself.
+You own the HTTP adapter and the browser. `src/web/` may import only `src.core` and
+`src.services` (enforced by `tests/unit/test_layering.py`); orchestration lives in
+`src/services/` (owned by `broker-storage-eng`) and math/socket logic never enters `src/web/`.
 
 ## 1. Navigating Large Files (mandatory token rule)
 `dashboard.js` is ~7.4k lines, `tokens.css` ~1.8k, `index.html` ~800. Never read them whole.
 - Find: `grep -n "function renderStrategyPayoff\|function apiJson" src/web/static/js/dashboard.js`
 - Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
 
-## 2. Backend Rules (`src/web/api.py`, `src/main.py`)
-- Every route that takes a ticker calls `TickerValidator.validate()` first. Errors map to structured JSON: `422` validation/ticker/legs, `404` missing snapshot, `503` offline/fetch/pacing (format configured `{host}:{port}`). Never leak tracebacks to the browser.
+## 2. Backend Rules (`src/web/api.py`, `src/web/errors.py`, `src/main.py`)
+- Routes stay thin: parse HTTP input, call one `AnalyzerService` method (which runs `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `422` ticker/request (`INVALID_TICKER`, `INVALID_REQUEST`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`), `502` fetch/spot, `429` pacing, `403` security. Never leak tracebacks to the browser.
 - Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`. A new/renamed route => `contracts_touched`.
-- SSE: `ensure_connected()` before streaming (else `503`), `finally: await gen.aclose()`; lifespan shutdown awaits `stop_corridor_streams()` before disconnect.
+- SSE: `AnalyzerService.open_corridor_stream()` validates and calls `ensure_connected()` before the route returns a `StreamingResponse` (so failures are `422`/`503`, not a broken stream); the route keeps `finally: await gen.aclose()`; lifespan shutdown awaits `stop_corridor_streams()` before disconnect.
 - Corridor live quotes overlay an in-memory cache only; Mode 1 CSVs are never mutated.
 - Boot must succeed with the Gateway closed (Offline Cache Mode).
 

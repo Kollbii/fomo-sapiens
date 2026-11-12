@@ -2,7 +2,7 @@
 name: safety-reviewer
 description: >-
   Use (read-only) to review a diff before commit whenever it touches src/core/, src/broker/,
-  src/storage/, src/web/api.py, the Makefile security guard, or any IBKR subscription logic.
+  src/storage/, src/services/, src/web/api.py, the Makefile security guard, or any IBKR subscription logic.
   Audits against the hard anti-patterns: order/account APIs, unvalidated tickers, unfiltered
   chains, leaked market-data lines, event-loop blocking, snapshot overwrites, error leakage.
   Returns APPROVE / REQUEST_CHANGES with file:line findings. Never edits files.

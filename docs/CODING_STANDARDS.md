@@ -1,12 +1,18 @@
 # Coding Standards, Typing & Testing Protocol (`CODING_STANDARDS.md`)
 
 ## 1. Modular Separation of Concerns
-Coding agents must enforce strict boundaries between the 5 layers in `src/`:
-1. **`src/core/`:** Pure configuration (`config.py`), domain exceptions (`exceptions.py`), and security guards (`security.py`). Zero imports from `broker`, `analytics`, `storage`, or `web`.
-2. **`src/storage/`:** Schema definitions (`schema.py`) and CSV persistence (`csv_repository.py`). Must never import `ib_async` or `fastapi`.
-3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged fetching, and raw tick parsing. Returns validated `OptionContractRow` lists. Must never import `fastapi`.
-4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs. Zero network or disk I/O inside `src/analytics/`.
-5. **`src/web/`:** FastAPI route handlers, Jinja2 templates, and static assets. Orchestrates calls to `broker`, `storage`, and `analytics`.
+Coding agents must enforce strict boundaries between the 6 layers in `src/` (enforced by `tests/unit/test_layering.py`):
+
+    core <- storage <- broker          analytics -> {core, storage}
+    services -> {core, storage, broker, analytics}
+    web -> {core, services}            main.py (composition root) -> anything
+
+1. **`src/core/`:** Pure configuration (`config.py`), domain exceptions (`exceptions.py`), and security guards (`security.py`). Imports only `src.core`.
+2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`) and CSV persistence (`csv_repository.py`). Must never import `ib_async` or `fastapi`.
+3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged fetching, raw tick parsing, and corridor subscriptions. Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
+4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs. Zero network or disk I/O; may import `src.storage.schema` types only.
+5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
+6. **`src/web/`:** FastAPI routes (`api.py`), exception-to-JSON mapping (`errors.py`), Jinja2 templates, and static assets. Imports only `src.core` and `src.services`.
 
 ---
 
@@ -21,7 +27,7 @@ Coding agents must enforce strict boundaries between the 5 layers in `src/`:
 - Use Python's structured `logging` module (configured in `src/core/config.py`) writing to both `stdout` and `data/logs/analyzer.log` (rotating file handler).
 - Every manual refresh must log a structured summary line containing:
   - `ticker`, `market_data_type`, `spot_price`, `dtes_matched`, `range_pct`, `strike_step`, `total_contracts`, `pages_fetched`, `elapsed_ms`, `greeks_source_counts`, and `snapshot_id`.
-- Never log stack traces raw to the browser UI; translate all exceptions in `src/web/api.py` into structured JSON/HTML alert banners using `src/core/exceptions.py`.
+- Never log stack traces raw to the browser UI; translate all domain exceptions in `src/web/errors.py` into structured JSON/HTML alert banners using `src/core/exceptions.py`.
 
 ---
 
@@ -65,6 +71,8 @@ Every feature phase requires automated tests in `pytest`:
    - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
 11. **`tests/unit/test_docs_consistency.py`:**
    - Fails when `AGENTS.md`, `docs/*.md`, or `.agent/agents/*.md` reference a `` `#<id>` `` missing from `src/web/` templates/JS/CSS, or a `GET|POST /api/...` route the app does not serve (checked against the OpenAPI schema).
+12. **`tests/unit/test_layering.py`:**
+   - AST-scans every module in `src/{core,storage,broker,analytics,services,web}` and fails on imports that violate the §1 dependency rules (including banned third-party imports such as `fastapi` outside `web`).
 
 ---
 

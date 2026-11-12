@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
 import polars as pl
 from pydantic import BaseModel, ConfigDict
 
-WallBasis = Literal["OPEN_INTEREST", "VOLUME"]
-OptionRight = Literal["C", "P"]
+from src.storage.schema import OptionRight, WallBasis
 
 
 class WallLevel(BaseModel):
