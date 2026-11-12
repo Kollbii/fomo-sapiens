@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import time
 from collections import Counter
@@ -25,6 +24,7 @@ from src.broker.parser import (
     SnapshotContext,
     TickerParser,
     has_live_opra_data,
+    has_real_quote,
     has_usable_quote,
 )
 from src.core.config import Settings
@@ -38,8 +38,11 @@ DELAYED_GENERIC_TICKS = "100,101,106"
 LIVE_OPRA_GENERIC_TICKS = "100,101,104,106"
 EMPTY_QUOTE_FALLBACK_THRESHOLD = 0.80
 PACING_COOLDOWN_SEC = 1.0
+# ib_async sends at most 45 messages per 1 s window (`Client.MaxRequests`) and queues the rest.
+# Requests and cancels go out in bursts of 20 with a 0.55 s pause before each burst, so any
+# 1 s window holds at most 2 bursts (40 messages) and nothing waits in the ib_async queue.
 PAGE_PACING_CHUNK_SIZE = 20
-PAGE_PACING_YIELD_SEC = 0.01
+PAGE_PACING_PAUSE_SEC = 0.55
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,7 @@ class FetchResult:
     pages_fetched: int
     elapsed_ms: float
     notices: tuple[str, ...] = ()
+    page_quote_counts: tuple[int, ...] = ()
 
 
 def paginate_contracts(
@@ -80,6 +84,14 @@ def empty_quote_ratio(tickers: Sequence[Any]) -> float:
     if not tickers:
         return 0.0
     empty = sum(1 for t in tickers if not has_usable_quote(t))
+    return empty / len(tickers)
+
+
+def empty_real_quote_ratio(tickers: Sequence[Any]) -> float:
+    """Fraction of tickers on a page without a current quote (no valid `bid` and no valid `ask`)."""
+    if not tickers:
+        return 0.0
+    empty = sum(1 for t in tickers if not has_real_quote(t))
     return empty / len(tickers)
 
 
@@ -239,6 +251,8 @@ class PagedOptionChainFetcher:
         tickers: list[Any] = []
         try:
             for idx, contract in enumerate(page_contracts):
+                if idx % PAGE_PACING_CHUNK_SIZE == 0:
+                    await self.sleep(PAGE_PACING_PAUSE_SEC)
                 ticker = ib.reqMktData(
                     contract,
                     genericTickList=generic_tick_list,
@@ -247,9 +261,8 @@ class PagedOptionChainFetcher:
                 )
                 subscribed.append(contract)
                 tickers.append(ticker)
-                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(page_contracts):
-                    await self.sleep(PAGE_PACING_YIELD_SEC)
 
+            # The poll window starts only after the last request of the page was sent.
             await poll_until(
                 lambda: all(ready_predicate(t) for t in tickers),
                 oc.page_collect_timeout_sec,
@@ -262,14 +275,32 @@ class PagedOptionChainFetcher:
             self.client.handle_stage_error(exc, stage=stage)
             raise
         finally:
-            for idx, contract in enumerate(subscribed):
+            await self._cancel_paced(subscribed)
+
+    async def _cancel_paced(self, subscribed: Sequence[Any]) -> None:
+        """Cancel every subscription in paced bursts; never skips a cancel.
+
+        If a pause is interrupted, the remaining cancels are sent without pauses. A
+        `CancelledError` (or other `BaseException`) is re-raised after all cancels are sent.
+        """
+        ib = self.client.ib
+        pacing = True
+        deferred: BaseException | None = None
+        for idx, contract in enumerate(subscribed):
+            if pacing and idx % PAGE_PACING_CHUNK_SIZE == 0:
                 try:
-                    ib.cancelMktData(contract)
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("cancelMktData failed for %s", contract)
-                if (idx + 1) % PAGE_PACING_CHUNK_SIZE == 0 and idx + 1 < len(subscribed):
-                    with contextlib.suppress(Exception):
-                        await self.sleep(PAGE_PACING_YIELD_SEC)
+                    await self.sleep(PAGE_PACING_PAUSE_SEC)
+                except Exception:
+                    pacing = False
+                except BaseException as exc:  # e.g. asyncio.CancelledError
+                    pacing = False
+                    deferred = exc
+            try:
+                ib.cancelMktData(contract)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("cancelMktData failed for %s", contract)
+        if deferred is not None:
+            raise deferred
 
     async def _collect_page_with_fallback(
         self,
@@ -305,13 +336,13 @@ class PagedOptionChainFetcher:
         if (
             allow_fallback
             and self.client.can_fallback()
-            and empty_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
+            and empty_real_quote_ratio(tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
         ):
             prev_type = self.client.current_type
             new_type = self.client.switch_to_fallback_data_type()
             notice = (
-                f"Over 80% of Type {prev_type} ({market_data_type_label(prev_type)}) quotes were "
-                f"empty; switched to MarketDataType({new_type}) "
+                f"Over 80% of Type {prev_type} ({market_data_type_label(prev_type)}) contracts "
+                f"had no bid/ask; switched to MarketDataType({new_type}) "
                 f"{market_data_type_label(new_type)}"
             )
             self._notices.append(notice)
@@ -319,7 +350,7 @@ class PagedOptionChainFetcher:
             tickers = await self._collect_page_once(
                 page_contracts,
                 generic_tick_list=generic_tick_list,
-                ready_predicate=has_usable_quote,
+                ready_predicate=has_real_quote,
             )
 
         self.client.observe_tickers_market_data_type(tickers)
@@ -335,7 +366,7 @@ class PagedOptionChainFetcher:
         return await self._collect_page_with_fallback(
             page_contracts,
             generic_tick_list=DELAYED_GENERIC_TICKS,
-            initial_ready=has_usable_quote,
+            initial_ready=has_real_quote,
             allow_fallback=allow_fallback,
             check_live_downgrade=False,
         )
@@ -436,13 +467,19 @@ class PagedOptionChainFetcher:
                 )
             )
 
+        page_size = self.max_contracts_per_page
+        page_quote_counts = tuple(
+            sum(1 for tk in tickers[i : i + page_size] if has_real_quote(tk))
+            for i in range(0, len(tickers), page_size)
+        )
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         source_counts = dict(Counter(r.greeks_source for r in rows))
         dtes_matched = [m.dte for m in plan.expirations]
         logger.info(
             "refresh_summary ticker=%s market_data_type=%d spot_price=%.4f "
             "dtes_matched=%s range_pct=%.4f strike_step=%.4f total_contracts=%d "
-            "pages_fetched=%d elapsed_ms=%.2f greeks_source_counts=%s snapshot_id=%s",
+            "pages_fetched=%d page_quote_counts=%s spot_source=%s elapsed_ms=%.2f "
+            "greeks_source_counts=%s snapshot_id=%s",
             plan.underlying.symbol,
             active_md_type,
             plan.underlying.spot,
@@ -451,6 +488,8 @@ class PagedOptionChainFetcher:
             plan.strikes.effective_step,
             len(rows),
             pages_fetched,
+            list(page_quote_counts),
+            plan.underlying.spot_source,
             elapsed_ms,
             source_counts,
             snapshot_id,
@@ -467,4 +506,5 @@ class PagedOptionChainFetcher:
             pages_fetched=pages_fetched,
             elapsed_ms=elapsed_ms,
             notices=notices,
+            page_quote_counts=page_quote_counts,
         )

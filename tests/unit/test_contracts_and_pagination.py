@@ -31,7 +31,7 @@ from src.broker.fetcher import (
     LIVE_OPRA_GENERIC_TICKS,
     PACING_COOLDOWN_SEC,
     PAGE_PACING_CHUNK_SIZE,
-    PAGE_PACING_YIELD_SEC,
+    PAGE_PACING_PAUSE_SEC,
     PagedOptionChainFetcher,
     empty_quote_ratio,
     paginate_contracts,
@@ -601,7 +601,9 @@ def test_fetcher_cancels_mkt_data_on_exception() -> None:
         Option("NVDA", "20261211", float(130 + i), "C", "SMART", conId=i + 1) for i in range(5)
     ]
 
-    async def _boom_sleep(_sec: float) -> None:
+    async def _boom_sleep(sec: float) -> None:
+        if sec == PAGE_PACING_PAUSE_SEC:
+            return  # pacing pauses pass; the first poll interval fails
         raise RuntimeError("simulated poll failure")
 
     fetcher.sleep = _boom_sleep
@@ -1198,8 +1200,8 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
     tickers, pages = _run(fetcher.fetch_pages(contracts))
     assert pages == 1
     assert len(tickers) == len(contracts)
-    # 2 chunks during subscribe + 2 chunks during cancel = 4 pacing yields
-    assert sleeps.count(PAGE_PACING_YIELD_SEC) == 4
+    # 3 bursts of <= 20 during subscribe + 3 during cancel, each preceded by a pacing pause
+    assert sleeps.count(PAGE_PACING_PAUSE_SEC) == 6
     assert len(fake_ib.cancelled) == len(contracts)
 
     # Now simulate a mid-batch socket drop inside reqMktData / poll loop -> GatewayConnectionError
@@ -1272,9 +1274,13 @@ def test_client_configured_types_ticker_observation_and_live_midpage_downgrade()
                 contract,
             )
             return SimpleNamespace(contract=contract, bid=-1.0, ask=-1.0, last=-1.0, close=-1.0)
+        # ib_async maps delayed ticks 66/67/68 onto Ticker.bid / ask / last.
         return SimpleNamespace(
             contract=contract,
             marketDataType=3,
+            bid=4.1,
+            ask=4.3,
+            last=4.2,
             delayedBid=4.1,
             delayedAsk=4.3,
             delayedLast=4.2,
