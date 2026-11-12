@@ -17,6 +17,7 @@ from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
 from src.storage.csv_repository import CSVRepository
 from src.web.api import AnalyzerWebService, get_web_service, register_exception_handlers, router
+from src.web.backtest_api import backtest_router
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ def create_app(
 
     register_exception_handlers(application)
     application.include_router(router)
+    application.include_router(backtest_router)
 
     @application.get("/", response_class=HTMLResponse)
     async def index(
