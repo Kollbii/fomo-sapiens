@@ -118,6 +118,47 @@
     <a id="export-csv-btn" class="btn" href="/api/csv/{{ default_ticker }}" download>
       EXPORT CSV
     </a>
+    <div class="collector-control" id="collector-control">
+      <button type="button" id="collector-toggle-btn" class="btn collector-toggle" aria-haspopup="dialog" aria-expanded="false" aria-controls="collector-panel" title="Scheduled snapshot collection during the US session">
+        <span id="collector-toggle-dot" class="collector-dot" aria-hidden="true"></span>
+        <span id="collector-toggle-label">COLLECTOR: OFF</span>
+      </button>
+      <div id="collector-panel" class="collector-panel" role="dialog" aria-label="Scheduled collection" hidden>
+        <div class="collector-panel__head">
+          <span class="collector-panel__title">Scheduled collection</span>
+          <label class="collector-switch">
+            <input type="checkbox" id="collector-enabled" />
+            <span>Collect automatically</span>
+          </label>
+        </div>
+        <label class="collector-row">
+          <span class="field-label">Interval</span>
+          <select id="collector-interval" class="select-control" aria-label="Collection interval">
+            <option value="15">Every 15 min</option>
+            <option value="30">Every 30 min</option>
+            <option value="60" selected>Every 60 min</option>
+            <option value="120">Every 120 min</option>
+            <option value="0">Closing snapshot only</option>
+          </select>
+        </label>
+        <div class="collector-section-label">Tickers &amp; pinned parameters</div>
+        <table class="collector-tickers">
+          <thead>
+            <tr><th>Ticker</th><th>Range</th><th>Step</th><th>DTE</th><th>Pinned since</th><th><span class="sr-only">Remove</span></th></tr>
+          </thead>
+          <tbody id="collector-tickers-body"></tbody>
+        </table>
+        <div class="collector-add">
+          <input id="collector-add-input" class="input-control" type="text" maxlength="5" placeholder="E.G. AAPL" aria-label="Add a ticker to collect" autocomplete="off" />
+          <button type="button" id="collector-add-btn" class="btn">ADD</button>
+        </div>
+        <div class="collector-actions">
+          <span id="collector-dirty" class="collector-hint" aria-live="polite"></span>
+          <button type="button" id="collector-save-btn" class="btn btn-primary">SAVE</button>
+        </div>
+        <div id="collector-status" class="collector-status" aria-live="polite"></div>
+      </div>
+    </div>
   </div>
 
   <div
