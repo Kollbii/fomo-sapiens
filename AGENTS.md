@@ -105,8 +105,11 @@ All workflows are standardized through `Makefile` and `docker compose`:
     # Stop Docker container
     make docker-down
 
-    # Run full verification suite (Ruff lint + format check + Mypy strict + static Security guard + Pytest)
+    # Run full verification suite (Ruff lint + format check + Mypy strict + Security guard + Agent-spec sync + Pytest)
     make check
+
+    # Regenerate Claude Code / Gemini CLI sub-agents from .agent/ (run after editing .agent/)
+    make agents-sync
 
     # Run unit & integration tests only
     make test
@@ -123,10 +126,15 @@ All workflows are standardized through `Makefile` and `docker compose`:
 
 ---
 
-## 7. Specialized Sub-Agents & Token Optimization (`.agent/agents/`)
-To minimize token usage and keep context windows small, delegate tasks to the specialized profiles in `.agent/agents/` (see `.agent/agents/README.md` for full routing):
-- **`.agent/agents/broker-storage-eng.md`**: Use for Phases 1–3 (`src/core/`, `src/storage/`, `src/broker/`). Reads only architecture, security, and schema docs.
-- **`.agent/agents/quant-analytics-eng.md`**: Use for Phase 4 (`src/analytics/`). Pure Polars/NumPy/SciPy math; reads only schema and analytics specs.
-- **`.agent/agents/ui-frontend-eng.md`**: Use for Phase 5 (`src/main.py`, `src/web/`). Reads only `docs/UI_UX_GUIDELINES.md`.
-- **`.agent/agents/doc-sync-auditor.md`**: Lightweight agent that inspects `git diff` and updates `AGENTS.md` and `docs/*.md` without reading full source trees.
-- **`.agent/agents/qa-git-runner.md`**: Ultra-low-token runner that executes `make check` (`ruff`, `mypy`, security grep, `pytest`), reports compact pass/fail status, creates conventional commits, and pushes.
+## 7. Specialized Sub-Agents, Model Routing & Multi-Platform Support (`.agent/`)
+Delegate work to the specialized profiles to keep context windows small (full routing, model rationale, and workflow in `.agent/agents/README.md`):
+- **Single source of truth:** canonical specs in `.agent/agents/*.md`, model/reasoning profiles and tool mapping in `.agent/models.yaml`, shared invariants + `[HANDOFF]` format in `.agent/agents/_shared/protocol.md`.
+- **Generated adapters (never hand-edit):** `.claude/agents/*.md` (Claude Code) and `.gemini/agents/*.md` (Gemini CLI), rendered by `scripts/sync_agents.py` via `make agents-sync`; `make agents-check` (part of `make check`) fails when they drift. Entry files `CLAUDE.md` and `GEMINI.md` import this `AGENTS.md`; `.gemini/settings.json` carries generated per-agent Gemini `thinkingConfig` overrides.
+- **Agents:**
+  - **`broker-storage-eng`** (`deep-reasoning`: Claude `opus` / Gemini `gemini-4-argon` `thinkingLevel: HIGH`): Phases 1–3 (`src/core/` except `security.py`, `src/storage/`, `src/broker/`).
+  - **`quant-analytics-eng`** (`deep-reasoning`): Phase 4 (`src/analytics/`), pure Polars/NumPy/SciPy math and Strategy Lab.
+  - **`ui-frontend-eng`** (`balanced-coding`: `sonnet` / `gemini-4-argon` `thinkingLevel: LOW`): Phase 5 (`src/main.py`, `src/web/`).
+  - **`doc-sync-auditor`** (`precise-writer`: `sonnet` / `gemini-3.8-flash` `thinkingLevel: HIGH`): diff-driven sync of `AGENTS.md`, `docs/*.md`, `.agent/agents/*.md`.
+  - **`safety-reviewer`** (`deep-reasoning`, read-only tools): APPROVE / REQUEST_CHANGES review gate for diffs touching `src/core/`, `src/broker/`, `src/storage/`, `src/web/api.py`.
+  - **`qa-git-runner`** (`fast-executor`: `haiku` / `gemini-3.8-flash` `thinkingLevel: HIGH`): `make check`, compact report, conventional commits; tags/pushes only on explicit request.
+- **Workflow:** domain agent → `doc-sync-auditor` → `safety-reviewer` (when required) → `qa-git-runner`, passing only the `[HANDOFF]` block between agents.

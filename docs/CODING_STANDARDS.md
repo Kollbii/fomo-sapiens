@@ -48,11 +48,13 @@ Every feature phase requires automated tests in `pytest`:
 
 8. **`tests/unit/test_security_guard.py`:**
    - Verifies `scripts/security_guard.py` passes on `src/` and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), account/position queries (`reqPositions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
+9. **`tests/unit/test_agent_specs.py`:**
+   - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-3.8-flash` always `thinkingLevel: HIGH`) while preserving unrelated settings, and invalid specs are rejected.
 
 ---
 
 ## 5. Mandatory Documentation-Sync Checklist (Definition of Done)
 Before completing any task, coding agents must verify:
-- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, and `pytest`) passes with 0 errors.
+- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, `scripts/sync_agents.py --check`, and `pytest`) passes with 0 errors.
 - [ ] `AGENTS.md` reflects any new commands, phases, or structural rules.
 - [ ] `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md`, `docs/SECURITY_AND_SAFETY.md`, `docs/UI_UX_GUIDELINES.md`, and `docs/FUTURE_IMPROVEMENTS.md` are updated to match the exact state of the codebase.

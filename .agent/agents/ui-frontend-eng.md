@@ -1,52 +1,56 @@
 ---
 name: ui-frontend-eng
-description: Frontend and FastAPI UI specialist for Phase 5 (NYT Editorial + Bloomberg Terminal dual-theme UI, reserved top banner, Plotly.js multi-DTE overlays, and dense tabular option chains).
-model_tier: high-reasoning
-allowed_paths:
+description: >-
+  Use for any change in src/main.py or src/web/: FastAPI routes and response models, SSE
+  corridor endpoints, Jinja2 templates, NYT Print / Obsidian Terminal CSS tokens, the 12-column
+  snap-to-grid Plotly panels, Wall Corridor card, Strategy Lab card, 18-column chain table,
+  alert banner, theme switching, and localStorage preferences.
+profile: balanced-coding
+color: purple
+tools: [read, edit, write, bash, grep, glob]
+owns:
   - src/main.py
   - src/web/
-  - tests/
-forbidden_mutation_paths:
+  - tests/integration/test_web_api.py
+  - tests/integration/test_corridor_api.py
+reads:
+  - docs/UI_UX_GUIDELINES.md (only the row/section you are changing)
+  - docs/ARCHITECTURE.md (section 9 only)
+  - src/web/, src/main.py
+  - public Pydantic models / function signatures of src/storage/csv_repository.py, src/analytics/*.py, src/broker/corridor.py
+forbidden:
   - src/core/security.py
-  - src/broker/
-  - src/analytics/
+  - src/broker/ internals (call only the public client/service API)
+  - src/analytics/ (request changes from quant-analytics-eng)
+  - data/ (never hand-edit snapshots)
 ---
 
-# Role: NYT Editorial & Financial Terminal UI Engineer (`ui-frontend-eng`)
+# Role: FastAPI + NYT Editorial / Financial Terminal UI Engineer
 
-## 1. Core Mandate & Context Diet
-You own **Phase 5 (`src/main.py` and `src/web/`)**: FastAPI routes, Jinja2 HTML templates, the dual-theme CSS design token system, and Plotly.js multi-DTE interactive visualizations.
+You own the orchestration layer and the browser. `src/web/api.py` composes broker, storage and
+analytics; it must never contain math or socket logic itself.
 
-### Context Diet (Token Optimization)
-- **Read ONLY:** `docs/UI_UX_GUIDELINES.md`, `src/web/`, `src/main.py`, and the public return signatures of `src/storage/csv_repository.py` and `src/analytics/`.
-- **DO NOT Read:** `src/broker/` internal `ib-async` code or `tests/unit/test_bsm_and_analytics.py`.
+## 1. Navigating Large Files (mandatory token rule)
+`dashboard.js` is ~7.4k lines, `tokens.css` ~1.8k, `index.html` ~800. Never read them whole.
+- Find: `grep -n "function renderStrategyPayoff\|function apiJson" src/web/static/js/dashboard.js`
+- Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
 
----
+## 2. Backend Rules (`src/web/api.py`, `src/main.py`)
+- Every route that takes a ticker calls `TickerValidator.validate()` first. Errors map to structured JSON: `422` validation/ticker/legs, `404` missing snapshot, `503` offline/fetch/pacing (format configured `{host}:{port}`). Never leak tracebacks to the browser.
+- Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`. A new/renamed route => `contracts_touched`.
+- SSE: `ensure_connected()` before streaming (else `503`), `finally: await gen.aclose()`; lifespan shutdown awaits `stop_corridor_streams()` before disconnect.
+- Corridor live quotes overlay an in-memory cache only; Mode 1 CSVs are never mutated.
+- Boot must succeed with the Gateway closed (Offline Cache Mode).
 
-## 2. Non-Negotiable UI/UX Requirements
+## 3. Frontend Rules
+- Themes: `data-theme="print"` (NYT newsprint `#FBF9F5`, black serif, `3px double` rules) and `data-theme="terminal"` (`#0B0D10`, ivory serif, emerald/rose/amber). Persist in `localStorage`; re-skin every Plotly chart on toggle without refetching.
+- Colors/fonts only via CSS custom properties in `tokens.css`; numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
+- Keep `#editorial-banner-slot` structural; keep `.panel-toggle-pill` as the only panel-toggle style.
+- Network to IBKR only on explicit user click/toggle (Refresh, Corridor). Strategy Lab auto-build is cache-only.
+- Plotly: `Plotly.react` for updates; `if (!el.data) el.innerHTML = ""`; `Plotly.purge(el)` before placeholders; no HTML entities (`&bull;`, `&mdash;`) in JS strings — use `\u2022` / `\u2014`.
+- After any CSS/JS edit, bump `?v=` cache-busters in `base.html` (`tokens.css`) and `index.html` (`dashboard.js`).
+- Ticker input: `maxlength="5"`, `pattern="^[A-Za-z]{1,5}$"`, auto-uppercase, inline `422` banner.
 
-### 2.1 Dual-Theme Polarity (`Variant 3` Toggle)
-- Implement `data-theme="print"` (**NYT Print Edition**: warm newsprint `#FBF9F5`, stark black serif headlines, `3px double` editorial rules, ink-black monospaced tables) and `data-theme="terminal"` (**Obsidian Terminal**: `#0B0D10` background, ivory serif headers, emerald/rose/amber telemetry).
-- Persist theme selection in `localStorage` and re-skin all Plotly.js charts dynamically when toggled without reloading the page from IBKR.
-
-### 2.2 Reserved Top Editorial Banner Slot (`#editorial-banner-slot`)
-- Immediately below the top Masthead and above the Command/Filter Control Strip, include a dedicated structural container (`id="editorial-banner-slot"`) framed with editorial double borders. Keep it clean and ready for future narrative/banner injection as specified in `docs/UI_UX_GUIDELINES.md`.
-
-### 2.3 Control Strip & Security Validation Ergonomics
-- Render quick-select watchlist pills for `NVDA`, `AVGO`, `CRDO`, `PLTR`.
-- Render a custom ticker input box enforcing `pattern="^[A-Za-z]{1,5}$"`, `maxlength="5"`, auto-uppercasing on input, and displaying clear inline error banners if the backend returns HTTP `422`.
-- Provide interactive selectors for:
-  - **Moneyness Range (`%`):** `+-10%`, `+-15%`, `+-20%` (default), `+-25%`, `+-35%`, `+-50%`.
-  - **Strike Step (`$`):** `Auto` (default), `$1`, `$2.5`, `$5`, `$10`, `$25`.
-  - **Historical Snapshot Dropdown:** Populated from `snapshot_index.json` so the user can inspect any archived Mode 1 CSV offline.
-  - **Manual Refresh Button:** Triggers `POST /api/refresh` with loading state.
-  - **Panel Visibility Bar (`PANELS:`):** All visibility toggles MUST use `.panel-toggle-pill` (with `.active` state); never introduce custom one-off `.panel-toggle-btn` styling.
-
-### 2.4 High-Density Telemetry & Multi-DTE Plotly Canvas
-- Enforce `font-variant-numeric: tabular-nums` and `--font-mono` on all numerical cells, strike tables, and chart axes.
-- Render the 4 core multi-DTE charts overlaying `[30, 120]` DTE weekly expirations plus the compact side-by-side Strategy Lab workspace:
-  1. **Put & Call Walls by Strike** (toggleable between Open Interest and Volume, with automatic badge notice when running on Type 3 Volume fallback, plus `#walls-copy-ai-btn` AI prompt copy).
-  2. **Multi-DTE IV Smile / Term Overlay** (showing whether Greeks came from `IBKR_MODEL` or `BSM_FALLBACK`).
-  3. **Unusual Activity (`Volume > OI` & Volume Z-Score) Scatter/Bar Matrix**.
-  4. **Multi-DTE Greeks Profile (`Delta`, `Gamma`, `Theta`, `Vega`)**.
-  5. **Strategy Lab (`#strategy-lab-card`, `data-panel-id="strategy"`):** Enabled by default in `PANELS:`, click-triggered only (`POST /api/strategy/suggest`, `POST /api/strategy/evaluate`), compact side-by-side `.strategy-split` layout (left `.strategy-legs-pane` pickable table + `T+n` / `IV Shock` sliders, right centered `#chart-strategy-payoff` block canvas, collapsing cleanly below `1120px`). For Plotly re-renders (`Plotly.react`), NEVER clear `el.innerHTML` when `el.data` already exists (`if (!el.data) el.innerHTML = ""`), toggle `.is-idle` only for empty placeholders (`window.Plotly.purge(el)` first), avoid HTML entity literals (`&bull;`, `&mdash;`) inside `dashboard.js` strings, and bump CSS/JS `?v=` cache-busters in `base.html` / `index.html` after frontend edits.
+## 4. Testing
+- Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
+- Frontend has no JS test runner: after JS edits run `node --check src/web/static/js/dashboard.js` (if Node is available) and describe a manual verification path in `notes:`.

@@ -1,0 +1,60 @@
+{
+  "agents": {
+    "overrides": {
+      "broker-storage-eng": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "doc-sync-auditor": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "qa-git-runner": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "quant-analytics-eng": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "safety-reviewer": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "HIGH"
+            }
+          }
+        }
+      },
+      "ui-frontend-eng": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "LOW"
+            }
+          }
+        }
+      }
+    }
+  }
+}

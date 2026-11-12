@@ -26,6 +26,7 @@ Users running IBKR Gateway on `IBKR_PORT` (default `4001`, or TWS/custom port) s
   - Order/mutation calls: `.placeOrder(`, `.cancelOrder(`, `.reqGlobalCancel(`, `.exerciseOptions(`, `.whatIfOrder(`, `.whatIfOrderAsync(`.
   - Account/position queries: `.reqAccountSummary*(`, `.reqAccountUpdates*(`, `.reqPositions*(`, `.reqPnL*(`, `.managedAccounts(`, `.reqExecutions*(`, `.reqOpenOrders*(`, `.reqAllOpenOrders*(`.
   - Event-loop blocking `time.sleep(` and `pandas` imports.
+- Diffs touching `src/core/`, `src/broker/`, `src/storage/`, or `src/web/api.py` are additionally reviewed by the read-only `safety-reviewer` sub-agent (`.agent/agents/safety-reviewer.md`) before commit.
 
 ---
 

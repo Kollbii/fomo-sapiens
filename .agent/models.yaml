@@ -1,0 +1,113 @@
+# Model & Reasoning Profiles — single source of truth for every agent platform.
+#
+# Canonical agent specs in `.agent/agents/*.md` reference a `profile:` key below.
+# `scripts/sync_agents.py` renders platform adapters from these profiles:
+#   - Claude Code -> .claude/agents/<name>.md   (frontmatter: name, description, tools, model, color)
+#   - Gemini CLI  -> .gemini/agents/<name>.md   (frontmatter: name, description, kind, tools, model,
+#                                                temperature, max_turns, timeout_mins)
+#                    .gemini/settings.json      (agents.overrides.<name>.modelConfig -> thinkingConfig)
+#
+# Reasoning effort:
+#   - Claude Code: model tier (opus > sonnet > haiku) + `reasoning_guidance` in the agent prompt.
+#   - Gemini CLI : `gemini.thinking_config` is passed verbatim as
+#                  generateContentConfig.thinkingConfig (agent frontmatter cannot carry it — its
+#                  schema is strict). Gemini 3.x / 4 accept `thinkingLevel: LOW | HIGH`;
+#                  Gemini 2.5 used `thinkingBudget` (-1 = dynamic, max 32768 on 2.5 Pro).
+#   - Gemini 3.x+: Google recommends temperature 1.0 (lower values can cause looping / degraded
+#                  reasoning), so all Gemini profiles keep temperature 1.0.
+#
+# To swap a model for ALL agents on one platform (e.g. a new Gemini release), edit ONE line here
+# and run `make agents-sync`. Claude uses stable aliases (opus / sonnet / haiku) that auto-track
+# the newest model of each family; Gemini uses explicit model ids.
+
+# ---- Gemini model ids (edit here only) -------------------------------------------------------
+# `gemini-3.8-flash` = LATEST_GEMINI_FLASH_MODEL in @google/gemini-cli 0.68.0.
+# `gemini-4-argon` ("Argon 4") is not in that CLI's built-in model registry; the CLI passes unknown
+# ids through unchanged, and thinkingConfig is set explicitly per agent (settings.json overrides),
+# so no CLI-side model-family detection is needed.
+gemini_models:
+  pro: &gemini_pro gemini-4-argon      # "Argon 4"
+  flash: &gemini_flash gemini-3.8-flash
+
+profiles:
+  deep-reasoning:
+    purpose: >-
+      Correctness-critical work where a subtle bug costs money or safety: async socket lifecycle,
+      IBKR pacing/cleanup invariants, read-only guard, numerical finance (BSM/IV root-finding,
+      payoff/POP math), adversarial security review.
+    reasoning: high
+    reasoning_guidance: >-
+      Think step by step before editing. Enumerate invariants and edge cases (NaN/sentinel values,
+      empty frames, cancelled tasks, disconnects mid-batch, DTE=0, deep ITM/OTM) and verify each
+      against the code before and after the change.
+    claude:
+      model: opus
+    gemini:
+      model: *gemini_pro
+      temperature: 1.0
+      thinking_config: { thinkingLevel: HIGH }
+      max_turns: 40
+      timeout_mins: 20
+
+  balanced-coding:
+    purpose: >-
+      Large-surface implementation with moderate logical depth: FastAPI routes, Jinja2 templates,
+      CSS tokens, 7k-line dashboard.js, Plotly lifecycle. Needs strong code-gen + long context,
+      not deep math.
+    reasoning: medium
+    reasoning_guidance: >-
+      Plan briefly (which functions/selectors change), then edit surgically. Navigate large files
+      with grep + offset reads instead of loading them whole.
+    claude:
+      model: sonnet
+    gemini:
+      model: *gemini_pro
+      temperature: 1.0
+      thinking_config: { thinkingLevel: LOW }      # large-surface coding; HIGH if UI logic gets hairy
+      max_turns: 40
+      timeout_mins: 20
+
+  precise-writer:
+    purpose: >-
+      Diff-driven technical writing that must stay exactly in sync with identifiers in code
+      (docs sync). Low logical depth, but hallucinated identifiers are costly.
+    reasoning: low
+    reasoning_guidance: >-
+      No long deliberation. Copy identifiers verbatim from the diff; never invent names, numbers,
+      or behaviors that are not visible in the diff.
+    claude:
+      model: sonnet
+    gemini:
+      model: *gemini_flash
+      temperature: 1.0
+      thinking_config: { thinkingLevel: HIGH }     # Flash always on HIGH (cheap, fewer bad edits)
+      max_turns: 20
+      timeout_mins: 10
+
+  fast-executor:
+    purpose: >-
+      Deterministic command execution and compact reporting (make check, git). Almost no
+      reasoning; speed and low token cost dominate.
+    reasoning: minimal
+    reasoning_guidance: >-
+      Do not narrate deliberation. Run the prescribed commands in order, report compactly, stop on
+      the first non-trivial failure and hand off.
+    claude:
+      model: haiku
+    gemini:
+      model: *gemini_flash
+      temperature: 1.0
+      thinking_config: { thinkingLevel: HIGH }     # Flash always on HIGH
+      max_turns: 15
+      timeout_mins: 10
+
+# Abstract capability -> platform tool names.
+# NOTE: Gemini CLI sub-agents are experimental; if your installed version renamed a tool,
+# fix it here once and re-run `make agents-sync`.
+tools:
+  read:  { claude: Read,  gemini: read_file }
+  edit:  { claude: Edit,  gemini: replace }
+  write: { claude: Write, gemini: write_file }
+  bash:  { claude: Bash,  gemini: run_shell_command }
+  grep:  { claude: Grep,  gemini: grep_search }
+  glob:  { claude: Glob,  gemini: glob }

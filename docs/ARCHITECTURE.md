@@ -41,6 +41,13 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 
     ibkr-options-analyzer/
     ├── AGENTS.md
+    ├── CLAUDE.md / GEMINI.md     # platform entry files importing AGENTS.md
+    ├── .agent/                   # canonical sub-agent specs + models.yaml (source of truth)
+    ├── .claude/agents/           # GENERATED Claude Code sub-agents
+    ├── .gemini/                  # GENERATED Gemini CLI sub-agents + settings.json
+    ├── scripts/
+    │   ├── sync_agents.py        # make agents-sync / agents-check
+    │   └── security_guard.py     # make security-guard
     ├── Makefile
     ├── Dockerfile
     ├── docker-compose.yml
