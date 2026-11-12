@@ -838,3 +838,75 @@ def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
                 assert "4001" not in err_msg
 
     _run(_exercise())
+
+
+def test_refresh_records_quality_metadata_and_legacy_entries_load(tmp_path: Path) -> None:
+    app, repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            meta = r_ok.json()["meta"]
+            assert meta["spot_source"] == "LAST"
+            assert meta["collection_mode"] == "MANUAL"
+            assert meta["quote_coverage"] == pytest.approx(1.0)
+            assert meta["quoted_contract_count"] == meta["contract_count"]
+            assert meta["prior_close_only_count"] == 0
+            assert not any("not usable" in n for n in meta["notices"])
+
+            r_snaps = await client.get("/api/snapshots/NVDA")
+            assert r_snaps.status_code == 200
+            snaps = {s["snapshot_id"]: s for s in r_snaps.json()["snapshots"]}
+            fresh = snaps["NVDA_20261111_160000"]
+            assert fresh["spot_source"] == "LAST"
+            assert fresh["collection_mode"] == "MANUAL"
+            assert fresh["quote_coverage"] == pytest.approx(1.0)
+            # The seeded snapshot was saved without spot_source / collection_mode
+            seeded = snaps["NVDA_20261111_150000"]
+            assert seeded["spot_source"] is None
+            assert seeded["collection_mode"] is None
+
+            r_chain = await client.get(
+                "/api/chain/NVDA", params={"snapshot_id": "NVDA_20261111_160000"}
+            )
+            assert r_chain.status_code == 200
+            assert r_chain.json()["meta"]["spot_source"] == "LAST"
+            assert r_chain.json()["meta"]["collection_mode"] == "MANUAL"
+
+    _run(_exercise())
+    assert len(repo.list_snapshots("NVDA")) == 2
+
+
+def test_refresh_flags_unusable_snapshot_in_notices(tmp_path: Path) -> None:
+    app, repo, mock_ib = _build_test_app(tmp_path)
+    original = mock_ib.reqMktData
+
+    def _close_only_spot(contract: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(contract, "secType", "") == "STK":
+            return SimpleNamespace(contract=contract, bid=-1.0, ask=-1.0, last=-1.0, close=139.5)
+        return original(contract, *args, **kwargs)
+
+    mock_ib.reqMktData = _close_only_spot  # type: ignore[method-assign]
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ok = await client.post(
+                "/api/refresh",
+                json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+            )
+            assert r_ok.status_code == 200
+            meta = r_ok.json()["meta"]
+            assert meta["spot_source"] == "CLOSE"
+            assert any(
+                "not usable for history" in n and "spot_source CLOSE" in n for n in meta["notices"]
+            )
+
+    _run(_exercise())
+    # Saved with a flag, not refused
+    assert repo.list_snapshots("NVDA")[0].spot_source == "CLOSE"

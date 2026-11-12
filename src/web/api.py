@@ -50,7 +50,14 @@ from src.core.exceptions import (
 )
 from src.core.security import TickerValidator
 from src.storage.csv_repository import CSVRepository
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SnapshotMeta, infer_chain_step_and_range
+from src.storage.quality import evaluate_snapshot, measure_quote_quality
+from src.storage.schema import (
+    OPTION_CHAIN_POLARS_SCHEMA,
+    CollectionMode,
+    SnapshotMeta,
+    SpotSource,
+    infer_chain_step_and_range,
+)
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
 logger = logging.getLogger(__name__)
@@ -123,6 +130,11 @@ class ChainMetadataPayload(BaseModel):
     greeks_source_counts: dict[str, int]
     source: Literal["CACHE", "LIVE_REFRESH"]
     notices: list[str] = Field(default_factory=list)
+    spot_source: SpotSource | None = None
+    quoted_contract_count: int | None = None
+    quote_coverage: float | None = None
+    prior_close_only_count: int | None = None
+    collection_mode: CollectionMode | None = None
 
 
 class ChainAnalyticsResponse(BaseModel):
@@ -363,8 +375,11 @@ class AnalyzerWebService:
         exchange_native_verified: bool | None = None,
         available_strike_steps: list[float] | None = None,
         available_range_pcts: list[float] | None = None,
+        spot_source: SpotSource | None = None,
+        collection_mode: CollectionMode | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
+        quality = measure_quote_quality(enriched)
         first = enriched.row(0, named=True)
         source_counts = dict(Counter(str(s) for s in enriched["greeks_source"].to_list()))
         expirations = sorted(str(e) for e in enriched["expiry"].unique().to_list())
@@ -426,6 +441,11 @@ class AnalyzerWebService:
             greeks_source_counts=source_counts,
             source=source,
             notices=list(notices or []),
+            spot_source=spot_source,
+            quoted_contract_count=quality.quoted_contract_count,
+            quote_coverage=quality.quote_coverage,
+            prior_close_only_count=quality.prior_close_only_count,
+            collection_mode=collection_mode,
         )
 
         walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
@@ -485,6 +505,8 @@ class AnalyzerWebService:
             exchange_native_verified=(snap_meta.exchange_native_verified if snap_meta else None),
             available_strike_steps=(snap_meta.available_strike_steps if snap_meta else None),
             available_range_pcts=(snap_meta.available_range_pcts if snap_meta else None),
+            spot_source=snap_meta.spot_source if snap_meta else None,
+            collection_mode=snap_meta.collection_mode if snap_meta else None,
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -719,13 +741,20 @@ class AnalyzerWebService:
             else len({float(r.strike) for r in fetch_res.rows})
         )
         self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
-        self.repo.save_snapshot(
+        saved_meta = self.repo.save_snapshot(
             symbol,
             enriched_df.to_dicts(),
             range_pct=plan.range_pct,
             strike_step=actual_step,
             requested_strike_step=req_step,
+            spot_source=plan.underlying.spot_source,
+            collection_mode="MANUAL",
         )
+        quality_verdict = evaluate_snapshot(saved_meta)
+        if not quality_verdict.usable:
+            notices.append(
+                "Snapshot saved but not usable for history: " + "; ".join(quality_verdict.reasons)
+            )
         return self.build_analytics_payload(
             enriched_df,
             source="LIVE_REFRESH",
@@ -737,6 +766,8 @@ class AnalyzerWebService:
             exchange_native_verified=bool(plan.exchange_native_verified),
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
+            spot_source=saved_meta.spot_source,
+            collection_mode=saved_meta.collection_mode,
         )
 
 
