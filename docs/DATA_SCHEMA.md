@@ -21,10 +21,15 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
     │   ├── AVGO_latest.csv
     │   ├── CRDO_latest.csv
     │   └── PLTR_latest.csv
+    ├── tracked/                      # position tracker leg quotes (never in snapshots/)
+    │   └── NVDA/
+    │       └── NVDA_20261211_164512.csv
     └── metadata/
         ├── snapshot_index.json
         ├── collector_settings.json   # scheduled collection settings (atomic JSON)
-        └── collector_runs.jsonl      # one line per scheduled attempt (append-only)
+        ├── collector_runs.jsonl      # one line per scheduled attempt (append-only)
+        ├── tracked_spreads.json      # position tracker registry (atomic JSON)
+        └── tracker_runs.jsonl        # one line per tracked spread per slot (append-only)
 
 ### 1.2 File Naming & Atomic Write Protocol
 - **Archive Filename Pattern:** `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv` (UTC timestamp).
@@ -125,7 +130,7 @@ Every index entry (and `GET /api/snapshots/{ticker}`, chain `meta`) carries five
 | `quoted_contract_count` | rows with a current quote: valid positive `bid` **or** `ask` | derived from the CSV rows |
 | `quote_coverage` | `quoted_contract_count / contract_count`, 4 decimals | derived from the CSV rows |
 | `prior_close_only_count` | rows with no `bid`, `ask` or `last` but a `close` (previous session; `mark_price` then falls back to `close`) | derived from the CSV rows |
-| `collection_mode` | `MANUAL` (every `POST /api/refresh`) or `SCHEDULED` (reserved) | refresh only (`null` after `rebuild_index()`) |
+| `collection_mode` | `MANUAL` (every `POST /api/refresh`) or `SCHEDULED` (scheduled collection, `src/collector/`) | refresh only (`null` after `rebuild_index()`) |
 
 **Quote definition.** Prices are sanitized before storage (`0`, `-1`, `>= 1e9` become empty), so a far out-of-the-money option with a zero bid and a valid ask counts as quoted. `last` and `close` alone never count. The CSV schema is unchanged; these counts can always be recomputed from the rows, so a rebuilt index fills them for old snapshots without rewriting any CSV.
 
@@ -148,3 +153,11 @@ Unknown values make a snapshot not usable. Low-quality snapshots are still saved
 - Scheduled snapshots are ordinary immutable snapshots with `collection_mode: "SCHEDULED"` in the index; the CSV schema is unchanged.
 - `collector_settings.json`: `enabled`, `interval_min`, `tickers` (`symbol`, `range_pct`, `strike_step`, `dte_min`, `dte_max`, `pinned_since_utc`), `updated_at_utc`, `enabled_since_utc`. Written atomically (`.tmp` + `os.replace`).
 - `collector_runs.jsonl`: one JSON object per ticker attempt: `planned_slot_utc`, `slot_kind` (`INTERVAL` / `CLOSING`), `actual_run_utc`, `ticker`, `attempt`, `status` (`OK` / `LOW_QUALITY` / `FAILED` / `SKIPPED` / `MISSED`), `snapshot_id`, `quote_coverage`, `usable`, `quality_reasons`, `requested_range_pct`, `requested_strike_step`, `effective_strike_step`, `dte_min`, `dte_max`, `pin_drift`, `error`, `note`. Unreadable lines are skipped with a warning.
+
+## 7. Position Tracker Files (`src/tracker/`)
+- **Tracked quotes:** `{tracker.tracked_dir}/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv` (default `data/tracked/`), one file per ticker per collection slot holding only the legs of that ticker's ACTIVE tracked spreads (each contract once). Rows are normal `OptionContractRow` rows in the same 27-column schema (`underlying_price`, `market_data_type`, `dte` down to `0` on the expiry day); the CSV schema is unchanged. The id uses the tracker's own UTC time. Files are written to `.{name}.tmp` and renamed with `os.replace`; an existing file is never overwritten, a failed write leaves no file. They are **not** in `data/snapshots/` and **not** in `snapshot_index.json`. `tracker.tracked_dir` must resolve inside `storage.data_dir` and must not be `data/snapshots` or inside it (validated in `src/core/config.py`).
+- `tracked_spreads.json` (atomic `.tmp` + `os.replace`): `{"spreads": [...]}`, each with `id` (`{TICKER}-{YYYYMMDD}-{8 hex}`), `ticker`, `source` (`AUTO` / `USER`), `strategy_kind` (`BULL_PUT_SPREAD`), `legs` (`side`, `right`, `expiry`, `strike`, `option_conid` from the source snapshot), `qty`, `underlying_conid`, `created_from_snapshot_id`, `created_at_utc`, `created_market_date`, `entry_net_credit` (mid credit per share, information only), `status` (`ACTIVE` / `EXPIRED` / `STOPPED`), `status_changed_utc`, `last_quote_utc`. An unreadable registry is never overwritten: the tracker stays idle and the status reports it.
+- `tracker_runs.jsonl` (append-only): `kind` (`QUOTE` / `AUTO` / `LIFECYCLE`), `planned_slot_utc`, `slot_kind`, `actual_run_utc`, `ticker`, `market_date`, `spread_id`, `status`, `tracked_snapshot_id`, `underlying_price`, `spot_source`, `market_data_type`, `priced_legs`, `missing_legs` (`"{SIDE} {RIGHT} {STRIKE} {EXPIRY}: NOT_RETURNED | NO_PRICE"`), `quality_flags` (`FROZEN_DATA`, `SPOT_SOURCE_CLOSE`, `LEG_FALLBACK_PRICE`), `legs`, `source_snapshot_id`, `error`, `note`.
+  - `QUOTE` statuses, one per ACTIVE spread per slot: `OK` (every leg priced from bid/ask), `PARTIAL`, `NO_QUOTE` (spot, spot source and data type still recorded), `FAILED`, `SKIPPED` (refresh lock busy), `MISSED` (app not running).
+  - `AUTO` statuses, logged with the picked legs and the source snapshot id: `REGISTERED`, `AUTO_DUPLICATE`, `AUTO_SKIPPED_CAP`, `AUTO_SKIPPED_NO_USABLE` (logged at the closing slot), `AUTO_FAILED` (the Auto-Builder found no spread; tried again on the next usable snapshot).
+  - `LIFECYCLE` statuses: `EXPIRED`, `STOPPED`.

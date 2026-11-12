@@ -80,3 +80,12 @@ When running inside Docker on Windows or macOS (`make docker-up`):
 - **No overlap:** one `asyncio.Lock` serializes manual and scheduled refreshes, so only one page (`<= 80` lines) is subscribed at a time; corridor streams are stopped before a refresh (after up to 10 min of postponement).
 - **Event loop:** the task uses `asyncio` waits only; no blocking calls. Errors are caught per ticker and logged; the loop never stops on an error.
 - **Files:** collector state lives in `data/metadata/collector_settings.json` and `data/metadata/collector_runs.jsonl`; nothing is written to `data/snapshots/` except new immutable snapshots through `CSVRepository`.
+
+---
+
+## 7. Position Tracker (`src/tracker/`, `PagedOptionChainFetcher.fetch_exact_contracts`)
+- **Only market data for specific contracts:** the tracker's one broker call is `fetch_exact_contracts(ticker, specs, underlying_conid=...)`: one stock `reqMktData` for the spot (cancelled in `finally`), then `reqMktData` / `cancelMktData` for the listed leg contracts through the same paced pages as a chain refresh (bursts of `20`, `0.55s` pauses, pages of `<= 80`, cap `80 x 5 = 400`, `finally` cancels, Type 3 -> 4 / 1 -> 2 fallback). `qualifyContractsAsync` is called only for a contract without a known `conId` (tracked legs always carry the `conId` from the snapshot). It never calls `reqSecDefOptParams` or requests a chain, and it never places, modifies or cancels orders: all calls go through `ReadOnlyIBGuard`.
+- **Tickers:** validated with `TickerValidator` when a spread is registered, again before every quote request and in `make_snapshot_id` / `TrackerStore.quote_path` before any file path.
+- **No overlap:** quoting runs inside the collector's slot while it holds `refresh_lock`, after the ticker's snapshot (all chain-page lines are already cancelled), so line use stays under the `100`-line budget.
+- **Failures:** a tracker error is caught and logged (`FAILED` record); it never stops the collector, never triggers a collector or tracker retry and never leaves a partial file.
+- **Files:** `data/tracked/` (validated to be inside `data/` and outside `data/snapshots/`) plus `data/metadata/tracked_spreads.json` and `tracker_runs.jsonl`; tracked-quote files are immutable.
