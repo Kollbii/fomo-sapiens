@@ -53,4 +53,5 @@ analytics; it must never contain math or socket logic itself.
 
 ## 4. Testing
 - Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
-- Frontend has no JS test runner: after JS edits run `node --check src/web/static/js/dashboard.js` (if Node is available) and describe a manual verification path in `notes:`.
+- Frontend has no JS test runner: after JS edits run `make js-check` and describe a manual verification path in `notes:`.
+- Offline end-to-end smoke coverage lives in `tests/integration/test_offline_fixture_smoke.py` (golden CSV in `tests/fixtures/snapshots/`); extend it when adding page-level features.

@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypeVar
+from typing import Any
 
 import httpx
 import pytest
@@ -19,27 +18,8 @@ from src.core.config import Settings, StorageSettings
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository
 from src.web.api import api_corridor_stream
-
-T = TypeVar("T")
-
-
-def _run(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a pure ASGI / mocked coroutine to completion without opening OS sockets."""
-    try:
-        while True:
-            coro.send(None)
-    except StopIteration as stop:
-        val: T = stop.value
-        return val
-
-
-async def _noop_sleep(_seconds: float) -> None:
-    return None
-
-
-class _FakeEvent:
-    def __iadd__(self, _handler: Any) -> _FakeEvent:
-        return self
+from tests.support.aio import noop_sleep, run_coro
+from tests.support.ib_fakes import FakeEvent
 
 
 class _MockCorridorIB:
@@ -48,7 +28,7 @@ class _MockCorridorIB:
     def __init__(self, *, offline: bool = False) -> None:
         self.offline = offline
         self._connected = False
-        self.errorEvent = _FakeEvent()
+        self.errorEvent = FakeEvent()
         self.wrapper = SimpleNamespace(clientId=0)
         self.market_data_types: list[int] = []
         self.qualify_calls = 0
@@ -184,9 +164,9 @@ def _build_corridor_test_app(
     )
     mock_ib = _MockCorridorIB(offline=offline)
     client = IBKRBrokerClient(settings, ib_factory=lambda: mock_ib)
-    fetcher = PagedOptionChainFetcher(client, settings, clock=lambda: ts, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, settings, clock=lambda: ts, sleep=noop_sleep)
     app = create_app(settings=settings, repo=repo, broker_client=client, fetcher=fetcher)
-    app.state.service.corridor.sleep = _noop_sleep
+    app.state.service.corridor.sleep = noop_sleep
     return app, repo, mock_ib
 
 
@@ -233,7 +213,7 @@ def test_corridor_offline_and_validation_errors(tmp_path: Path) -> None:
                 assert r_stream_off.status_code == 503
                 assert r_stream_off.json()["error_code"] == "GATEWAY_OFFLINE"
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Path) -> None:
@@ -389,5 +369,5 @@ def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Pat
                 assert r_stop.status_code == 200
                 assert r_stop.json()["active_streams"] == 0
 
-    _run(_exercise())
+    run_coro(_exercise())
     assert mock_ib.isConnected() is False

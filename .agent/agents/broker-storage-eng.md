@@ -71,4 +71,5 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - A schema change is a breaking contract: flag `contracts_touched` so `quant-analytics-eng`, `ui-frontend-eng`, and `doc-sync-auditor` are routed.
 
 ## 7. Testing
-- Mock `ib_async` entirely; no real sockets, no real `asyncio.sleep` delays (inject `sleep`). Assert subscription counts, page sizes, and `cancelMktData` call parity.
+- Mock `ib_async` entirely; no real sockets, no real `asyncio.sleep` delays. Use `tests/support/aio.py` (`run_coro`, `run_virtual_loop`, `noop_sleep`) and `tests/support/ib_fakes.py` (`FakeEvent`) — never re-define them. Assert subscription counts, page sizes, and `cancelMktData` call parity.
+- Schema/reader changes must keep `tests/fixtures/snapshots/**` loadable (golden archives = existing user data).

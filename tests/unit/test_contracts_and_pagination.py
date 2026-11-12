@@ -1,14 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import collections
-import heapq
 import inspect
 import math
-from collections.abc import Coroutine
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any, TypeVar
+from typing import Any
 
 import pytest
 from ib_async import Option, OptionComputation, Stock
@@ -47,21 +44,8 @@ from src.core.exceptions import (
     UnderlyingPriceUnavailableError,
 )
 from src.core.security import ReadOnlyIBGuard
-
-
-class FakeEvent:
-    """Minimal event hook matching `eventkit.Event` `+=` / `emit` semantics."""
-
-    def __init__(self) -> None:
-        self._handlers: list[Any] = []
-
-    def __iadd__(self, handler: Any) -> FakeEvent:
-        self._handlers.append(handler)
-        return self
-
-    def emit(self, *args: Any) -> None:
-        for h in list(self._handlers):
-            h(*args)
+from tests.support.aio import noop_sleep, run_coro, run_virtual_loop
+from tests.support.ib_fakes import FakeEvent
 
 
 class FakeIB:
@@ -147,127 +131,6 @@ class FakeIB:
         self.cancelled.append(contract)
 
 
-T = TypeVar("T")
-
-
-def _run(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a pure/mocked coroutine to completion without opening OS loopback sockets."""
-    try:
-        while True:
-            coro.send(None)
-    except StopIteration as stop:
-        val: T = stop.value
-        return val
-
-
-class _VirtualEventLoop:
-    """Minimal socketless virtual-clock event loop safe inside restricted sandboxes."""
-
-    def __init__(self) -> None:
-        self._now = 0.0
-        self._ready: collections.deque[asyncio.Handle] = collections.deque()
-        self._scheduled: list[tuple[float, int, asyncio.TimerHandle]] = []
-        self._seq = 0
-        self._closed = False
-
-    def get_debug(self) -> bool:
-        return False
-
-    def is_running(self) -> bool:
-        running: Any = asyncio.events._get_running_loop()
-        return running is self
-
-    def is_closed(self) -> bool:
-        return self._closed
-
-    def close(self) -> None:
-        self._closed = True
-
-    def time(self) -> float:
-        return self._now
-
-    def create_future(self) -> asyncio.Future[Any]:
-        return asyncio.Future(loop=self)  # type: ignore[arg-type]
-
-    def create_task(
-        self,
-        coro: Coroutine[Any, Any, T],
-        *,
-        name: str | None = None,
-        context: Any = None,
-    ) -> asyncio.Task[T]:
-        return asyncio.Task(coro, loop=self, name=name, context=context)  # type: ignore[arg-type]
-
-    def _timer_handle_cancelled(self, handle: asyncio.TimerHandle) -> None:
-        return None
-
-    def call_exception_handler(self, context: dict[str, Any]) -> None:
-        return None
-
-    def call_soon(self, callback: Any, *args: Any, context: Any = None) -> asyncio.Handle:
-        handle = asyncio.Handle(callback, args, self, context)  # type: ignore[arg-type]
-        self._ready.append(handle)
-        return handle
-
-    def call_soon_threadsafe(
-        self, callback: Any, *args: Any, context: Any = None
-    ) -> asyncio.Handle:
-        return self.call_soon(callback, *args, context=context)
-
-    def call_later(
-        self, delay: float, callback: Any, *args: Any, context: Any = None
-    ) -> asyncio.TimerHandle:
-        return self.call_at(self._now + max(0.0, delay), callback, *args, context=context)
-
-    def call_at(
-        self, when: float, callback: Any, *args: Any, context: Any = None
-    ) -> asyncio.TimerHandle:
-        self._seq += 1
-        timer = asyncio.TimerHandle(when, callback, args, self, context)  # type: ignore[arg-type]
-        heapq.heappush(self._scheduled, (when, self._seq, timer))
-        return timer
-
-    def run_until_complete(self, future: Any) -> Any:
-        task = future if isinstance(future, asyncio.Task) else self.create_task(future)
-        prev = asyncio.events._get_running_loop()
-        asyncio.events._set_running_loop(self)  # type: ignore[arg-type]
-        try:
-            while not task.done():
-                while self._ready:
-                    handle = self._ready.popleft()
-                    if not handle.cancelled():
-                        handle._run()
-                if task.done():
-                    break
-                while self._scheduled and self._scheduled[0][2].cancelled():
-                    heapq.heappop(self._scheduled)
-                if not self._scheduled:
-                    if not self._ready:
-                        raise RuntimeError("Virtual event loop stalled")
-                    continue
-                when, _, timer = heapq.heappop(self._scheduled)
-                self._now = max(self._now, when)
-                if not timer.cancelled():
-                    timer._run()
-            return task.result()
-        finally:
-            asyncio.events._set_running_loop(prev)
-
-
-def _run_virtual_loop(coro: Coroutine[Any, Any, T]) -> T:
-    """Execute an async coroutine with a live `asyncio.get_running_loop()` without sockets."""
-    loop = _VirtualEventLoop()
-    try:
-        res: T = loop.run_until_complete(coro)
-        return res
-    finally:
-        loop.close()
-
-
-async def _noop_sleep(_seconds: float) -> None:
-    return None
-
-
 # ------------------------------------------------------------------ client tests
 def test_client_locks_ib_and_connects_type3_default() -> None:
     fake_ib = FakeIB()
@@ -276,7 +139,7 @@ def test_client_locks_ib_and_connects_type3_default() -> None:
     with pytest.raises(SecurityViolationError):
         client.ib.placeOrder("bad")
 
-    _run(client.ensure_connected())
+    run_coro(client.ensure_connected())
     assert client.is_connected
     assert client.current_type == 3
     assert client.get_active_market_data_type() == 3
@@ -303,13 +166,13 @@ def test_client_connection_errors_raise_gateway_error() -> None:
     fake_ib = FakeIB(connect_exc=ConnectionRefusedError("refused"))
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
     with pytest.raises(GatewayConnectionError):
-        _run(client.ensure_connected())
+        run_coro(client.ensure_connected())
     assert not client.is_connected
 
     fake_ib2 = FakeIB(connect_ok=False)
     client2 = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib2)
     with pytest.raises(GatewayConnectionError):
-        _run(client2.ensure_connected())
+        run_coro(client2.ensure_connected())
 
 
 def test_client_error_event_absorbs_10089_354_and_flags_pacing() -> None:
@@ -451,10 +314,10 @@ def test_discovery_spot_fallback_and_errors() -> None:
 
     fake_ib.ticker_factory = _spot_ticker
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    svc = ContractDiscoveryService(client, sleep=_noop_sleep)
+    svc = ContractDiscoveryService(client, sleep=noop_sleep)
 
-    stock = _run(svc.qualify_underlying("nvda"))
-    spot = _run(svc.resolve_spot(stock))
+    stock = run_coro(svc.qualify_underlying("nvda"))
+    spot = run_coro(svc.resolve_spot(stock))
     assert spot == 140.5
     assert client.current_type == 4
     assert len(fake_ib.cancelled) == 2
@@ -462,14 +325,14 @@ def test_discovery_spot_fallback_and_errors() -> None:
     # Unqualified ticker raises InvalidTickerError
     fake_ib.qualify_handler = lambda *_c: [None]
     with pytest.raises(InvalidTickerError):
-        _run(svc.qualify_underlying("ZZZZ"))
+        run_coro(svc.qualify_underlying("ZZZZ"))
 
     # Spot unavailable even after fallback raises UnderlyingPriceUnavailableError
     fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
         contract=c, bid=-1.0, ask=-1.0, last=-1.0, close=-1.0
     )
     with pytest.raises(UnderlyingPriceUnavailableError):
-        _run(svc.resolve_spot(Stock("NVDA", "SMART", "USD", conId=1)))
+        run_coro(svc.resolve_spot(Stock("NVDA", "SMART", "USD", conId=1)))
 
 
 def test_extract_spot_priority() -> None:
@@ -595,7 +458,7 @@ def test_paginate_contracts_splits_by_80_and_enforces_400_cap() -> None:
 def test_fetcher_cancels_mkt_data_on_exception() -> None:
     fake_ib = FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    fetcher = PagedOptionChainFetcher(client, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, sleep=noop_sleep)
 
     contracts = [
         Option("NVDA", "20261211", float(130 + i), "C", "SMART", conId=i + 1) for i in range(5)
@@ -611,7 +474,7 @@ def test_fetcher_cancels_mkt_data_on_exception() -> None:
     )
 
     with pytest.raises(RuntimeError, match="simulated poll failure"):
-        _run(fetcher._fetch_page_delayed(contracts))
+        run_coro(fetcher._fetch_page_delayed(contracts))
 
     # Every subscribed contract MUST be cancelled despite the exception
     assert len(fake_ib.subscribed) == 5
@@ -621,7 +484,7 @@ def test_fetcher_cancels_mkt_data_on_exception() -> None:
 def test_fetcher_type3_to_type4_auto_fallback_when_over_80pct_empty() -> None:
     fake_ib = FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    fetcher = PagedOptionChainFetcher(client, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, sleep=noop_sleep)
 
     contracts = [
         Option("NVDA", "20261211", float(130 + i), "C", "SMART", conId=i + 1) for i in range(10)
@@ -637,7 +500,7 @@ def test_fetcher_type3_to_type4_auto_fallback_when_over_80pct_empty() -> None:
         return SimpleNamespace(contract=contract, bid=-1.0, ask=-1.0, last=-1.0, close=4.75)
 
     fake_ib.ticker_factory = _factory
-    tickers = _run(fetcher._fetch_page_delayed(contracts))
+    tickers = run_coro(fetcher._fetch_page_delayed(contracts))
 
     assert client.current_type == 4
     assert fake_ib.market_data_types == [4]
@@ -687,7 +550,7 @@ def test_fetcher_live_opra_hook_and_pacing_cooldown() -> None:
     contracts = [
         Option("NVDA", "20261211", float(100 + i), "C", "SMART", conId=i + 1) for i in range(85)
     ]
-    tickers, pages_fetched = _run(fetcher.fetch_pages(contracts))
+    tickers, pages_fetched = run_coro(fetcher.fetch_pages(contracts))
 
     assert pages_fetched == 2
     assert len(tickers) == 85
@@ -733,9 +596,9 @@ def test_end_to_end_fetch_option_chain_multi_page() -> None:
 
     fake_ib.ticker_factory = _ticker_factory
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
 
-    result = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    result = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert result.snapshot_id == "NVDA_20261111_153000"
     assert [m.dte for m in result.plan.expirations] == [30, 37, 43, 50, 58, 93, 120]
     assert result.pages_fetched == 2  # 154 contracts -> 80 + 74
@@ -774,9 +637,9 @@ def test_per_expiration_intersection_prevents_phantom_strikes() -> None:
         contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
     )
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=_noop_sleep)
+    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=noop_sleep)
 
-    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=2.5))
+    plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=2.5))
     spec_by_exp = {spec.match.ib_expiry: spec for spec in plan.expiration_specs}
     assert set(spec_by_exp) == {exp_weekly, exp_monthly}
     assert 137.5 in spec_by_exp[exp_weekly].strikes
@@ -784,7 +647,7 @@ def test_per_expiration_intersection_prevents_phantom_strikes() -> None:
     assert 142.5 not in spec_by_exp[exp_monthly].strikes
     assert spec_by_exp[exp_monthly].effective_step == pytest.approx(5.0)
 
-    fetcher = PagedOptionChainFetcher(client, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, sleep=noop_sleep)
     built = fetcher.build_candidate_contracts(plan)
     monthly_built_strikes = {
         float(c.strike) for c in built if c.lastTradeDateOrContractMonth == exp_monthly
@@ -811,8 +674,8 @@ def test_non_standard_10_dollar_step_adapts_with_notice() -> None:
         contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
     )
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=_noop_sleep)
-    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    svc = ContractDiscoveryService(client, clock=lambda: now, sleep=noop_sleep)
+    plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert plan.exchange_native_verified is True
     assert plan.exchange_validated_strike_count > 0
     assert plan.strikes.effective_step == pytest.approx(10.0)
@@ -889,9 +752,9 @@ def test_qualify_option_contracts_emits_notice_on_partial_reject() -> None:
     fetcher = PagedOptionChainFetcher(
         client,
         clock=lambda: datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC),
-        sleep=_noop_sleep,
+        sleep=noop_sleep,
     )
-    res = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
     assert len(res.rows) == 5  # 6 candidates minus 1 rejected
     assert any("filtered out 1 unqualified" in n.lower() for n in res.notices)
 
@@ -1003,7 +866,7 @@ def test_prefetch_exact_per_expiration_strikes_eliminates_phantom_strikes_and_qu
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
     fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=_rec_sleep)
 
-    res = _run(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=None))
+    res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=None))
 
     assert details_queries == [exp_weekly, exp_monthly]
     # Cooldown slept strictly between the 2 sequential lookups (not on 1st or after 2nd)
@@ -1059,21 +922,19 @@ def test_exact_strike_prefetch_ttl_cache_and_expiration() -> None:
         )
     )
     client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
-    svc = ContractDiscoveryService(
-        client, settings, clock=lambda: clock_state[0], sleep=_noop_sleep
-    )
+    svc = ContractDiscoveryService(client, settings, clock=lambda: clock_state[0], sleep=noop_sleep)
 
-    _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert len(calls) == 1
 
     # Inside TTL: changing range_pct reuses exact contracts cache without hitting IBKR again
     clock_state[0] = clock_state[0] + timedelta(seconds=120)
-    _run(svc.build_plan("NVDA", range_pct=0.10, strike_step=5.0))
+    run_coro(svc.build_plan("NVDA", range_pct=0.10, strike_step=5.0))
     assert len(calls) == 1
 
     # Past TTL (301s > 300s): forces a fresh reqContractDetailsAsync query
     clock_state[0] = clock_state[0] + timedelta(seconds=301)
-    _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert len(calls) == 2
 
 
@@ -1106,8 +967,8 @@ def test_exact_strike_prefetch_falls_back_on_timeout_and_disabled_flag() -> None
         )
     )
     client = IBKRBrokerClient(timeout_settings, ib_factory=lambda: fake_ib)
-    svc = ContractDiscoveryService(client, timeout_settings, clock=lambda: now, sleep=_noop_sleep)
-    plan = _run(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    svc = ContractDiscoveryService(client, timeout_settings, clock=lambda: now, sleep=noop_sleep)
+    plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert plan.expiration_specs[0].exact_strikes_verified is False
     assert plan.strikes.strikes == (135.0, 140.0, 145.0)
     assert any("reqsecdefoptparams" in n.lower() for n in plan.notices)
@@ -1122,10 +983,8 @@ def test_exact_strike_prefetch_falls_back_on_timeout_and_disabled_flag() -> None
     fake_ib.contract_details_handler = _disabled_handler
     disabled_settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
     client2 = IBKRBrokerClient(disabled_settings, ib_factory=lambda: fake_ib)
-    svc2 = ContractDiscoveryService(
-        client2, disabled_settings, clock=lambda: now, sleep=_noop_sleep
-    )
-    plan2 = _run(svc2.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    svc2 = ContractDiscoveryService(client2, disabled_settings, clock=lambda: now, sleep=noop_sleep)
+    plan2 = run_coro(svc2.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert called[0] is False
     assert plan2.expiration_specs[0].exact_strikes_verified is False
 
@@ -1175,7 +1034,7 @@ def test_prefetch_exact_contracts_runs_bounded_concurrency_in_event_loop() -> No
     client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
     svc = ContractDiscoveryService(client, settings, clock=lambda: now)
 
-    plan = _run_virtual_loop(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    plan = run_virtual_loop(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert 2 <= max_active <= EXACT_PREFETCH_MAX_CONCURRENCY
     assert [spec.match.ib_expiry for spec in plan.expiration_specs] == exps
     assert all(spec.exact_strikes_verified for spec in plan.expiration_specs)
@@ -1184,7 +1043,7 @@ def test_prefetch_exact_contracts_runs_bounded_concurrency_in_event_loop() -> No
 def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_error() -> None:
     fake_ib = FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    _run(client.ensure_connected())
+    run_coro(client.ensure_connected())
     sleeps: list[float] = []
 
     async def _rec_sleep(sec: float) -> None:
@@ -1195,7 +1054,7 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
         Option("NVDA", "20261211", float(100 + i), "C", "SMART", conId=i + 1)
         for i in range(PAGE_PACING_CHUNK_SIZE * 2 + 5)
     ]
-    tickers, pages = _run(fetcher.fetch_pages(contracts))
+    tickers, pages = run_coro(fetcher.fetch_pages(contracts))
     assert pages == 1
     assert len(tickers) == len(contracts)
     # 2 chunks during subscribe + 2 chunks during cancel = 4 pacing yields
@@ -1205,7 +1064,7 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
     # Now simulate a mid-batch socket drop inside reqMktData / poll loop -> GatewayConnectionError
     fake_ib2 = FakeIB()
     client2 = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib2)
-    _run(client2.ensure_connected())
+    run_coro(client2.ensure_connected())
     fake_ib2.errorEvent.emit(-1, 1100, "Connectivity between IB and Trader Workstation lost", None)
 
     def _drop_factory(contract: Any, _ticks: str) -> Any:
@@ -1215,9 +1074,9 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
         return SimpleNamespace(contract=contract, bid=5.0, ask=5.2, last=5.1, close=5.0)
 
     fake_ib2.ticker_factory = _drop_factory
-    fetcher2 = PagedOptionChainFetcher(client2, sleep=_noop_sleep)
+    fetcher2 = PagedOptionChainFetcher(client2, sleep=noop_sleep)
     with pytest.raises(GatewayConnectionError, match="market-data collection.*IBKR 1100"):
-        _run(fetcher2._fetch_page_delayed(contracts[:5]))
+        run_coro(fetcher2._fetch_page_delayed(contracts[:5]))
     assert not client2.is_connected
     # Already-subscribed contracts prior to socket failure are still cancelled cleanly
     assert fake_ib2.cancelled == contracts[:2]
@@ -1260,7 +1119,7 @@ def test_client_configured_types_ticker_observation_and_live_midpage_downgrade()
     )
     fake_live_ib = FakeIB()
     live_client = IBKRBrokerClient(live_cfg, ib_factory=lambda: fake_live_ib)
-    _run(live_client.ensure_connected())
+    run_coro(live_client.ensure_connected())
     assert live_client.get_active_market_data_type() == 1
 
     def _downgrade_factory(contract: Any, _ticks: str) -> Any:
@@ -1282,9 +1141,9 @@ def test_client_configured_types_ticker_observation_and_live_midpage_downgrade()
         )
 
     fake_live_ib.ticker_factory = _downgrade_factory
-    fetcher = PagedOptionChainFetcher(live_client, live_cfg, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(live_client, live_cfg, sleep=noop_sleep)
     contracts = [Option("NVDA", "20261211", 170.0, "C", "SMART", conId=501)]
-    tickers, pages = _run(fetcher.fetch_pages(contracts))
+    tickers, pages = run_coro(fetcher.fetch_pages(contracts))
     assert pages == 1
     assert len(tickers) == 1
     assert live_client.live_subscription_missing is True

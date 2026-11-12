@@ -28,6 +28,7 @@ If it fails, isolate with the individual targets and stop at the first failing o
     make lint          # ruff check + ruff format --check
     make typecheck     # mypy --strict
     make security-guard
+    make js-check      # node --check on frontend JS (skipped without Node.js)
     make agents-check  # generated .claude/.gemini agents in sync with .agent/
     make test          # pytest -q --tb=short
 
@@ -90,7 +91,7 @@ Model `gemini-3.8-flash`, thinking `thinkingLevel=HIGH`. Do not narrate delibera
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 
-**Verification:** before reporting done, run the narrowest relevant test file (`uv run --no-sync pytest -q <file>`), then `make check` if you edited Python.
+**Verification:** before reporting done, run the narrowest relevant test file (`uv run --no-sync pytest -q <file>`), then `make check`. Reuse `tests/support/` helpers and `tests/conftest.py` fixtures instead of re-defining drivers/fakes.
 
 **Hand-off format (always end with this block, <= 12 lines):**
 

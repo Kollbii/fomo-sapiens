@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Coroutine
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any, TypeVar
+from typing import Any
 
 import numpy as np
 import polars as pl
@@ -25,35 +24,8 @@ from src.broker.corridor import (
 from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import GatewayConnectionError, PacingViolationError
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
-
-T = TypeVar("T")
-
-
-def _run(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a pure/mocked coroutine to completion without opening OS loopback sockets."""
-    try:
-        while True:
-            coro.send(None)
-    except StopIteration as stop:
-        val: T = stop.value
-        return val
-
-
-async def _noop_sleep(_seconds: float) -> None:
-    return None
-
-
-class _FakeEvent:
-    def __init__(self) -> None:
-        self._handlers: list[Any] = []
-
-    def __iadd__(self, handler: Any) -> _FakeEvent:
-        self._handlers.append(handler)
-        return self
-
-    def emit(self, *args: Any) -> None:
-        for h in list(self._handlers):
-            h(*args)
+from tests.support.aio import noop_sleep, run_coro
+from tests.support.ib_fakes import FakeEvent
 
 
 class _FakeIB:
@@ -61,7 +33,7 @@ class _FakeIB:
 
     def __init__(self) -> None:
         self._connected = False
-        self.errorEvent = _FakeEvent()
+        self.errorEvent = FakeEvent()
         self.wrapper = SimpleNamespace(clientId=0)
         self.market_data_types: list[int] = []
         self.qualify_calls = 0
@@ -247,7 +219,7 @@ def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> Non
 def test_prepare_contracts_raises_pacing_error_above_60() -> None:
     fake_ib = _FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    service = CorridorQuoteService(client, sleep=_noop_sleep)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
 
     oversized_specs = tuple(
         CorridorContractSpec(
@@ -294,7 +266,7 @@ def test_prepare_contracts_raises_pacing_error_above_60() -> None:
     )
 
     with pytest.raises(PacingViolationError):
-        _run(service._prepare_contracts(selection))
+        run_coro(service._prepare_contracts(selection))
 
 
 def test_fetch_corridor_quotes_reuses_conids_and_cancels_100pct() -> None:
@@ -308,10 +280,10 @@ def test_fetch_corridor_quotes_reuses_conids_and_cancels_100pct() -> None:
     service = CorridorQuoteService(
         client,
         clock=lambda: datetime(2026, 11, 11, 16, 5, 0, tzinfo=UTC),
-        sleep=_noop_sleep,
+        sleep=noop_sleep,
     )
 
-    frame = _run(
+    frame = run_coro(
         service.fetch_corridor_quotes(
             df,
             snapshot_id="NVDA_20261111_160000",
@@ -368,9 +340,9 @@ def test_fetch_corridor_quotes_falls_back_to_type4_and_computes_bsm_greeks() -> 
 
     fake_ib.ticker_factory = _dynamic_ticker
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    service = CorridorQuoteService(client, sleep=_noop_sleep)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
 
-    frame = _run(
+    frame = run_coro(
         service.fetch_corridor_quotes(
             df,
             snapshot_id="NVDA_20261111_160000",
@@ -391,7 +363,7 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     df = _build_chain_df(strikes=[85.0, 90.0, 100.0, 110.0, 115.0], put_wall=90.0, call_wall=110.0)
     fake_ib = _FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
-    service = CorridorQuoteService(client, sleep=_noop_sleep)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
 
     # 1) Two frames with a live quote tick mutation between them -> normal termination cleanup
     async def _collect_two() -> list[Any]:
@@ -412,7 +384,7 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
             tk.ask = 6.9
         return out
 
-    frames = _run(_collect_two())
+    frames = run_coro(_collect_two())
     assert len(frames) == 2
     assert frames[0].sequence == 1
     assert frames[1].sequence == 2
@@ -437,9 +409,9 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
         window_strikes=2,
         max_contracts=30,
     )
-    first_frame = _run(anext(gen))
+    first_frame = run_coro(anext(gen))
     assert service.active_stream_count == 1
-    _run(gen.aclose())
+    run_coro(gen.aclose())
     assert service.active_stream_count == 0
     assert len(fake_ib.cancelled) == first_frame.subscribed_count
 
@@ -453,11 +425,11 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
         window_strikes=2,
         max_contracts=30,
     )
-    frame2 = _run(anext(gen2))
-    stopped = _run(service.stop_all_streams())
+    frame2 = run_coro(anext(gen2))
+    stopped = run_coro(service.stop_all_streams())
     assert stopped == frame2.subscribed_count
     with pytest.raises(StopAsyncIteration):
-        _run(anext(gen2))
+        run_coro(anext(gen2))
     assert len(fake_ib.cancelled) == frame2.subscribed_count
     assert service.active_stream_count == 0
 
@@ -471,10 +443,10 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
         window_strikes=2,
         max_contracts=30,
     )
-    frame3 = _run(anext(gen3))
+    frame3 = run_coro(anext(gen3))
     fake_ib.disconnect()
     with pytest.raises(GatewayConnectionError):
-        _run(anext(gen3))
+        run_coro(anext(gen3))
     assert len(fake_ib.cancelled) == frame3.subscribed_count
     assert service.active_stream_count == 0
 
@@ -520,9 +492,9 @@ def test_corridor_live_mode_falls_back_type1_to_type2_dynamically() -> None:
 
     fake_ib.ticker_factory = _live_frozen_ticker
     client = IBKRBrokerClient(live_settings, ib_factory=lambda: fake_ib)
-    service = CorridorQuoteService(client, live_settings, sleep=_noop_sleep)
+    service = CorridorQuoteService(client, live_settings, sleep=noop_sleep)
 
-    frame = _run(
+    frame = run_coro(
         service.fetch_corridor_quotes(
             df,
             snapshot_id="NVDA_20261111_160000",

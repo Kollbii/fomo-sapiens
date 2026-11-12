@@ -45,7 +45,8 @@ analytics; it must never contain math or socket logic itself.
 
 ## 4. Testing
 - Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
-- Frontend has no JS test runner: after JS edits run `node --check src/web/static/js/dashboard.js` (if Node is available) and describe a manual verification path in `notes:`.
+- Frontend has no JS test runner: after JS edits run `make js-check` and describe a manual verification path in `notes:`.
+- Offline end-to-end smoke coverage lives in `tests/integration/test_offline_fixture_smoke.py` (golden CSV in `tests/fixtures/snapshots/`); extend it when adding page-level features.
 
 ## Scope (Context Diet)
 
@@ -85,7 +86,7 @@ Model `gemini-4-argon`, thinking `thinkingLevel=LOW`. Plan briefly (which functi
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 
-**Verification:** before reporting done, run the narrowest relevant test file (`uv run --no-sync pytest -q <file>`), then `make check` if you edited Python.
+**Verification:** before reporting done, run the narrowest relevant test file (`uv run --no-sync pytest -q <file>`), then `make check`. Reuse `tests/support/` helpers and `tests/conftest.py` fixtures instead of re-defining drivers/fakes.
 
 **Hand-off format (always end with this block, <= 12 lines):**
 

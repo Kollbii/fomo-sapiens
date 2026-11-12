@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, TypeVar
+from typing import Any
 
 import anyio
 import anyio.to_thread
@@ -18,34 +18,15 @@ from src.core.config import IBKRSettings, Settings, StorageSettings
 from src.core.exceptions import GatewayConnectionError
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
-
-T = TypeVar("T")
-
-
-def _run(coro: Coroutine[Any, Any, T]) -> T:
-    """Drive a pure ASGI / mocked coroutine to completion without opening OS sockets."""
-    try:
-        while True:
-            coro.send(None)
-    except StopIteration as stop:
-        val: T = stop.value
-        return val
-
-
-async def _noop_sleep(_seconds: float) -> None:
-    return None
-
-
-class _FakeEvent:
-    def __iadd__(self, _handler: Any) -> _FakeEvent:
-        return self
+from tests.support.aio import noop_sleep, run_coro
+from tests.support.ib_fakes import FakeEvent
 
 
 class _MockIB:
     def __init__(self, *, offline: bool = False) -> None:
         self.offline = offline
         self._connected = False
-        self.errorEvent = _FakeEvent()
+        self.errorEvent = FakeEvent()
         self.wrapper = SimpleNamespace(clientId=0)
         self.market_data_types: list[int] = []
         self.cancelled: list[Any] = []
@@ -175,7 +156,7 @@ def _build_test_app(tmp_path: Path, *, offline: bool = False) -> tuple[Any, CSVR
         client,
         settings,
         clock=lambda: refresh_ts,
-        sleep=_noop_sleep,
+        sleep=noop_sleep,
     )
     app = create_app(settings=settings, repo=repo, broker_client=client, fetcher=fetcher)
     return app, repo, mock_ib
@@ -223,7 +204,7 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert snaps["latest_snapshot_id"] == "NVDA_20261111_150000"
                 assert len(snaps["snapshots"]) == 1
 
-    _run(_exercise())
+    run_coro(_exercise())
     assert mock_ib.disconnected_called is True
 
 
@@ -267,7 +248,7 @@ def test_chain_endpoint_enriches_bsm_and_handles_422_and_404(tmp_path: Path) -> 
             assert r_missing.status_code == 404
             assert r_missing.json()["error_code"] == "SNAPSHOT_NOT_FOUND"
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
@@ -286,7 +267,7 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             assert body["error_code"] == "GATEWAY_OFFLINE"
             assert "4001" in body["message"]
 
-    _run(_exercise_offline())
+    run_coro(_exercise_offline())
 
     # 2. Online Gateway -> HTTP 200 LIVE_REFRESH + persisted to CSVRepository
     app_online, repo_on, _ = _build_test_app(tmp_path / "online", offline=False)
@@ -339,7 +320,7 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             assert r_bad.status_code == 422
             assert r_bad.json()["error_code"] == "INVALID_TICKER"
 
-    _run(_exercise_online())
+    run_coro(_exercise_online())
     with pytest.raises(GatewayConnectionError):
         # Verify exception class import used for clarity
         raise GatewayConnectionError("check")
@@ -614,7 +595,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             )
             assert r_auto.status_code == 200
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_expanded_120_dte_refresh_and_query_filtering(tmp_path: Path) -> None:
@@ -660,7 +641,7 @@ def test_expanded_120_dte_refresh_and_query_filtering(tmp_path: Path) -> None:
             r_bad_dte = await client.get("/api/chain/NVDA", params={"dte_max": 121})
             assert r_bad_dte.status_code == 422
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
@@ -780,7 +761,7 @@ def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
             )
             assert r_404.status_code == 404
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
@@ -799,7 +780,7 @@ def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
     repo = CSVRepository(custom_settings.storage, root=tmp_path)
     mock_ib = _MockIB(offline=True)
     client = IBKRBrokerClient(custom_settings, ib_factory=lambda: mock_ib)
-    fetcher = PagedOptionChainFetcher(client, custom_settings, sleep=_noop_sleep)
+    fetcher = PagedOptionChainFetcher(client, custom_settings, sleep=noop_sleep)
     app = create_app(settings=custom_settings, repo=repo, broker_client=client, fetcher=fetcher)
 
     async def _exercise() -> None:
@@ -837,7 +818,7 @@ def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
                 assert "10.0.0.5:7496" in err_msg
                 assert "4001" not in err_msg
 
-    _run(_exercise())
+    run_coro(_exercise())
 
 
 def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
@@ -852,4 +833,4 @@ def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
             assert repo.latest_dir.is_dir()
             assert repo.index_path.parent.is_dir()
 
-    _run(_exercise())
+    run_coro(_exercise())

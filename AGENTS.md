@@ -105,7 +105,7 @@ All workflows are standardized through `Makefile` and `docker compose`:
     # Stop Docker container
     make docker-down
 
-    # Run full verification suite (Ruff lint + format check + Mypy strict + Security guard + Agent-spec sync + Pytest)
+    # Run full verification suite (Ruff lint + format check + Mypy strict + Security guard + JS syntax check + Agent-spec sync + Pytest)
     make check
 
     # Regenerate Claude Code / Gemini CLI sub-agents from .agent/ (run after editing .agent/)
@@ -113,6 +113,9 @@ All workflows are standardized through `Makefile` and `docker compose`:
 
     # Run unit & integration tests only
     make test
+
+    # Pytest with branch coverage report over src/
+    make coverage
 
 ---
 

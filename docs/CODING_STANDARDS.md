@@ -26,6 +26,17 @@ Coding agents must enforce strict boundaries between the 5 layers in `src/`:
 ---
 
 ## 4. Testing Protocol (`tests/`)
+
+### 4.0 Test Layout & Shared Helpers
+- **`tests/support/`** — import-only helpers (never duplicate them in test files):
+  - `aio.py`: `run_coro` (socket-free `send(None)` coroutine driver), `run_virtual_loop` / `VirtualEventLoop` (deterministic virtual-clock loop when code needs `asyncio.get_running_loop()`), `noop_sleep` (inject instead of `asyncio.sleep`).
+  - `ib_fakes.py`: `FakeEvent` (`eventkit.Event` stand-in with `+=` / `emit`). Test-specific `IB` mocks stay in their test module.
+- **`tests/conftest.py`** — lifecycle fixtures only: `fixtures_dir`, `fixture_repo` (tmp `CSVRepository` seeded with a *copy* of the golden snapshots and a rebuilt index).
+- **`tests/fixtures/snapshots/{TICKER}/{SNAPSHOT_ID}.csv`** — committed golden Mode 1 archives. Never edit them to make a test pass: if a schema change can no longer read them, existing user archives break too (add a migration or a new fixture instead).
+- Tests never open sockets or real sleeps; inject `noop_sleep`, fixed clocks, and fake `IB` factories.
+- Commands: `make test` (quiet), `make coverage` (`pytest-cov`, branch coverage over `src/`, report only), `make js-check` (`node --check` on `src/web/static/js/**/*.js`; skipped when Node.js is absent).
+
+### 4.1 Required Test Modules
 Every feature phase requires automated tests in `pytest`:
 1. **`tests/unit/test_security.py`:**
    - Tests `TickerValidator.validate()` against valid symbols (`NVDA`, `AVGO`, `CRDO`, `PLTR`, `SPY`) and malicious inputs (`../etc`, `NVDA;rm`, `BRK.A`, `12345`, `""`, `"ABCDEFG"`).
@@ -50,11 +61,13 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies `scripts/security_guard.py` passes on `src/` and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), account/position queries (`reqPositions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
 9. **`tests/unit/test_agent_specs.py`:**
    - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-3.8-flash` always `thinkingLevel: HIGH`) while preserving unrelated settings, and invalid specs are rejected.
+10. **`tests/integration/test_offline_fixture_smoke.py`:**
+   - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
 
 ---
 
 ## 5. Mandatory Documentation-Sync Checklist (Definition of Done)
 Before completing any task, coding agents must verify:
-- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, `scripts/sync_agents.py --check`, and `pytest`) passes with 0 errors.
+- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, `scripts/js_check.py`, `scripts/sync_agents.py --check`, and `pytest`) passes with 0 errors.
 - [ ] `AGENTS.md` reflects any new commands, phases, or structural rules.
 - [ ] `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md`, `docs/SECURITY_AND_SAFETY.md`, `docs/UI_UX_GUIDELINES.md`, and `docs/FUTURE_IMPROVEMENTS.md` are updated to match the exact state of the codebase.

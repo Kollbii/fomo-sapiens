@@ -32,6 +32,7 @@ If it fails, isolate with the individual targets and stop at the first failing o
     make lint          # ruff check + ruff format --check
     make typecheck     # mypy --strict
     make security-guard
+    make js-check      # node --check on frontend JS (skipped without Node.js)
     make agents-check  # generated .claude/.gemini agents in sync with .agent/
     make test          # pytest -q --tb=short
 

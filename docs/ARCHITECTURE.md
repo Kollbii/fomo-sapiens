@@ -47,7 +47,8 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     ├── .gemini/                  # GENERATED Gemini CLI sub-agents + settings.json
     ├── scripts/
     │   ├── sync_agents.py        # make agents-sync / agents-check
-    │   └── security_guard.py     # make security-guard
+    │   ├── security_guard.py     # make security-guard
+    │   └── js_check.py           # make js-check (node --check)
     ├── Makefile
     ├── Dockerfile
     ├── docker-compose.yml
@@ -105,9 +106,11 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │           └── js/
     │               └── dashboard.js
     └── tests/
+        ├── conftest.py          # fixtures_dir, fixture_repo
+        ├── support/             # aio.py (run_coro, run_virtual_loop, noop_sleep), ib_fakes.py
+        ├── fixtures/snapshots/  # golden Mode 1 CSV archives
         ├── unit/
-        ├── integration/
-        └── fixtures/
+        └── integration/
 
 ---
 
