@@ -10,7 +10,7 @@
 
 ## 2. Locked Technology Stack
 Coding agents MUST use the following stack and MUST NOT introduce alternative frameworks without explicit user approval:
-- **Runtime:** Python `3.11+` managed via `uv` (with standard `venv` + `pip` fallback in `Makefile`).
+- **Runtime:** Python `3.11+` managed via `uv`; every environment (`make setup`, Docker image) is installed strictly from `uv.lock` (`uv sync --locked`).
 - **Broker Integration:** `ib-async` (connecting to `127.0.0.1:4001` natively or `host.docker.internal:4001` inside Docker).
 - **Data Processing & Schema Validation:** `polars` (for all dataframe analytics and CSV I/O) and `pydantic>=2.0` + `pydantic-settings` (for boundary validation and configuration). **Do NOT use `pandas` in core analytics or storage pipelines.**
 - **Quantitative Fallback Math:** `numpy` vectorization plus `scipy.special.erf` for the normal CDF (hand-rolled vectorized Newton-Raphson + bisection IV solver; no `scipy.optimize`) for Black-Scholes-Merton implied volatility and Greeks calculation when Type 3/4 delayed feeds omit `modelGreeks`, using default `risk_free_rate: 0.0425`.

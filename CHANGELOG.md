@@ -18,6 +18,7 @@ milestones in git history.
 - The FastAPI lifespan creates the `data/` storage layout (`CSVRepository.ensure_layout()`); Makefile mkdir one-liners removed.
 - `AGENTS.md` phase history condensed into a module/status map (history moved here); per-module implementation notes moved out of `docs/ARCHITECTURE.md` / `docs/DATA_SCHEMA.md`.
 - `pyproject.toml` package readme is now `README.md`.
+- Reproducible environments: `make setup` runs `uv sync --locked --extra dev`; the Docker image is multi-stage, installs runtime dependencies only from `uv.lock`, runs as non-root user `app`, ships a `HEALTHCHECK`, and uses an allow-list `.dockerignore` (no docs/tests/dev tools in the image).
 
 ### Fixed
 - Documentation no longer claims unused tooling (Tailwind, HTMX, `scipy.optimize`) or non-existent identifiers.

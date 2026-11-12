@@ -1,0 +1,8 @@
+# Build context allow-list: the image only needs pyproject.toml, uv.lock, config/ and src/.
+*
+!pyproject.toml
+!uv.lock
+!config/
+!src/
+**/__pycache__/
+**/*.py[cod]

@@ -32,7 +32,7 @@ If it fails, isolate with the individual targets and stop at the first failing o
     make agents-check  # generated .claude/.gemini agents in sync with .agent/
     make test          # pytest -q --tb=short
 
-If tools are missing (`No module named ruff/mypy/pytest`), run `uv sync --extra dev` once, then retry.
+If tools are missing (`No module named ruff/mypy/pytest`), run `make setup` (`uv sync --locked --extra dev`) once, then retry. Never `pip install` ad hoc.
 
 Auto-fix only when the user asked for it: `uv run --no-sync ruff check --fix src tests scripts` and `uv run --no-sync ruff format src tests scripts`. For `agents-check` failures run `make agents-sync`.
 

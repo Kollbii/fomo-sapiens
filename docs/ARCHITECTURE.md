@@ -52,7 +52,8 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   ├── security_guard.py     # make security-guard
     │   └── js_check.py           # make js-check (node --check)
     ├── Makefile
-    ├── Dockerfile
+    ├── Dockerfile                # multi-stage, uv.lock-pinned, non-root
+    ├── .dockerignore             # build-context allow-list
     ├── docker-compose.yml
     ├── pyproject.toml
     ├── .env.example

@@ -33,7 +33,7 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 
 | Changed path | Update |
 | :--- | :--- |
-| `Makefile`, `Dockerfile`, `docker-compose.yml`, `.env.example`, `pyproject.toml` | `AGENTS.md` §2/§5, `docs/CODING_STANDARDS.md` (commands) |
+| `Makefile`, `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `.env.example`, `pyproject.toml` | `AGENTS.md` §2/§5, `docs/CODING_STANDARDS.md` (commands), `docs/SECURITY_AND_SAFETY.md` §3 (container), `README.md` |
 | `src/core/security.py`, `src/core/config.py` | `docs/SECURITY_AND_SAFETY.md`, `AGENTS.md` §4 module map, `docs/reference/IMPLEMENTATION_NOTES.md` §1 |
 | `src/storage/*` | `docs/DATA_SCHEMA.md` (contract), `docs/reference/IMPLEMENTATION_NOTES.md` §2 |
 | `src/broker/*` | `docs/ARCHITECTURE.md` §3/§5, `docs/DATA_SCHEMA.md` §3 (parser), `docs/reference/IMPLEMENTATION_NOTES.md` §3 |

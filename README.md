@@ -23,13 +23,16 @@ Strategy Lab in a dual-theme (NYT Print / Obsidian Terminal) web UI.
 
 Requirements: Python 3.11+, [`uv`](https://docs.astral.sh/uv/), IBKR Gateway or TWS (optional for offline use). Node.js is optional (`make js-check`).
 
-    make setup     # create .venv with runtime + dev dependencies and .env from .env.example
+    make setup     # create .venv from uv.lock (runtime + dev) and .env from .env.example
     make run       # http://127.0.0.1:8000  ->  IBKR at 127.0.0.1:4001
 
 Docker (Windows / macOS / Linux):
 
     make docker-up     # http://127.0.0.1:8000  ->  IBKR at host.docker.internal:4001
     make docker-down
+
+The image is built from `uv.lock` (runtime dependencies only), runs as a non-root user, and keeps
+snapshots in the bind-mounted `./data` directory.
 
 ### IBKR Gateway settings
 **Configure → Settings → API → Settings:** enable *Read-Only API*, set *Socket Port* to `IBKR_PORT`

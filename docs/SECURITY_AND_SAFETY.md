@@ -56,6 +56,12 @@ Every ticker input from any source (UI form, URL parameter, query string, or con
 - Native execution (`make run`) binds Uvicorn strictly to `127.0.0.1:8000`.
 - Docker execution (`docker-compose.yml`) binds host port mapping strictly to `127.0.0.1:8000:8000` so the web UI is never exposed to external network interfaces.
 
+### 3.1.1 Container Hardening (`Dockerfile`, `.dockerignore`)
+- Multi-stage build: dependencies resolved only from `uv.lock` (`uv sync --locked --no-dev --no-install-project`); no dev/test tooling, compilers, or `curl` in the runtime image.
+- Runs as the unprivileged `app` user (UID/GID `10001`); only `/app/data` (bind-mounted `./data`) is writable, and `./config` is mounted read-only.
+- `.dockerignore` is an allow-list (`pyproject.toml`, `uv.lock`, `config/`, `src/`), so `.env`, `data/`, `.git`, and local virtualenvs never enter the build context or image layers.
+- `HEALTHCHECK` polls `GET /api/status` via the Python standard library (works while the Gateway is offline).
+
 ### 3.2 Docker-to-Host IBKR Gateway Networking (`Port 4001`)
 When running inside Docker on Windows or macOS (`make docker-up`):
 - The container connects to IBKR Gateway on the host machine via `IBKR_HOST=host.docker.internal` and `IBKR_PORT=4001`.

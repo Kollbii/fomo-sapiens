@@ -7,15 +7,15 @@ else
 export PATH := $(abspath $(VENV_DIR)/bin):$(PATH)
 endif
 UV ?= uv
+export UV_PROJECT_ENVIRONMENT := $(abspath $(VENV_DIR))
 UV_RUN ?= $(UV) run --no-sync
 
 help:
-	@$(UV_RUN) python -c "print('IBKR Options Analyzer - Commands:\n  make setup          Create .venv and install dependencies via uv\n  make run            Run FastAPI server on http://127.0.0.1:8000\n  make docker-up      Build and start Docker container\n  make docker-down    Stop Docker container\n  make test           Run pytest suite\n  make coverage       Run pytest with branch coverage report\n  make check          Run lint + typecheck + security-guard + js-check + agents-check + test\n  make agents-sync    Regenerate .claude/ and .gemini/ agents from .agent/')"
+	@$(UV_RUN) python -c "print('IBKR Options Analyzer - Commands:\n  make setup          Create .venv from uv.lock (runtime + dev) and .env\n  make run            Run FastAPI server on http://127.0.0.1:8000\n  make docker-up      Build and start Docker container\n  make docker-down    Stop Docker container\n  make test           Run pytest suite\n  make coverage       Run pytest with branch coverage report\n  make check          Run lint + typecheck + security-guard + js-check + agents-check + test\n  make agents-sync    Regenerate .claude/ and .gemini/ agents from .agent/')"
 
 setup:
+	$(UV) sync --locked --extra dev
 	$(UV_RUN) python -c "import pathlib, shutil; pathlib.Path('.env').exists() or shutil.copy('.env.example', '.env')"
-	$(UV) venv $(VENV_DIR) --allow-existing
-	$(UV) pip install -e ".[dev]"
 
 run:
 	$(UV_RUN) uvicorn src.main:app --host 127.0.0.1 --port 8000 --reload
