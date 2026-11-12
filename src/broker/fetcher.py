@@ -8,10 +8,10 @@ import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, date, datetime
+from typing import Any, Literal
 
-from ib_async import Option
+from ib_async import Option, Stock
 
 from src.broker.client import (
     IBKRBrokerClient,
@@ -19,7 +19,7 @@ from src.broker.client import (
     market_data_type_label,
     poll_until,
 )
-from src.broker.contracts import ChainPlan, ContractDiscoveryService
+from src.broker.contracts import ChainPlan, ContractDiscoveryService, market_date_for
 from src.broker.parser import (
     SnapshotContext,
     TickerParser,
@@ -29,8 +29,9 @@ from src.broker.parser import (
 )
 from src.core.config import Settings
 from src.core.exceptions import OptionChainFetchError, PacingViolationError
+from src.core.security import TickerValidator
 from src.storage.csv_repository import make_snapshot_id
-from src.storage.schema import OptionContractRow
+from src.storage.schema import OptionContractRow, SpotSource
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,40 @@ class FetchResult:
     elapsed_ms: float
     notices: tuple[str, ...] = ()
     page_quote_counts: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class ExactContractSpec:
+    """One specific option contract to quote (no chain discovery)."""
+
+    option_conid: int
+    expiry: str  # ISO YYYY-MM-DD
+    strike: float
+    right: Literal["C", "P"]
+
+    def key(self) -> tuple[str, float, str]:
+        return (self.expiry, round(self.strike, 4), self.right)
+
+
+@dataclass(frozen=True)
+class ExactQuoteResult:
+    """Quotes for specific contracts: rows in the normal 27-column schema plus the spot."""
+
+    snapshot_id: str
+    snapshot_ts_utc: str
+    market_date: str
+    market_data_type: int
+    underlying_price: float
+    spot_source: SpotSource
+    rows: tuple[OptionContractRow, ...]
+    missing: tuple[ExactContractSpec, ...]
+    notices: tuple[str, ...] = ()
+
+
+def _contract_key(contract: Any) -> tuple[str, float, str]:
+    raw = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
+    iso = f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}" if len(raw) == 8 else raw
+    return (iso, round(float(getattr(contract, "strike", 0.0)), 4), str(contract.right))
 
 
 def paginate_contracts(
@@ -507,4 +542,110 @@ class PagedOptionChainFetcher:
             elapsed_ms=elapsed_ms,
             notices=notices,
             page_quote_counts=page_quote_counts,
+        )
+
+    async def fetch_exact_contracts(
+        self,
+        ticker: str,
+        specs: Sequence[ExactContractSpec],
+        *,
+        underlying_conid: int = 0,
+    ) -> ExactQuoteResult:
+        """Quote specific contracts only (tracked spread legs); never requests a chain.
+
+        Read-only: `reqMktData` / `cancelMktData` through the same paced pages as a chain
+        refresh, plus `qualifyContractsAsync` only for a contract without a known `conId`.
+        Expired contracts are not requested and are returned in `missing`.
+        """
+        symbol = TickerValidator.validate(ticker)
+        if not specs:
+            raise OptionChainFetchError(f"No contracts to quote for {symbol}")
+        cap = self.max_contracts_per_page * self.max_pages_per_refresh
+        if len(specs) > cap:
+            raise PacingViolationError(
+                f"{len(specs)} tracked contracts for {symbol} exceed the {cap}-contract cap"
+            )
+        self._notices = []
+        await self.client.ensure_connected()
+        self.client.reset_market_data_type()
+
+        if underlying_conid > 0:
+            stock: Any = Stock(
+                conId=underlying_conid, symbol=symbol, exchange="SMART", currency="USD"
+            )
+        else:
+            stock = await self.discovery.qualify_underlying(symbol)
+        spot, spot_source = await self.discovery.resolve_spot_with_source(stock)
+
+        market_day = market_date_for(self.clock())
+        missing: list[ExactContractSpec] = []
+        candidates: list[Option] = []
+        for spec in specs:
+            expiry = date.fromisoformat(spec.expiry)
+            if expiry < market_day:
+                missing.append(spec)
+                continue
+            candidates.append(
+                Option(
+                    conId=spec.option_conid if spec.option_conid > 0 else 0,
+                    symbol=symbol,
+                    lastTradeDateOrContractMonth=expiry.strftime("%Y%m%d"),
+                    strike=spec.strike,
+                    right=spec.right,
+                    exchange="SMART",
+                    multiplier="100",
+                    currency="USD",
+                )
+            )
+        if not candidates:
+            raise OptionChainFetchError(f"Every requested {symbol} contract has expired")
+        qualified = await self.qualify_option_contracts(candidates)
+        found = {_contract_key(c) for c in qualified}
+        missing.extend(s for s in specs if s not in missing and s.key() not in found)
+        tickers, _pages = await self.fetch_pages(qualified)
+
+        sub_notice = self.client.consume_subscription_fallback_notice()
+        if sub_notice and sub_notice not in self._notices:
+            self._notices.append(sub_notice)
+        md_type = self.client.get_active_market_data_type()
+        now_utc = self.clock().astimezone(UTC)
+        ctx = SnapshotContext(
+            snapshot_id=make_snapshot_id(symbol, now_utc),
+            snapshot_ts_utc=now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            market_date=market_day.isoformat(),
+            market_data_type=md_type,
+            underlying=symbol,
+            underlying_conid=int(getattr(stock, "conId", 0) or underlying_conid),
+            underlying_price=spot,
+        )
+        rows = tuple(
+            TickerParser.parse_ticker(
+                tk,
+                contract=contract,
+                context=ctx,
+                dte=(date.fromisoformat(_contract_key(contract)[0]) - market_day).days,
+            )
+            for contract, tk in zip(qualified, tickers, strict=True)
+        )
+        logger.info(
+            "exact_quotes ticker=%s contracts=%d missing=%d market_data_type=%d spot=%.4f "
+            "spot_source=%s snapshot_id=%s",
+            symbol,
+            len(rows),
+            len(missing),
+            md_type,
+            spot,
+            spot_source,
+            ctx.snapshot_id,
+        )
+        return ExactQuoteResult(
+            snapshot_id=ctx.snapshot_id,
+            snapshot_ts_utc=ctx.snapshot_ts_utc,
+            market_date=ctx.market_date,
+            market_data_type=md_type,
+            underlying_price=spot,
+            spot_source=spot_source,
+            rows=rows,
+            missing=tuple(missing),
+            notices=tuple(self._notices),
         )
