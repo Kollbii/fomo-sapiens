@@ -51,8 +51,10 @@ from src.collector.store import (
 from src.core.exceptions import AnalyzerError, GatewayConnectionError, InvalidTickerError
 from src.storage.quality import MIN_QUOTE_COVERAGE, evaluate_snapshot
 from src.storage.schema import SnapshotMeta
+from src.tracker.service import TrackerStatus
 
 if TYPE_CHECKING:
+    from src.tracker.service import TrackerService
     from src.web.api import AnalyzerWebService
 
 logger = logging.getLogger(__name__)
@@ -111,6 +113,7 @@ class CollectorStatus(BaseModel):
     missed_recent: int
     recent_runs: list[RunRecord]
     last_corridor_stop: dict[str, Any] | None
+    tracker: TrackerStatus | None = None
 
 
 def _parse_utc(text: str) -> datetime:
@@ -125,9 +128,11 @@ class CollectorService:
         *,
         clock: ClockFn | None = None,
         wait: WaitFn | None = None,
+        tracker: TrackerService | None = None,
     ) -> None:
         self.web = web
         self.store = store
+        self.tracker = tracker
         self.clock: ClockFn = clock or (lambda: datetime.now(UTC))
         self._wake = asyncio.Event()
         self._wait: WaitFn = wait or self._wait_for_wake
@@ -230,7 +235,21 @@ class CollectorService:
 
     # ------------------------------------------------------------------ startup gaps
     def record_missed_slots(self) -> list[RunRecord]:
-        """Record slots that passed while the app was not running (collector was enabled)."""
+        """Record slots that passed while the app was not running (collector was enabled).
+
+        Tracked spreads get their own `MISSED` records; spreads whose expiry passed meanwhile
+        are set to `EXPIRED`.
+        """
+        try:
+            return self._record_missed_slots()
+        finally:
+            if self.tracker is not None:
+                try:
+                    self.tracker.expire_overdue()
+                except Exception:
+                    logger.exception("tracker expiry check failed; continuing")
+
+    def _record_missed_slots(self) -> list[RunRecord]:
         if not self.settings.enabled or not self.settings.tickers:
             return []
         now = self._now()
@@ -261,6 +280,11 @@ class CollectorService:
         self.store.append_runs(records)
         if records:
             logger.warning("collector recorded %d missed slot(s) on startup", len(missed))
+        if self.tracker is not None and missed:
+            try:
+                self.tracker.record_missed(missed)
+            except Exception:
+                logger.exception("tracker missed-slot check failed; continuing")
         return records
 
     # ------------------------------------------------------------------ one slot
@@ -269,6 +293,7 @@ class CollectorService:
         pins = list(self.settings.tickers)
         self.last_cycle_planned = slot.at_utc
         records: list[RunRecord] = []
+        track = _SlotTracking()
         self.busy = True
         try:
             postponed = await self._postpone_for_corridor()
@@ -278,6 +303,9 @@ class CollectorService:
                     for pin in pins
                 ]
                 self.store.append_runs(records)
+                self._tracker_finish(
+                    slot, pins, track, status="SKIPPED", error="A manual refresh kept running."
+                )
                 return records
             retry_fail: list[TickerPin] = []
             retry_cov: list[TickerPin] = []
@@ -287,10 +315,12 @@ class CollectorService:
                     rec = await self._collect_one(slot, pin, attempt=1, postponed=postponed)
                     records.append(rec)
                     self.store.append_runs([rec])
+                    await self._tracker_after_attempt(slot, rec, track)
                     if rec.status == "FAILED" and _retryable(rec):
                         retry_fail.append(pin)
                     elif rec.status == "LOW_QUALITY" and _low_coverage_only(rec):
                         retry_cov.append(pin)
+                await self._tracker_extra_tickers(slot, pins, track)
             finally:
                 self.current_ticker = None
                 self.web.release_refresh()
@@ -319,12 +349,88 @@ class CollectorService:
                         rec = await self._collect_one(slot, pin, attempt=2, postponed=0.0)
                         records.append(rec)
                         self.store.append_runs([rec])
+                        await self._tracker_after_attempt(slot, rec, track)
+                    await self._tracker_extra_tickers(slot, pins, track)
                 finally:
                     self.current_ticker = None
                     self.web.release_refresh()
+            self._tracker_finish(
+                slot,
+                pins,
+                track,
+                status="FAILED",
+                error="GATEWAY_OFFLINE: no collection attempt reached the Gateway in this slot.",
+            )
             return records
         finally:
             self.busy = False
+
+    # ------------------------------------------------------------------ position tracker hooks
+    async def _tracker_after_attempt(
+        self, slot: Slot, rec: RunRecord, track: _SlotTracking
+    ) -> None:
+        """AUTO pick from this snapshot, then quote the ticker's tracked spreads once.
+
+        Runs after the first attempt that reached the Gateway; a tracker failure is logged and
+        never changes the collector record, its retries or the other tickers.
+        """
+        if self.tracker is None:
+            return
+        if rec.snapshot_id:
+            try:
+                self.tracker.auto_pick(
+                    slot, rec.ticker, snapshot_id=rec.snapshot_id, usable=rec.usable
+                )
+            except Exception:
+                logger.exception("tracker AUTO pick failed for %s; continuing", rec.ticker)
+        try:
+            if _reached_gateway(rec):
+                track.connected = True
+                track.tickers.add(rec.ticker)
+                self.current_ticker = rec.ticker
+                await self.tracker.track_ticker(slot, rec.ticker, track.done)
+        except Exception:
+            logger.exception("tracker step failed for %s; collection continues", rec.ticker)
+
+    async def _tracker_extra_tickers(
+        self, slot: Slot, pins: list[TickerPin], track: _SlotTracking
+    ) -> None:
+        """Tracked spreads on tickers the collector does not snapshot (USER spreads)."""
+        if self.tracker is None or not track.connected:
+            return
+        pinned = {p.symbol for p in pins}
+        for ticker in self.tracker.active_tickers():
+            if ticker in pinned or ticker in track.tickers:
+                continue
+            track.tickers.add(ticker)
+            self.current_ticker = ticker
+            try:
+                await self.tracker.track_ticker(slot, ticker, track.done)
+            except Exception:
+                logger.exception("tracker step failed for %s; collection continues", ticker)
+
+    def _tracker_finish(
+        self,
+        slot: Slot,
+        pins: list[TickerPin],
+        track: _SlotTracking,
+        *,
+        status: str,
+        error: str,
+    ) -> None:
+        """Record spreads this slot could not quote, then the CLOSING-slot lifecycle."""
+        if self.tracker is None:
+            return
+        try:
+            active = self.tracker.active_tickers()
+            ordered = [p.symbol for p in pins if p.symbol in active]
+            ordered += [t for t in active if t not in ordered]
+            for ticker in ordered:
+                if ticker not in track.tickers:
+                    self.tracker.log_unreached(slot, ticker, track.done, status=status, error=error)
+            self.tracker.finish_slot(slot, [p.symbol for p in pins])
+        except Exception:
+            logger.exception("tracker slot wrap-up failed; continuing")
 
     async def _postpone_for_corridor(self) -> float:
         waited = 0.0
@@ -529,7 +635,26 @@ class CollectorService:
             ),
             recent_runs=runs[-RECENT_RUNS_IN_STATUS:],
             last_corridor_stop=self.web.last_corridor_stop,
+            tracker=self.tracker.status() if self.tracker is not None else None,
         )
+
+
+class _SlotTracking:
+    """Per-slot tracker state: spreads already quoted, tickers handled, Gateway reached."""
+
+    def __init__(self) -> None:
+        self.done: set[str] = set()
+        self.tickers: set[str] = set()
+        self.connected = False
+
+
+def _reached_gateway(rec: RunRecord) -> bool:
+    """The attempt got past the Gateway connection (`OK` / `LOW_QUALITY` or a later failure)."""
+    if rec.status in ("OK", "LOW_QUALITY"):
+        return True
+    return rec.status == "FAILED" and not (rec.error or "").startswith(
+        ("GATEWAY_OFFLINE", "INVALID_TICKER")
+    )
 
 
 def _retryable(rec: RunRecord) -> bool:
