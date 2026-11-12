@@ -27,6 +27,7 @@ milestones in git history.
 - `docs/UI_UX_GUIDELINES.md` is now a compact contract (20 kB -> 8 kB: tokens, typography, layout rows, 10 behavioral rules, Plotly styling); the element-by-element inventory moved verbatim to `docs/reference/IMPLEMENTATION_NOTES.md` §5.1.
 
 ### Fixed
+- Chain table sorted-column, active-filter and focus highlights were invisible: `--accent-focus` (11 uses) was never defined; it is now a theme token (`#1D4ED8` print / `#38BDF8` terminal). The undefined `--border-hairline` header rule now uses `--border-subtle`.
 - `docs/UI_UX_GUIDELINES.md` token table listed tokens that do not exist (`--bg-primary`, `--border-hairline`, `--accent-focus`) and stale values/fonts; it now matches `tokens.css`.
 - Documentation no longer claims unused tooling (Tailwind, HTMX, `scipy.optimize`) or non-existent identifiers.
 

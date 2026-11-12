@@ -75,3 +75,23 @@ def test_documented_design_tokens_are_defined_in_css() -> None:
     documented = set(re.findall(r"`(--[a-z0-9-]+)`", guide))
     assert documented, "no tokens found in UI_UX_GUIDELINES.md - regex drifted?"
     assert sorted(documented - defined) == []
+
+
+def test_css_variables_are_defined_for_both_themes() -> None:
+    """Undefined custom properties fail silently in browsers; forbid them."""
+    css_dir = WEB_DIR / "static" / "css"
+    css = "\n".join(p.read_text(encoding="utf-8") for p in css_dir.glob("*.css"))
+    tokens = (css_dir / "tokens.css").read_text(encoding="utf-8")
+    root_block = re.search(r":root\s*\{([^}]*)\}", tokens)
+    themes = {
+        name: set(re.findall(r"(--[a-z0-9-]+)\s*:", body))
+        for name, body in re.findall(r'html\[data-theme="(\w+)"\]\s*\{([^}]*)\}', tokens)
+    }
+    assert set(themes) == {"print", "terminal"}
+    shared = set(re.findall(r"(--[a-z0-9-]+)\s*:", root_block.group(1))) if root_block else set()
+    locally_defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", css)) - set().union(*themes.values())
+    used_without_fallback = set(re.findall(r"var\((--[a-z0-9-]+)\s*\)", css))
+    for theme, defined in themes.items():
+        missing = sorted(used_without_fallback - defined - shared - locally_defined)
+        assert missing == [], f"{theme} theme lacks {missing}"
+    assert themes["print"] == themes["terminal"], "themes must define the same token set"

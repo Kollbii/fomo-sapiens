@@ -14,7 +14,7 @@
 ## 2. Dual Themes & Design Tokens
 - `<html data-theme="print">` (default, **NYT Print Edition**) or `data-theme="terminal"` (**Obsidian Terminal**). The choice persists in `localStorage("ibkr_options_theme")` and is applied before first paint (inline script in `base.html`).
 - Toggling the theme must re-skin every Plotly chart in place (no refetch, no reload).
-- All colors, fonts, borders, and shadows come from CSS custom properties in `tokens.css`; row stylesheets and JS never hard-code theme colors (JS fallbacks in `themeVars()` mirror the token values).
+- All colors, fonts, borders, and shadows come from CSS custom properties in `tokens.css`; row stylesheets and JS never hard-code theme colors (JS fallbacks in `themeVars()` mirror the token values). Every `var(--x)` must reference a token defined for **both** themes (enforced by `tests/unit/test_docs_consistency.py`).
 
 | Token | `print` | `terminal` | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -32,6 +32,7 @@
 | `--accent-put` | `#A82020` | `#EF4444` | Puts, Put Walls |
 | `--accent-warn` | `#B45309` | `#F59E0B` | Delayed/frozen feed badges, warnings |
 | `--accent-anomaly` | `#C2410C` | `#FB923C` | `Volume > OI` / Z-score anomalies |
+| `--accent-focus` | `#1D4ED8` | `#38BDF8` | Sorted column, active filters, focus rings (matches the first DTE palette color) |
 | `--plotly-bg` / `--plotly-grid` / `--plotly-ink` | `#FFFFFF` / `#E8E4DA` / `#111111` | `#11161F` / `#1E2636` / `#EAECEF` | Plotly paper, grid, text |
 
 Translucent `--accent-*-bg` variants and `--accent-atm-bg` back highlighted rows and badges.

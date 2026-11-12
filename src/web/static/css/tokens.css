@@ -34,6 +34,7 @@ html[data-theme="print"] {
   --accent-put-bg: rgba(168, 32, 32, 0.11);
   --accent-warn-bg: rgba(180, 83, 9, 0.12);
   --accent-anomaly-bg: rgba(194, 65, 12, 0.13);
+  --accent-focus: #1D4ED8;
   --accent-atm-bg: rgba(17, 17, 17, 0.06);
   --plotly-bg: #FFFFFF;
   --plotly-grid: #E8E4DA;
@@ -62,6 +63,7 @@ html[data-theme="terminal"] {
   --accent-put-bg: rgba(239, 68, 68, 0.14);
   --accent-warn-bg: rgba(245, 158, 11, 0.14);
   --accent-anomaly-bg: rgba(251, 146, 60, 0.16);
+  --accent-focus: #38BDF8;
   --accent-atm-bg: rgba(245, 158, 11, 0.10);
   --plotly-bg: #11161F;
   --plotly-grid: #1E2636;
