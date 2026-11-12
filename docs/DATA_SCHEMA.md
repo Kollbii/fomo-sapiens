@@ -22,7 +22,9 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
     │   ├── CRDO_latest.csv
     │   └── PLTR_latest.csv
     └── metadata/
-        └── snapshot_index.json
+        ├── snapshot_index.json
+        ├── collector_settings.json   # scheduled collection settings (atomic JSON)
+        └── collector_runs.jsonl      # one line per scheduled attempt (append-only)
 
 ### 1.2 File Naming & Atomic Write Protocol
 - **Archive Filename Pattern:** `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv` (UTC timestamp).
@@ -141,3 +143,8 @@ Unknown values make a snapshot not usable. Low-quality snapshots are still saved
 - **`src/storage/csv_repository.py`:** `CSVRepository(storage_settings, root)`; `make_snapshot_id(ticker, ts)`; `save_snapshot` (refuses to overwrite an existing snapshot id, raising `StorageSchemaError`), `load_latest` (falls back to the newest valid archive if the cache is missing/corrupt), `load_snapshot`, `list_snapshots` (newest first), `load_index` / `rebuild_index` (self-healing with `infer_missing=True`; corrupt or stray CSVs are skipped with a warning). Readers raise `StorageSchemaError` on header/dtype/null violations and `SnapshotNotFoundError` when nothing exists.
 - **`src/storage/quality.py`:** `measure_quote_quality(df)` (quoted / close-only counts), `evaluate_snapshot(meta)` -> `UsabilityVerdict(usable, reasons)`, `is_usable_snapshot(meta)`, `MIN_QUOTE_COVERAGE = 0.90`.
 - **Index notes:** `file_path` / `latest_file` are root-relative POSIX paths. After `rebuild_index()`, `strike_step` and `range_pct` are inferred from CSV strikes via `infer_chain_step_and_range()` while `requested_strike_step` is `null` (since request metadata lives only in `snapshot_index.json`).
+
+## 6. Scheduled Collection Files (`data/metadata/`)
+- Scheduled snapshots are ordinary immutable snapshots with `collection_mode: "SCHEDULED"` in the index; the CSV schema is unchanged.
+- `collector_settings.json`: `enabled`, `interval_min`, `tickers` (`symbol`, `range_pct`, `strike_step`, `dte_min`, `dte_max`, `pinned_since_utc`), `updated_at_utc`, `enabled_since_utc`. Written atomically (`.tmp` + `os.replace`).
+- `collector_runs.jsonl`: one JSON object per ticker attempt: `planned_slot_utc`, `slot_kind` (`INTERVAL` / `CLOSING`), `actual_run_utc`, `ticker`, `attempt`, `status` (`OK` / `LOW_QUALITY` / `FAILED` / `SKIPPED` / `MISSED`), `snapshot_id`, `quote_coverage`, `usable`, `quality_reasons`, `requested_range_pct`, `requested_strike_step`, `effective_strike_step`, `dte_min`, `dte_max`, `pin_drift`, `error`, `note`. Unreadable lines are skipped with a warning.

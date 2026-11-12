@@ -71,3 +71,12 @@ When running inside Docker on Windows or macOS (`make docker-up`):
 - **Message rate:** `ib_async` sends at most `45` messages per `1s` window (`Client.MaxRequests`) and queues the rest; IBKR allows half the account's market-data lines per second (`50` with the default `100` lines). The chain fetcher sends `reqMktData` and `cancelMktData` in bursts of `20` with a `0.55s` pause before each burst (`<= 40` per second), so its requests never wait in the `ib_async` queue.
 - **Line budget:** IBKR grants `100` simultaneous market-data lines by default, shared with TWS watchlists and every API client (error `101` when exceeded). One chain page uses `<= 80` lines; the underlying spot subscription is cancelled before the first page; all page lines are cancelled before the next page starts. `POST /api/refresh` stops any corridor stream (`<= 60` lines) before fetching. Lines used in TWS itself still count against the same `100`.
 - **Cancels are guaranteed:** every subscription is cancelled in `finally`; an interrupted pause never skips a cancel.
+
+---
+
+## 6. Scheduled Collection Background Task (`src/collector/`)
+- **Same read-only path:** the collector only calls `AnalyzerWebService.refresh_chain_locked`, the code behind `POST /api/refresh`: `ReadOnlyIBGuard`, chain filtering (DTE window, `range_pct`, `strike_step`), pages of `<= 80`, pacing and `finally` cancels all apply unchanged. It never places, modifies or cancels orders.
+- **Tickers:** every collected ticker is validated by `TickerValidator` when the settings are saved (`TickerPin`) and again before each refresh (`validate_ticker`).
+- **No overlap:** one `asyncio.Lock` serializes manual and scheduled refreshes, so only one page (`<= 80` lines) is subscribed at a time; corridor streams are stopped before a refresh (after up to 10 min of postponement).
+- **Event loop:** the task uses `asyncio` waits only; no blocking calls. Errors are caught per ticker and logged; the loop never stops on an error.
+- **Files:** collector state lives in `data/metadata/collector_settings.json` and `data/metadata/collector_runs.jsonl`; nothing is written to `data/snapshots/` except new immutable snapshots through `CSVRepository`.
