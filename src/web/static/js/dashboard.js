@@ -3269,14 +3269,15 @@
   }
 
   // ------------------------------------------------------------------ Snapshot Dropdown
-  // "2026-11-11 18:05 ET" from snapshot_ts_utc (exchange time, DST-aware); falls back to the date.
-  function formatSnapshotTimeEt(tsUtc, fallbackDate) {
+  // Exchange-time (America/New_York, DST-aware) parts of snapshot_ts_utc, or null.
+  function snapshotEtParts(tsUtc) {
     var d = tsUtc ? new Date(tsUtc) : null;
-    if (!d || isNaN(d.getTime()) || typeof Intl === "undefined") return fallbackDate || "";
+    if (!d || isNaN(d.getTime()) || typeof Intl === "undefined") return null;
     try {
       var parts = {};
       new Intl.DateTimeFormat("en-US", {
         timeZone: "America/New_York",
+        weekday: "short",
         year: "numeric",
         month: "2-digit",
         day: "2-digit",
@@ -3288,14 +3289,19 @@
         .forEach(function (p) {
           parts[p.type] = p.value;
         });
-      return (
-        parts.year + "-" + parts.month + "-" + parts.day + " " + parts.hour + ":" + parts.minute + " ET"
-      );
+      return {
+        dayKey: parts.year + "-" + parts.month + "-" + parts.day,
+        dayLabel: parts.day + "." + parts.month + "." + parts.year + " (" + parts.weekday + ")",
+        dayShort: parts.day + "." + parts.month,
+        time: parts.hour + ":" + parts.minute + " ET",
+      };
     } catch (_err) {
-      return fallbackDate || "";
+      return null;
     }
   }
 
+  // Snapshots grouped by exchange date (<optgroup> "11.11.2026 (Wed)"), entries by time.
+  // A closed <select> shows only the option text, so the selected entry also carries the date.
   function renderSnapshotSelect(payload) {
     if (!dom.snapshotSelect) return;
     var items = (payload && payload.snapshots) || [];
@@ -3311,14 +3317,21 @@
       return;
     }
 
+    var selectedId = state.snapshotId || items[0].snapshot_id;
+    var groups = {};
     for (var i = 0; i < items.length; i++) {
       var snap = items[i];
-      var opt = document.createElement("option");
-      opt.value = snap.snapshot_id;
-      var metaBits = [
-        formatSnapshotTimeEt(snap.snapshot_ts_utc, snap.market_date),
-        "T" + snap.market_data_type,
-      ];
+      var et = snapshotEtParts(snap.snapshot_ts_utc);
+      var dayKey = et ? et.dayKey : snap.market_date || "";
+      var group = groups[dayKey];
+      if (!group) {
+        group = document.createElement("optgroup");
+        group.label = et ? et.dayLabel : snap.market_date || "Unknown date";
+        groups[dayKey] = group;
+        dom.snapshotSelect.appendChild(group);
+      }
+
+      var metaBits = ["T" + snap.market_data_type];
       if (snap.range_pct !== null && snap.range_pct !== undefined) {
         metaBits.push(formatRangeShort(snap.range_pct));
       }
@@ -3326,11 +3339,17 @@
         metaBits.push(formatStepShort(snap.strike_step));
       }
       metaBits.push(snap.contract_count + "c");
-      opt.textContent = snap.snapshot_id + " (" + metaBits.join(" \u2022 ") + ")";
-      if (state.snapshotId ? snap.snapshot_id === state.snapshotId : i === 0) {
-        opt.selected = true;
-      }
-      dom.snapshotSelect.appendChild(opt);
+
+      var isSelected = snap.snapshot_id === selectedId;
+      var timeText = et ? et.time : snap.snapshot_id;
+      if (isSelected && et) timeText = et.dayShort + " " + timeText;
+
+      var opt = document.createElement("option");
+      opt.value = snap.snapshot_id;
+      opt.title = snap.snapshot_id;
+      opt.textContent = timeText + "  \u2022  " + metaBits.join(" \u2022 ");
+      if (isSelected) opt.selected = true;
+      group.appendChild(opt);
     }
     if (!state.snapshotId && items.length) {
       state.snapshotId = items[0].snapshot_id;
