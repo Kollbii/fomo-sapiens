@@ -945,3 +945,247 @@ def test_refresh_stops_running_corridor_streams_first(tmp_path: Path) -> None:
     assert corridor.active_stream_count == 0
     # The 60 stream lines were cancelled before the first option page was subscribed
     assert mock_ib.cancelled[:60] == stream_contracts
+
+
+# ------------------------------------------------------------------ scheduled collection
+def test_collector_status_and_settings_persist_across_restart(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r0 = await client.get("/api/collector/status")
+            assert r0.status_code == 200
+            st0 = r0.json()
+            assert st0["enabled"] is False and st0["restored_on_startup"] is False
+            assert [(t["symbol"], t["range_pct"], t["strike_step"]) for t in st0["tickers"]] == [
+                ("NVDA", 0.35, 5.0),
+                ("AVGO", 0.35, 10.0),
+            ]
+            assert st0["calendar_source_url"] == "https://www.nyse.com/markets/hours-calendars"
+
+            body = {
+                "enabled": True,
+                "interval_min": 30,
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.35,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                    {
+                        "symbol": "aapl",
+                        "range_pct": 0.20,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                ],
+            }
+            r1 = await client.put("/api/collector/settings", json=body)
+            assert r1.status_code == 200, r1.text
+            st1 = r1.json()
+            assert st1["enabled"] is True and st1["interval_min"] == 30
+            assert [t["symbol"] for t in st1["tickers"]] == ["NVDA", "AAPL"]
+            assert all(t["pinned_since_utc"] for t in st1["tickers"])
+
+    _run(_exercise())
+    assert (tmp_path / "data" / "metadata" / "collector_settings.json").is_file()
+    assert not any((tmp_path / "data" / "snapshots").rglob("collector*"))
+
+    app2, _repo2, _ = _build_test_app(tmp_path / "restart-copy")
+    # Simulate a restart on the same data directory.
+    restarted = create_app(
+        settings=app2.state.service.settings,
+        repo=CSVRepository(StorageSettings(), root=tmp_path),
+        broker_client=app2.state.service.broker_client,
+        fetcher=app2.state.service.fetcher,
+    )
+
+    async def _after_restart() -> None:
+        transport = httpx.ASGITransport(app=restarted)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            st = (await client.get("/api/collector/status")).json()
+            assert st["enabled"] is True and st["restored_on_startup"] is True
+            assert [t["symbol"] for t in st["tickers"]] == ["NVDA", "AAPL"]
+
+    _run(_after_restart())
+
+
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        ({"interval_min": 45}, 422),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "../etc",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.33,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 7.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 90,
+                        "dte_max": 30,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 121,
+                    }
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": "NVDA",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                    {
+                        "symbol": "nvda",
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    },
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "tickers": [
+                    {
+                        "symbol": s,
+                        "range_pct": 0.2,
+                        "strike_step": 5.0,
+                        "dte_min": 30,
+                        "dte_max": 120,
+                    }
+                    for s in ("A", "B", "C", "D", "E", "F", "G")
+                ]
+            },
+            422,
+        ),
+    ],
+)
+def test_collector_settings_validation(tmp_path: Path, change: dict[str, Any], status: int) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+    body: dict[str, Any] = {"enabled": True, "interval_min": 60, "tickers": []}
+    body.update(change)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.put("/api/collector/settings", json=body)
+            assert r.status_code == status, r.text
+
+    _run(_exercise())
+    assert not (tmp_path / "data" / "metadata" / "collector_settings.json").exists()
+
+
+def test_manual_refresh_reports_a_running_collection_cycle(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+    svc = app.state.service
+    assert _run(svc.acquire_refresh("collector", 1.0)) is True
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/refresh", json={"ticker": "NVDA", "range_pct": 0.2})
+            assert r.status_code == 409
+            body = r.json()
+            assert body["error_code"] == "COLLECTOR_BUSY"
+            assert body["retry_after_sec"] > 0
+            assert "Waiting for scheduled collection" in body["message"]
+            r_bad = await client.post("/api/refresh", json={"ticker": "../etc", "range_pct": 0.2})
+            assert r_bad.status_code == 422  # validation still comes first
+
+    _run(_exercise())
+    svc.release_refresh()
+    assert svc.refresh_lock.locked() is False
+
+
+def test_scheduled_cycle_uses_the_real_refresh_path(tmp_path: Path) -> None:
+    import asyncio
+
+    from src.collector.calendar import Slot
+    from src.collector.store import CollectorSettings, TickerPin
+
+    app, repo, _ = _build_test_app(tmp_path)
+    collector = app.state.service.get_collector()
+    collector.settings = CollectorSettings(
+        enabled=True,
+        tickers=[
+            TickerPin(symbol="NVDA", range_pct=0.20, strike_step=5.0, dte_min=30, dte_max=120)
+        ],
+    )
+    slot = Slot("INTERVAL", datetime(2026, 11, 11, 16, 0, 0, tzinfo=UTC))
+    records = asyncio.run(collector.run_slot(slot))
+
+    assert [(r.status, r.pin_drift, r.snapshot_id) for r in records] == [
+        ("OK", False, "NVDA_20261111_160000")
+    ]
+    meta = next(m for m in repo.list_snapshots("NVDA") if m.snapshot_id == "NVDA_20261111_160000")
+    assert meta.collection_mode == "SCHEDULED"
+    assert meta.range_pct == pytest.approx(0.20)
+    assert app.state.service.refresh_lock.locked() is False
+    snap_files = list((tmp_path / "data" / "snapshots").rglob("*"))
+    assert not [p for p in snap_files if p.name.startswith(".") or p.suffix == ".tmp"]

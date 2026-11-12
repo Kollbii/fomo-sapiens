@@ -63,9 +63,16 @@ def create_app(
             cfg.ibkr.port,
             cfg.ibkr.market_data_mode,
         )
+        collector = service.get_collector()
+        try:
+            collector.record_missed_slots()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("collector missed-slot check failed; continuing")
+        await collector.start()
         try:
             yield
         finally:
+            await collector.stop()
             try:
                 await service.stop_corridor_streams()
             except Exception:  # pragma: no cover - defensive shutdown

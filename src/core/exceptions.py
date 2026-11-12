@@ -41,3 +41,12 @@ class StorageSchemaError(AnalyzerError):
 
 class SnapshotNotFoundError(AnalyzerError):
     """Raised when a requested snapshot / latest CSV does not exist on disk."""
+
+
+class RefreshBusyError(AnalyzerError):
+    """Raised when a chain refresh cannot start because another refresh holds the lock."""
+
+    def __init__(self, message: str, *, owner: str, retry_after_sec: int) -> None:
+        super().__init__(message)
+        self.owner = owner
+        self.retry_after_sec = retry_after_sec

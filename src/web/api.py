@@ -7,6 +7,7 @@ import json
 import logging
 from collections import Counter
 from collections.abc import AsyncIterator
+from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 
@@ -37,12 +38,16 @@ from src.broker.corridor import (
     CorridorQuoteService,
 )
 from src.broker.fetcher import PagedOptionChainFetcher
+from src.collector.calendar import ALLOWED_INTERVALS_MIN
+from src.collector.service import CollectorService, CollectorStatus
+from src.collector.store import MAX_COLLECTOR_TICKERS, CollectorSettings, CollectorStore, TickerPin
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
     GatewayConnectionError,
     InvalidTickerError,
     OptionChainFetchError,
     PacingViolationError,
+    RefreshBusyError,
     SecurityViolationError,
     SnapshotNotFoundError,
     StorageSchemaError,
@@ -58,6 +63,14 @@ from src.storage.schema import (
     SpotSource,
     infer_chain_step_and_range,
 )
+
+# A manual refresh waits this long for another manual refresh; a running scheduled
+# collection cycle is reported immediately (HTTP 409 COLLECTOR_BUSY) so the UI can show it.
+MANUAL_REFRESH_WAIT_SEC = 90.0
+REFRESH_OWNER_MANUAL = "manual"
+REFRESH_OWNER_COLLECTOR = "collector"
+# Rough time per ticker for the busy hint (5 pages, see docs/ARCHITECTURE.md).
+REFRESH_EST_SEC_PER_TICKER = 40
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
 logger = logging.getLogger(__name__)
@@ -165,6 +178,28 @@ class RefreshRequest(BaseModel):
         if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
             raise ValueError("dte_min must be <= dte_max")
         return self
+
+
+class CollectorTickerInput(BaseModel):
+    """One collected ticker with its pinned refresh parameters."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    symbol: str
+    range_pct: float
+    strike_step: float
+    dte_min: int = Field(ge=0, le=120)
+    dte_max: int = Field(ge=1, le=120)
+
+
+class CollectorSettingsRequest(BaseModel):
+    """Request body for `PUT /api/collector/settings`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    interval_min: int
+    tickers: list[CollectorTickerInput] = Field(max_length=MAX_COLLECTOR_TICKERS)
 
 
 class StrategySuggestRequest(BaseModel):
@@ -292,9 +327,24 @@ class AnalyzerWebService:
             allow_custom=self.settings.watchlist.allow_custom_ticker,
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
+        # One chain refresh at a time (manual or scheduled collection).
+        self.refresh_lock = asyncio.Lock()
+        self.refresh_owner: str | None = None
+        self.refresh_busy_hint_sec = REFRESH_EST_SEC_PER_TICKER
+        # Last time a refresh stopped corridor streams: {at_utc, lines, by}.
+        self.last_corridor_stop: dict[str, Any] | None = None
+        self._collector: CollectorService | None = None
         self._corridor_cache: dict[
             tuple[str, str], tuple[float, dict[tuple[str, float, str], CorridorQuoteRow]]
         ] = {}
+
+    def get_collector(self) -> CollectorService:
+        """The scheduled collector (created on first use; the loop starts in the lifespan)."""
+        if self._collector is None:
+            self._collector = CollectorService(
+                self, CollectorStore(self.repo.index_path.parent), clock=self.fetcher.clock
+            )
+        return self._collector
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -695,7 +745,50 @@ class AnalyzerWebService:
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    async def acquire_refresh(self, owner: str, timeout_sec: float) -> bool:
+        """Take the single refresh lock; False if it stayed busy for `timeout_sec`."""
+        if not self.refresh_lock.locked():
+            await self.refresh_lock.acquire()  # free: returns at once, no timer needed
+        else:
+            try:
+                await asyncio.wait_for(self.refresh_lock.acquire(), timeout=timeout_sec)
+            except TimeoutError:
+                return False
+        self.refresh_owner = owner
+        return True
+
+    def release_refresh(self) -> None:
+        self.refresh_owner = None
+        self.refresh_lock.release()
+
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
+        """Manual refresh (`POST /api/refresh`)."""
+        self.validate_ticker(req.ticker)  # invalid tickers fail with 422 even while busy
+        if self.refresh_lock.locked() and self.refresh_owner == REFRESH_OWNER_COLLECTOR:
+            raise RefreshBusyError(
+                "Waiting for scheduled collection: a collection cycle is running.",
+                owner=REFRESH_OWNER_COLLECTOR,
+                retry_after_sec=self.refresh_busy_hint_sec,
+            )
+        if not await self.acquire_refresh(REFRESH_OWNER_MANUAL, MANUAL_REFRESH_WAIT_SEC):
+            owner = self.refresh_owner or REFRESH_OWNER_MANUAL
+            raise RefreshBusyError(
+                f"Another refresh ({owner}) is still running.",
+                owner=owner,
+                retry_after_sec=self.refresh_busy_hint_sec,
+            )
+        try:
+            return await self.refresh_chain_locked(req, collection_mode="MANUAL")
+        finally:
+            self.release_refresh()
+
+    async def refresh_chain_locked(
+        self,
+        req: RefreshRequest,
+        *,
+        collection_mode: CollectionMode,
+    ) -> ChainAnalyticsResponse:
+        """Refresh one ticker; the caller must hold `refresh_lock` (see `acquire_refresh`)."""
         symbol = self.validate_ticker(req.ticker)
         # IBKR allows 100 simultaneous market-data lines by default (shared with TWS). A page of
         # 80 contracts plus a corridor stream of up to 60 would exceed it, so stop streams first.
@@ -703,6 +796,12 @@ class AnalyzerWebService:
         if self.corridor.active_stream_count:
             stopped_lines = await self.corridor.stop_all_streams()
             logger.info("refresh %s stopped corridor streams (%d lines)", symbol, stopped_lines)
+            self.last_corridor_stop = {
+                "at_utc": self.fetcher.clock().astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "lines": stopped_lines,
+                "by": self.refresh_owner or REFRESH_OWNER_MANUAL,
+                "ticker": symbol,
+            }
         fetch_res = await self.fetcher.fetch_option_chain(
             symbol,
             range_pct=req.range_pct,
@@ -759,7 +858,7 @@ class AnalyzerWebService:
             strike_step=actual_step,
             requested_strike_step=req_step,
             spot_source=plan.underlying.spot_source,
-            collection_mode="MANUAL",
+            collection_mode=collection_mode,
         )
         quality_verdict = evaluate_snapshot(saved_meta)
         if not quality_verdict.usable:
@@ -840,6 +939,59 @@ async def api_refresh(
     svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return await svc.refresh_chain(payload)
+
+
+@router.get("/collector/status", response_model=CollectorStatus)
+async def api_collector_status(
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> CollectorStatus:
+    return svc.get_collector().status()
+
+
+@router.put("/collector/settings", response_model=CollectorStatus)
+async def api_collector_settings(
+    payload: CollectorSettingsRequest,
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> CollectorStatus:
+    oc = svc.settings.options_chain
+    if payload.interval_min not in ALLOWED_INTERVALS_MIN:
+        raise HTTPException(
+            status_code=422,
+            detail=f"interval_min must be one of {list(ALLOWED_INTERVALS_MIN)} (0 = closing only)",
+        )
+    pins: list[TickerPin] = []
+    for item in payload.tickers:
+        symbol = svc.validate_ticker(item.symbol)
+        if not any(abs(item.range_pct - r) < 1e-9 for r in oc.allowed_range_pcts):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{symbol}: range_pct must be one of {list(oc.allowed_range_pcts)}",
+            )
+        if not any(abs(item.strike_step - s) < 1e-9 for s in oc.allowed_strike_steps):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{symbol}: strike_step must be one of {list(oc.allowed_strike_steps)}",
+            )
+        if item.dte_min > item.dte_max:
+            raise HTTPException(status_code=422, detail=f"{symbol}: dte_min must be <= dte_max")
+        pins.append(
+            TickerPin(
+                symbol=symbol,
+                range_pct=item.range_pct,
+                strike_step=item.strike_step,
+                dte_min=item.dte_min,
+                dte_max=item.dte_max,
+            )
+        )
+    try:
+        new = CollectorSettings(
+            enabled=payload.enabled, interval_min=payload.interval_min, tickers=pins
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    collector = svc.get_collector()
+    collector.update_settings(new)
+    return collector.status()
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)
@@ -983,6 +1135,19 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=502,
             content={"error_code": "UNDERLYING_PRICE_UNAVAILABLE", "message": str(exc)},
+        )
+
+    @app.exception_handler(RefreshBusyError)
+    async def _handle_refresh_busy(_req: Request, exc: RefreshBusyError) -> JSONResponse:
+        code = "COLLECTOR_BUSY" if exc.owner == REFRESH_OWNER_COLLECTOR else "REFRESH_BUSY"
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_code": code,
+                "message": str(exc),
+                "retry_after_sec": exc.retry_after_sec,
+            },
+            headers={"Retry-After": str(exc.retry_after_sec)},
         )
 
     @app.exception_handler(OptionChainFetchError)
