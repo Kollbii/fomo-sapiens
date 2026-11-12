@@ -29,14 +29,14 @@ docker-down:
 	docker compose down
 
 lint:
-	$(UV_RUN) ruff check src tests
-	$(UV_RUN) ruff format --check src tests
+	$(UV_RUN) ruff check src tests scripts
+	$(UV_RUN) ruff format --check src tests scripts
 
 typecheck:
-	$(UV_RUN) mypy src tests
+	$(UV_RUN) mypy src tests scripts
 
 security-guard:
-	$(UV_RUN) python -c "import pathlib, re, sys; pat = re.compile(r'\.(placeOrder|cancelOrder|reqGlobalCancel|exerciseOptions)\('); hits = [f'{p}:{i}:{line.strip()}' for p in pathlib.Path('src').rglob('*.py') if p.name != 'security.py' for i, line in enumerate(p.read_text(encoding='utf-8').splitlines(), 1) if pat.search(line)]; sys.exit('\n'.join(['SECURITY VIOLATION:'] + hits)) if hits else print('Read-Only Security Guard: PASS')"
+	$(UV_RUN) python scripts/security_guard.py
 
 test:
 	$(UV_RUN) pytest -q --tb=short

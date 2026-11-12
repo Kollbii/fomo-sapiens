@@ -105,7 +105,7 @@ All workflows are standardized through `Makefile` and `docker compose`:
     # Stop Docker container
     make docker-down
 
-    # Run full verification suite (Ruff lint + format check + Mypy strict + Pytest + Security guard)
+    # Run full verification suite (Ruff lint + format check + Mypy strict + static Security guard + Pytest)
     make check
 
     # Run unit & integration tests only

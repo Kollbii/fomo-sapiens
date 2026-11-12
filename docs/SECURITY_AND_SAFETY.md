@@ -22,7 +22,10 @@ Users running IBKR Gateway on `IBKR_PORT` (default `4001`, or TWS/custom port) s
 3. **Master API client ID:** Blank (or not conflicting with `CLIENT_ID=77`).
 
 ### Layer 3: Static Analysis CI Gate (`Makefile`)
-- `make check` runs a static grep verification confirming that `.placeOrder`, `.cancelOrder`, and `.exerciseOptions` do not appear anywhere in `src/` outside `src/core/security.py`.
+- `make check` runs `make security-guard` (`scripts/security_guard.py`), a static scan of `src/**/*.py` (excluding `src/core/security.py`) that fails on:
+  - Order/mutation calls: `.placeOrder(`, `.cancelOrder(`, `.reqGlobalCancel(`, `.exerciseOptions(`, `.whatIfOrder(`, `.whatIfOrderAsync(`.
+  - Account/position queries: `.reqAccountSummary*(`, `.reqAccountUpdates*(`, `.reqPositions*(`, `.reqPnL*(`, `.managedAccounts(`, `.reqExecutions*(`, `.reqOpenOrders*(`, `.reqAllOpenOrders*(`.
+  - Event-loop blocking `time.sleep(` and `pandas` imports.
 
 ---
 

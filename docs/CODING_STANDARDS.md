@@ -46,10 +46,13 @@ Every feature phase requires automated tests in `pytest`:
 7. **Dynamic Config & UI/API Verification (`tests/unit/test_config.py`, `tests/integration/test_web_api.py`):**
    - Verifies `.env` `MARKET_DATA_MODE` / `DEFAULT_MARKET_DATA_TYPE` / `FALLBACK_MARKET_DATA_TYPE` reconciliation, `LIVE` (`1 -> 2` & mid-page `10089` fallback), server-reported `Ticker.marketDataType` observation, and non-default `IBKR_HOST:IBKR_PORT` + `LIVE` rendering across HTML, `/api/status`, and offline `503` responses.
 
+8. **`tests/unit/test_security_guard.py`:**
+   - Verifies `scripts/security_guard.py` passes on `src/` and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), account/position queries (`reqPositions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
+
 ---
 
 ## 5. Mandatory Documentation-Sync Checklist (Definition of Done)
 Before completing any task, coding agents must verify:
-- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy`, `pytest`, and read-only grep check) passes with 0 errors.
+- [ ] `make check` (`ruff check`, `ruff format --check`, `mypy` over `src tests scripts`, `scripts/security_guard.py`, and `pytest`) passes with 0 errors.
 - [ ] `AGENTS.md` reflects any new commands, phases, or structural rules.
 - [ ] `docs/ARCHITECTURE.md`, `docs/DATA_SCHEMA.md`, `docs/SECURITY_AND_SAFETY.md`, `docs/UI_UX_GUIDELINES.md`, and `docs/FUTURE_IMPROVEMENTS.md` are updated to match the exact state of the codebase.
