@@ -3269,6 +3269,33 @@
   }
 
   // ------------------------------------------------------------------ Snapshot Dropdown
+  // "2026-11-11 18:05 ET" from snapshot_ts_utc (exchange time, DST-aware); falls back to the date.
+  function formatSnapshotTimeEt(tsUtc, fallbackDate) {
+    var d = tsUtc ? new Date(tsUtc) : null;
+    if (!d || isNaN(d.getTime()) || typeof Intl === "undefined") return fallbackDate || "";
+    try {
+      var parts = {};
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/New_York",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      })
+        .formatToParts(d)
+        .forEach(function (p) {
+          parts[p.type] = p.value;
+        });
+      return (
+        parts.year + "-" + parts.month + "-" + parts.day + " " + parts.hour + ":" + parts.minute + " ET"
+      );
+    } catch (_err) {
+      return fallbackDate || "";
+    }
+  }
+
   function renderSnapshotSelect(payload) {
     if (!dom.snapshotSelect) return;
     var items = (payload && payload.snapshots) || [];
@@ -3289,7 +3316,7 @@
       var opt = document.createElement("option");
       opt.value = snap.snapshot_id;
       var metaBits = [
-        snap.market_date,
+        formatSnapshotTimeEt(snap.snapshot_ts_utc, snap.market_date),
         "T" + snap.market_data_type,
       ];
       if (snap.range_pct !== null && snap.range_pct !== undefined) {
