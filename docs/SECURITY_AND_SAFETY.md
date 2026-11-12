@@ -64,3 +64,10 @@ When running inside Docker on Windows or macOS (`make docker-up`):
 ## 4. Credential & Account Privacy Isolation
 - **No Credentials Stored:** The application never requests, stores, or logs IBKR usernames, passwords, or 2FA codes.
 - **No Account Queries:** The application never calls `reqAccountSummary`, `reqPositions`, `reqPnL`, or `managedAccounts`. Local CSV files contain exclusively market option chain data.
+
+---
+
+## 5. Market-Data Pacing and Line Budget (`src/broker/fetcher.py`, `src/web/api.py`)
+- **Message rate:** `ib_async` sends at most `45` messages per `1s` window (`Client.MaxRequests`) and queues the rest; IBKR allows half the account's market-data lines per second (`50` with the default `100` lines). The chain fetcher sends `reqMktData` and `cancelMktData` in bursts of `20` with a `0.55s` pause before each burst (`<= 40` per second), so its requests never wait in the `ib_async` queue.
+- **Line budget:** IBKR grants `100` simultaneous market-data lines by default, shared with TWS watchlists and every API client (error `101` when exceeded). One chain page uses `<= 80` lines; the underlying spot subscription is cancelled before the first page; all page lines are cancelled before the next page starts. `POST /api/refresh` stops any corridor stream (`<= 60` lines) before fetching. Lines used in TWS itself still count against the same `100`.
+- **Cancels are guaranteed:** every subscription is cancelled in `finally`; an interrupted pause never skips a cancel.

@@ -100,7 +100,12 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
               "expirations": ["2026-12-18", "2026-12-24", "2026-12-31", "2027-01-08"],
               "range_pct": 0.20,
               "strike_step": 5.0,
-              "requested_strike_step": 5.0
+              "requested_strike_step": 5.0,
+              "spot_source": "LAST",
+              "quoted_contract_count": 118,
+              "quote_coverage": 0.9833,
+              "prior_close_only_count": 0,
+              "collection_mode": "MANUAL"
             }
           ]
         }
@@ -109,9 +114,30 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
 
 If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible).
 
+### 4.1 Snapshot quality metadata and the usable-snapshot rule
+Every index entry (and `GET /api/snapshots/{ticker}`, chain `meta`) carries five optional quality fields; entries written before they existed load with `null`:
+
+| Field | Meaning | Source |
+|---|---|---|
+| `spot_source` | `LAST`, `MID` or `CLOSE`: which underlying field became `underlying_price` | refresh only (not in the CSV; `null` after `rebuild_index()`) |
+| `quoted_contract_count` | rows with a current quote: valid positive `bid` **or** `ask` | derived from the CSV rows |
+| `quote_coverage` | `quoted_contract_count / contract_count`, 4 decimals | derived from the CSV rows |
+| `prior_close_only_count` | rows with no `bid`, `ask` or `last` but a `close` (previous session; `mark_price` then falls back to `close`) | derived from the CSV rows |
+| `collection_mode` | `MANUAL` (every `POST /api/refresh`) or `SCHEDULED` (reserved) | refresh only (`null` after `rebuild_index()`) |
+
+**Quote definition.** Prices are sanitized before storage (`0`, `-1`, `>= 1e9` become empty), so a far out-of-the-money option with a zero bid and a valid ask counts as quoted. `last` and `close` alone never count. The CSV schema is unchanged; these counts can always be recomputed from the rows, so a rebuilt index fills them for old snapshots without rewriting any CSV.
+
+**Usable for history** (`src/storage/quality.py`, `evaluate_snapshot` / `is_usable_snapshot`) requires all of:
+1. `quote_coverage >= MIN_QUOTE_COVERAGE` (`0.90`, provisional),
+2. `spot_source` is `LAST` or `MID`,
+3. `market_data_type` is `1` (live) or `3` (delayed); frozen `2` / `4` is not usable.
+
+Unknown values make a snapshot not usable. Low-quality snapshots are still saved (never refused); `POST /api/refresh` adds a notice listing the failed conditions.
+
 ---
 
 ## 5. Phase 2 Implementation Notes — `[IMPLEMENTED]`
-- **`src/storage/schema.py`:** `OptionContractRow` (field order = CSV column order, 27 columns), `COLUMNS`, `OPTION_CHAIN_POLARS_SCHEMA` (`pl.Schema`), `SnapshotMeta` (index entry including `requested_strike_step` plus optional exchange discovery fields `exchange_validated_strike_count`, `available_strike_steps`, `available_range_pcts`, `exchange_native_verified`), and `infer_chain_step_and_range(df)` (infers effective canonical strike spacing and moneyness span directly from a chain `DataFrame`). The row model also sanitizes sentinels (prices `<= 0`/NaN/`>= 1e9` → null; counts `< 0`/NaN/`>= 2147483647` → null; `iv <= 0` or `> 10`, `abs(delta) > 1.001`, `gamma < 0` → null), derives `mid` and `mark_price` (`mid` → `last` → `close`), and requires `snapshot_id` prefix == `underlying`.
+- **`src/storage/schema.py`:** `OptionContractRow` (field order = CSV column order, 27 columns), `COLUMNS`, `OPTION_CHAIN_POLARS_SCHEMA` (`pl.Schema`), `SnapshotMeta` (index entry including `requested_strike_step` plus optional exchange discovery fields `exchange_validated_strike_count`, `available_strike_steps`, `available_range_pcts`, `exchange_native_verified`, and the quality fields `spot_source`, `quoted_contract_count`, `quote_coverage`, `prior_close_only_count`, `collection_mode` (see §4.1)), the `SpotSource` / `CollectionMode` literals, and `infer_chain_step_and_range(df)` (infers effective canonical strike spacing and moneyness span directly from a chain `DataFrame`). The row model also sanitizes sentinels (prices `<= 0`/NaN/`>= 1e9` → null; counts `< 0`/NaN/`>= 2147483647` → null; `iv <= 0` or `> 10`, `abs(delta) > 1.001`, `gamma < 0` → null), derives `mid` and `mark_price` (`mid` → `last` → `close`), and requires `snapshot_id` prefix == `underlying`.
 - **`src/storage/csv_repository.py`:** `CSVRepository(storage_settings, root)`; `make_snapshot_id(ticker, ts)`; `save_snapshot` (refuses to overwrite an existing snapshot id, raising `StorageSchemaError`), `load_latest` (falls back to the newest valid archive if the cache is missing/corrupt), `load_snapshot`, `list_snapshots` (newest first), `load_index` / `rebuild_index` (self-healing with `infer_missing=True`; corrupt or stray CSVs are skipped with a warning). Readers raise `StorageSchemaError` on header/dtype/null violations and `SnapshotNotFoundError` when nothing exists.
+- **`src/storage/quality.py`:** `measure_quote_quality(df)` (quoted / close-only counts), `evaluate_snapshot(meta)` -> `UsabilityVerdict(usable, reasons)`, `is_usable_snapshot(meta)`, `MIN_QUOTE_COVERAGE = 0.90`.
 - **Index notes:** `file_path` / `latest_file` are root-relative POSIX paths. After `rebuild_index()`, `strike_step` and `range_pct` are inferred from CSV strikes via `infer_chain_step_and_range()` while `requested_strike_step` is `null` (since request metadata lives only in `snapshot_index.json`).
