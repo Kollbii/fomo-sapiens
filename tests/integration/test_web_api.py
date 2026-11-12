@@ -380,6 +380,8 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="range-pct-select"',
                 'id="strike-step-select"',
                 'id="snapshot-select"',
+                'id="snapshot-picker-toggle"',
+                'id="snapshot-picker-panel"',
                 'id="refresh-btn"',
                 'id="alert-banner"',
                 'id="kpi-spot"',

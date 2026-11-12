@@ -3289,19 +3289,58 @@
         .forEach(function (p) {
           parts[p.type] = p.value;
         });
+      var minutes = Number(parts.hour) * 60 + Number(parts.minute);
+      var weekend = parts.weekday === "Sat" || parts.weekday === "Sun";
       return {
         dayKey: parts.year + "-" + parts.month + "-" + parts.day,
         dayLabel: parts.day + "." + parts.month + "." + parts.year + " (" + parts.weekday + ")",
         dayShort: parts.day + "." + parts.month,
         time: parts.hour + ":" + parts.minute + " ET",
+        // US regular session 09:30-16:00 ET, Mon-Fri. Exchange holidays and early closes are
+        // not known here, so they still count as "in session".
+        inSession: !weekend && minutes >= 9 * 60 + 30 && minutes < 16 * 60,
       };
     } catch (_err) {
       return null;
     }
   }
 
-  // Snapshots grouped by exchange date (<optgroup> "11.11.2026 (Wed)"), entries by time.
-  // A closed <select> shows only the option text, so the selected entry also carries the date.
+  var SNAPSHOT_OFF_HOURS_TITLE = "Outside the US regular session (09:30\u201316:00 ET, Mon\u2013Fri)";
+
+  function snapshotMetaText(snap) {
+    var metaBits = ["T" + snap.market_data_type];
+    if (snap.range_pct !== null && snap.range_pct !== undefined) {
+      metaBits.push(formatRangeShort(snap.range_pct));
+    }
+    if (snap.strike_step !== null && snap.strike_step !== undefined) {
+      metaBits.push(formatStepShort(snap.strike_step));
+    }
+    metaBits.push(snap.contract_count + "c");
+    return metaBits.join(" \u2022 ");
+  }
+
+  // Groups snapshots by exchange date, newest first: [{key, label, items: [{snap, et}]}].
+  function groupSnapshotsByDay(items) {
+    var groups = [];
+    var byKey = {};
+    for (var i = 0; i < items.length; i++) {
+      var et = snapshotEtParts(items[i].snapshot_ts_utc);
+      var key = et ? et.dayKey : items[i].market_date || "";
+      if (!byKey[key]) {
+        byKey[key] = {
+          key: key,
+          label: et ? et.dayLabel : items[i].market_date || "Unknown date",
+          items: [],
+        };
+        groups.push(byKey[key]);
+      }
+      byKey[key].items.push({ snap: items[i], et: et });
+    }
+    return groups;
+  }
+
+  // The native <select> stays the source of truth (value + "change" event -> loadChain);
+  // the picker renders the same list with collapsible days and off-session markers.
   function renderSnapshotSelect(payload) {
     if (!dom.snapshotSelect) return;
     var items = (payload && payload.snapshots) || [];
@@ -3313,48 +3352,190 @@
       emptyOpt.textContent = "No snapshots archived";
       dom.snapshotSelect.appendChild(emptyOpt);
       state.snapshotId = "";
+      renderSnapshotPicker([], "");
       updateExportLink();
       return;
     }
 
     var selectedId = state.snapshotId || items[0].snapshot_id;
-    var groups = {};
-    for (var i = 0; i < items.length; i++) {
-      var snap = items[i];
-      var et = snapshotEtParts(snap.snapshot_ts_utc);
-      var dayKey = et ? et.dayKey : snap.market_date || "";
-      var group = groups[dayKey];
-      if (!group) {
-        group = document.createElement("optgroup");
-        group.label = et ? et.dayLabel : snap.market_date || "Unknown date";
-        groups[dayKey] = group;
-        dom.snapshotSelect.appendChild(group);
+    var groups = groupSnapshotsByDay(items);
+    for (var g = 0; g < groups.length; g++) {
+      var optgroup = document.createElement("optgroup");
+      optgroup.label = groups[g].label;
+      for (var k = 0; k < groups[g].items.length; k++) {
+        var entry = groups[g].items[k];
+        var opt = document.createElement("option");
+        opt.value = entry.snap.snapshot_id;
+        opt.textContent =
+          (entry.et ? entry.et.time : entry.snap.snapshot_id) + " \u2022 " + snapshotMetaText(entry.snap);
+        if (entry.snap.snapshot_id === selectedId) opt.selected = true;
+        optgroup.appendChild(opt);
       }
-
-      var metaBits = ["T" + snap.market_data_type];
-      if (snap.range_pct !== null && snap.range_pct !== undefined) {
-        metaBits.push(formatRangeShort(snap.range_pct));
-      }
-      if (snap.strike_step !== null && snap.strike_step !== undefined) {
-        metaBits.push(formatStepShort(snap.strike_step));
-      }
-      metaBits.push(snap.contract_count + "c");
-
-      var isSelected = snap.snapshot_id === selectedId;
-      var timeText = et ? et.time : snap.snapshot_id;
-      if (isSelected && et) timeText = et.dayShort + " " + timeText;
-
-      var opt = document.createElement("option");
-      opt.value = snap.snapshot_id;
-      opt.title = snap.snapshot_id;
-      opt.textContent = timeText + "  \u2022  " + metaBits.join(" \u2022 ");
-      if (isSelected) opt.selected = true;
-      group.appendChild(opt);
+      dom.snapshotSelect.appendChild(optgroup);
     }
     if (!state.snapshotId && items.length) {
       state.snapshotId = items[0].snapshot_id;
     }
+    renderSnapshotPicker(groups, selectedId);
     updateExportLink();
+  }
+
+  function makeOffHoursDot() {
+    var dot = document.createElement("span");
+    dot.className = "snap-picker__dot";
+    dot.title = SNAPSHOT_OFF_HOURS_TITLE;
+    dot.setAttribute("role", "img");
+    dot.setAttribute("aria-label", SNAPSHOT_OFF_HOURS_TITLE);
+    return dot;
+  }
+
+  function renderSnapshotPicker(groups, selectedId) {
+    var current = document.getElementById("snapshot-picker-current");
+    var panel = document.getElementById("snapshot-picker-panel");
+    var toggle = document.getElementById("snapshot-picker-toggle");
+    if (!current || !panel || !toggle) return;
+    if (!state.snapshotPickerOpenDays) state.snapshotPickerOpenDays = {};
+
+    current.innerHTML = "";
+    panel.innerHTML = "";
+    if (!groups.length) {
+      current.textContent = "No snapshots archived";
+      toggle.disabled = true;
+      return;
+    }
+    toggle.disabled = false;
+
+    for (var g = 0; g < groups.length; g++) {
+      var group = groups[g];
+      var hasSelected = false;
+      var offCount = 0;
+      for (var c = 0; c < group.items.length; c++) {
+        if (group.items[c].snap.snapshot_id === selectedId) hasSelected = true;
+        if (group.items[c].et && !group.items[c].et.inSession) offCount++;
+      }
+      var open = Boolean(state.snapshotPickerOpenDays[group.key]);
+
+      var day = document.createElement("div");
+      day.className = "snap-picker__day" + (hasSelected ? " is-current" : "");
+
+      var dayBtn = document.createElement("button");
+      dayBtn.type = "button";
+      dayBtn.className = "snap-picker__day-btn";
+      dayBtn.setAttribute("aria-expanded", open ? "true" : "false");
+      dayBtn.setAttribute("data-snap-day", group.key);
+      var dayCaret = document.createElement("span");
+      dayCaret.className = "snap-picker__day-caret";
+      dayCaret.setAttribute("aria-hidden", "true");
+      var dayLabel = document.createElement("span");
+      dayLabel.className = "snap-picker__day-label";
+      dayLabel.textContent = group.label;
+      var dayCount = document.createElement("span");
+      dayCount.className = "snap-picker__day-count";
+      dayCount.textContent =
+        group.items.length + (group.items.length === 1 ? " snapshot" : " snapshots") +
+        (offCount ? " \u2022 " + offCount + " off-hours" : "");
+      dayBtn.appendChild(dayCaret);
+      dayBtn.appendChild(dayLabel);
+      dayBtn.appendChild(dayCount);
+      day.appendChild(dayBtn);
+
+      var hours = document.createElement("div");
+      hours.className = "snap-picker__hours";
+      hours.hidden = !open;
+      for (var i = 0; i < group.items.length; i++) {
+        var entry = group.items[i];
+        var isSelected = entry.snap.snapshot_id === selectedId;
+        var off = Boolean(entry.et && !entry.et.inSession);
+
+        var optBtn = document.createElement("button");
+        optBtn.type = "button";
+        optBtn.className = "snap-picker__opt" + (isSelected ? " is-selected" : "");
+        optBtn.setAttribute("role", "option");
+        optBtn.setAttribute("aria-selected", isSelected ? "true" : "false");
+        optBtn.setAttribute("data-snapshot-id", entry.snap.snapshot_id);
+        optBtn.title = entry.snap.snapshot_id + (off ? " \u2014 " + SNAPSHOT_OFF_HOURS_TITLE : "");
+        if (off) optBtn.appendChild(makeOffHoursDot());
+        var timeEl = document.createElement("span");
+        timeEl.className = "snap-picker__time";
+        timeEl.textContent = entry.et ? entry.et.time : entry.snap.snapshot_id;
+        var metaEl = document.createElement("span");
+        metaEl.className = "snap-picker__meta";
+        metaEl.textContent = snapshotMetaText(entry.snap);
+        optBtn.appendChild(timeEl);
+        optBtn.appendChild(metaEl);
+        hours.appendChild(optBtn);
+
+        if (isSelected) {
+          if (off) current.appendChild(makeOffHoursDot());
+          var currentText = document.createElement("span");
+          currentText.textContent =
+            (entry.et ? entry.et.dayShort + " " + entry.et.time : entry.snap.snapshot_id) +
+            " \u2022 " +
+            snapshotMetaText(entry.snap);
+          current.appendChild(currentText);
+        }
+      }
+      day.appendChild(hours);
+      panel.appendChild(day);
+    }
+  }
+
+  function setSnapshotPickerOpen(open) {
+    var panel = document.getElementById("snapshot-picker-panel");
+    var toggle = document.getElementById("snapshot-picker-toggle");
+    if (!panel || !toggle) return;
+    panel.hidden = !open;
+    toggle.setAttribute("aria-expanded", open ? "true" : "false");
+  }
+
+  function wireSnapshotPicker() {
+    var picker = document.getElementById("snapshot-picker");
+    var panel = document.getElementById("snapshot-picker-panel");
+    var toggle = document.getElementById("snapshot-picker-toggle");
+    if (!picker || !panel || !toggle) return;
+
+    toggle.addEventListener("click", function () {
+      setSnapshotPickerOpen(panel.hidden);
+    });
+
+    panel.addEventListener("click", function (ev) {
+      var target = ev.target instanceof Element ? ev.target : null;
+      if (!target) return;
+      var dayBtn = target.closest("[data-snap-day]");
+      if (dayBtn) {
+        var key = dayBtn.getAttribute("data-snap-day");
+        if (!state.snapshotPickerOpenDays) state.snapshotPickerOpenDays = {};
+        var nowOpen = !state.snapshotPickerOpenDays[key];
+        state.snapshotPickerOpenDays[key] = nowOpen;
+        dayBtn.setAttribute("aria-expanded", nowOpen ? "true" : "false");
+        var hours = dayBtn.nextElementSibling;
+        if (hours) hours.hidden = !nowOpen;
+        return;
+      }
+      var optBtn = target.closest("[data-snapshot-id]");
+      if (optBtn && dom.snapshotSelect) {
+        setSnapshotPickerOpen(false);
+        toggle.focus();
+        var snapId = optBtn.getAttribute("data-snapshot-id") || "";
+        if (snapId === state.snapshotId) return;
+        dom.snapshotSelect.value = snapId;
+        dom.snapshotSelect.dispatchEvent(new Event("change"));
+      }
+    });
+
+    document.addEventListener("click", function (ev) {
+      if (!panel.hidden && ev.target instanceof Node && !picker.contains(ev.target)) {
+        setSnapshotPickerOpen(false);
+      }
+    });
+
+    picker.addEventListener("keydown", function (ev) {
+      if (ev.key === "Escape" && !panel.hidden) {
+        ev.preventDefault();
+        setSnapshotPickerOpen(false);
+        toggle.focus();
+      }
+    });
   }
 
   // ------------------------------------------------------------------ Strategy Lab & T+n Payoff
@@ -5826,6 +6007,7 @@
 
   // ------------------------------------------------------------------ Event Bindings
   function bindEvents() {
+    wireSnapshotPicker();
     if (dom.themeToggle) {
       dom.themeToggle.addEventListener("click", function () {
         var next = currentTheme() === "terminal" ? "print" : "terminal";

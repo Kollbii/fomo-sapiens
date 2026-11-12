@@ -97,12 +97,20 @@
       </select>
     </label>
 
-    <label class="field-group">
-      <span class="field-label">Snapshot</span>
-      <select id="snapshot-select" class="select-control" aria-label="Historical Snapshot Archive">
+    <div class="field-group">
+      <span class="field-label" id="snapshot-picker-label">Snapshot</span>
+      <!-- Source of truth for the selected snapshot; the picker below drives it. -->
+      <select id="snapshot-select" class="select-control snap-picker__native" aria-label="Historical Snapshot Archive" tabindex="-1" aria-hidden="true">
         <option value="">Latest Archive</option>
       </select>
-    </label>
+      <div class="snap-picker" id="snapshot-picker">
+        <button type="button" id="snapshot-picker-toggle" class="select-control snap-picker__toggle" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="snapshot-picker-label snapshot-picker-current">
+          <span id="snapshot-picker-current" class="snap-picker__current">Latest Archive</span>
+          <span class="snap-picker__caret" aria-hidden="true"></span>
+        </button>
+        <div id="snapshot-picker-panel" class="snap-picker__panel" role="listbox" aria-label="Snapshots by day" hidden></div>
+      </div>
+    </div>
 
     <button id="refresh-btn" class="btn btn-primary" type="button">
       REFRESH FROM IBKR
