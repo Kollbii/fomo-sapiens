@@ -12,6 +12,7 @@ import anyio.to_thread
 import httpx
 import pytest
 
+from src.analytics.strategies import StrategyLegInput
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import IBKRSettings, Settings, StorageSettings
@@ -492,7 +493,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert 'src="/static/js/dashboard.js?v=20261111q"' in html
+            assert 'src="/static/js/dashboard.js?v=20261112t"' in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
             assert "Port 4001" not in r_js.text
             for js_hook in (
@@ -1189,3 +1190,148 @@ def test_scheduled_cycle_uses_the_real_refresh_path(tmp_path: Path) -> None:
     assert app.state.service.refresh_lock.locked() is False
     snap_files = list((tmp_path / "data" / "snapshots").rglob("*"))
     assert not [p for p in snap_files if p.name.startswith(".") or p.suffix == ".tmp"]
+
+
+# ------------------------------------------------------------------ position tracker
+_TRACK_EXPIRY = "2026-12-18"  # seeded snapshot: 2026-11-11 + 37 days
+_TRACK_BODY: dict[str, Any] = {
+    "ticker": "NVDA",
+    "snapshot_id": "NVDA_20261111_150000",
+    "legs": [
+        {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 140.0},
+        {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+    ],
+}
+
+
+def test_tracker_endpoints_register_list_and_stop(tmp_path: Path) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            empty = (await client.get("/api/tracker/spreads")).json()
+            assert empty == {"active_count": 0, "max_active_spreads": 120, "spreads": []}
+
+            r = await client.post("/api/tracker/spreads", json=_TRACK_BODY)
+            assert r.status_code == 201, r.text
+            spread = r.json()
+            assert spread["source"] == "USER" and spread["status"] == "ACTIVE"
+            assert [leg["strike"] for leg in spread["legs"]] == [140.0, 135.0]
+            assert all(leg["option_conid"] > 0 for leg in spread["legs"])
+
+            dup = await client.post("/api/tracker/spreads", json=_TRACK_BODY)
+            assert dup.status_code == 409
+
+            listed = (await client.get("/api/tracker/spreads?status=ACTIVE")).json()
+            assert listed["active_count"] == 1 and listed["spreads"][0]["id"] == spread["id"]
+            assert listed["spreads"][0]["last_quote_utc"] is None
+
+            st = (await client.get("/api/collector/status")).json()
+            assert st["tracker"]["active_count"] == 1
+            assert st["tracker"]["max_active_spreads"] == 120
+            assert st["tracker"]["last_result"] is None
+
+            stop = await client.post(f"/api/tracker/spreads/{spread['id']}/stop")
+            assert stop.status_code == 200 and stop.json()["status"] == "STOPPED"
+            again = await client.post(f"/api/tracker/spreads/{spread['id']}/stop")
+            assert again.status_code == 409
+            unknown = await client.post("/api/tracker/spreads/NVDA-20261111-0000abcd/stop")
+            assert unknown.status_code == 404
+            bad_id = await client.post("/api/tracker/spreads/..%2Fx/stop")
+            assert bad_id.status_code in (404, 422)
+            stopped = (await client.get("/api/tracker/spreads?status=STOPPED")).json()
+            assert [s["id"] for s in stopped["spreads"]] == [spread["id"]]
+
+    _run(_exercise())
+    assert (tmp_path / "data" / "metadata" / "tracked_spreads.json").is_file()
+
+
+@pytest.mark.parametrize(
+    ("change", "status"),
+    [
+        ({"ticker": "nvda1"}, 422),
+        ({"ticker": "AVGO", "snapshot_id": "AVGO_20261111_150000"}, 404),
+        ({"snapshot_id": "NVDA_20261111_150001"}, 404),
+        ({"snapshot_id": "../etc"}, 422),
+        ({"legs": []}, 422),
+        ({"extra": 1}, 422),
+        (
+            {
+                "legs": [
+                    {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+                    {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 140.0},
+                ]
+            },
+            422,
+        ),
+        (
+            {
+                "legs": [
+                    {"side": "SELL", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 141.0},
+                    {"side": "BUY", "right": "P", "expiry": _TRACK_EXPIRY, "strike": 135.0},
+                ]
+            },
+            422,
+        ),
+    ],
+)
+def test_tracker_register_validation(tmp_path: Path, change: dict[str, Any], status: int) -> None:
+    app, _repo, _ = _build_test_app(tmp_path)
+
+    async def _exercise() -> int:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r = await client.post("/api/tracker/spreads", json={**_TRACK_BODY, **change})
+            return r.status_code
+
+    assert _run(_exercise()) == status
+    assert not (tmp_path / "data" / "metadata" / "tracked_spreads.json").exists()
+
+
+def test_scheduled_cycle_quotes_tracked_legs_through_the_broker(tmp_path: Path) -> None:
+    import asyncio
+
+    from src.collector.calendar import Slot
+    from src.collector.store import CollectorSettings, TickerPin
+
+    app, _repo, mock_ib = _build_test_app(tmp_path)
+    subscribed: list[Any] = []
+    real_req = mock_ib.reqMktData
+
+    def _recording_req(contract: Any, *args: Any, **kwargs: Any) -> Any:
+        subscribed.append(contract)
+        return real_req(contract, *args, **kwargs)
+
+    mock_ib.reqMktData = _recording_req  # type: ignore[method-assign]
+    svc = app.state.service
+    tracker = svc.get_tracker()
+    spread = tracker.register_user(
+        "NVDA",
+        "NVDA_20261111_150000",
+        [StrategyLegInput.model_validate(leg) for leg in _TRACK_BODY["legs"]],
+    )
+    leg_conids = {leg.option_conid for leg in spread.legs}
+    collector = svc.get_collector()
+    collector.settings = CollectorSettings(
+        enabled=True,
+        tickers=[
+            TickerPin(symbol="NVDA", range_pct=0.20, strike_step=5.0, dte_min=30, dte_max=120)
+        ],
+    )
+    slot = Slot("INTERVAL", datetime(2026, 11, 11, 16, 0, 0, tzinfo=UTC))
+    asyncio.run(collector.run_slot(slot))
+
+    runs = [r for r in tracker.store.read_runs() if r.kind == "QUOTE"]
+    assert [(r.spread_id, r.status, r.spot_source) for r in runs] == [
+        (spread.id, "OK", runs[0].spot_source)
+    ]
+    assert runs[0].underlying_price and runs[0].market_data_type in (1, 2, 3, 4)
+    files = list((tmp_path / "data" / "tracked" / "NVDA").glob("*.csv"))
+    assert len(files) == 1
+    # The tracker's option subscriptions are exactly the two leg conIds.
+    option_subs = [c for c in subscribed if getattr(c, "secType", "") == "OPT"]
+    assert {getattr(c, "conId", 0) for c in option_subs[-2:]} == leg_conids
+    assert getattr(subscribed[-3], "secType", "") == "STK"  # tracker spot, then the two legs
+    assert all(c in mock_ib.cancelled for c in subscribed)
+    assert svc.refresh_lock.locked() is False

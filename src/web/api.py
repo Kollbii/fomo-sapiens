@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 import polars as pl
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Path as ApiPath
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -63,6 +64,13 @@ from src.storage.schema import (
     SpotSource,
     infer_chain_step_and_range,
 )
+from src.tracker.service import (
+    DuplicateSpreadError,
+    TrackerCapError,
+    TrackerService,
+    TrackerStateError,
+)
+from src.tracker.store import SpreadStatus, TrackedSpread, TrackerStore
 
 # A manual refresh waits this long for another manual refresh; a running scheduled
 # collection cycle is reported immediately (HTTP 409 COLLECTOR_BUSY) so the UI can show it.
@@ -202,6 +210,26 @@ class CollectorSettingsRequest(BaseModel):
     tickers: list[CollectorTickerInput] = Field(max_length=MAX_COLLECTOR_TICKERS)
 
 
+class TrackSpreadRequest(BaseModel):
+    """Request body for `POST /api/tracker/spreads` (a user-held bull put spread)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str = Field(min_length=1, max_length=10)
+    snapshot_id: str = Field(pattern=r"^[A-Z]{1,5}_\d{8}_\d{6}$")
+    legs: list[StrategyLegInput] = Field(min_length=1, max_length=4)
+
+
+class TrackedSpreadsResponse(BaseModel):
+    """Response for `GET /api/tracker/spreads`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    active_count: int
+    max_active_spreads: int
+    spreads: list[TrackedSpread]
+
+
 class StrategySuggestRequest(BaseModel):
     """Request body for `POST /api/strategy/suggest`."""
 
@@ -334,15 +362,35 @@ class AnalyzerWebService:
         # Last time a refresh stopped corridor streams: {at_utc, lines, by}.
         self.last_corridor_stop: dict[str, Any] | None = None
         self._collector: CollectorService | None = None
+        self._tracker: TrackerService | None = None
         self._corridor_cache: dict[
             tuple[str, str], tuple[float, dict[tuple[str, float, str], CorridorQuoteRow]]
         ] = {}
+
+    def get_tracker(self) -> TrackerService:
+        """The position tracker (runs inside the collector's slots)."""
+        if self._tracker is None:
+            tracked = Path(self.settings.tracker.tracked_dir)
+            if not tracked.is_absolute():
+                tracked = self.repo.root / tracked
+            self._tracker = TrackerService(
+                settings=self.settings,
+                repo=self.repo,
+                fetcher=self.fetcher,
+                store=TrackerStore(self.repo.index_path.parent, tracked),
+                clock=self.fetcher.clock,
+                validate_ticker=self.validate_ticker,
+            )
+        return self._tracker
 
     def get_collector(self) -> CollectorService:
         """The scheduled collector (created on first use; the loop starts in the lifespan)."""
         if self._collector is None:
             self._collector = CollectorService(
-                self, CollectorStore(self.repo.index_path.parent), clock=self.fetcher.clock
+                self,
+                CollectorStore(self.repo.index_path.parent),
+                clock=self.fetcher.clock,
+                tracker=self.get_tracker(),
             )
         return self._collector
 
@@ -992,6 +1040,49 @@ async def api_collector_settings(
     collector = svc.get_collector()
     collector.update_settings(new)
     return collector.status()
+
+
+_SPREAD_ID_PATTERN = r"^[A-Z]{1,5}-\d{8}-[0-9a-f]{8}$"
+
+
+@router.get("/tracker/spreads", response_model=TrackedSpreadsResponse)
+async def api_tracker_spreads(
+    status: SpreadStatus | None = Query(default=None),  # noqa: B008
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpreadsResponse:
+    tracker = svc.get_tracker()
+    spreads = [s for s in tracker.spreads() if status is None or s.status == status]
+    return TrackedSpreadsResponse(
+        active_count=len(tracker.active()),
+        max_active_spreads=svc.settings.tracker.max_active_spreads,
+        spreads=spreads,
+    )
+
+
+@router.post("/tracker/spreads", response_model=TrackedSpread, status_code=201)
+async def api_tracker_register(
+    payload: TrackSpreadRequest,
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpread:
+    try:
+        return svc.get_tracker().register_user(payload.ticker, payload.snapshot_id, payload.legs)
+    except (DuplicateSpreadError, TrackerCapError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/tracker/spreads/{spread_id}/stop", response_model=TrackedSpread)
+async def api_tracker_stop(
+    spread_id: str = ApiPath(pattern=_SPREAD_ID_PATTERN),
+    svc: AnalyzerWebService = Depends(get_web_service),  # noqa: B008
+) -> TrackedSpread:
+    try:
+        return svc.get_tracker().stop(spread_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown spread {spread_id}") from exc
+    except TrackerStateError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)

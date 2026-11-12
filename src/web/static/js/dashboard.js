@@ -5843,6 +5843,21 @@
       st.snapshots_today + " \u2022 gaps today " + st.gaps_today + " \u2022 missed (7 days) " + st.missed_recent
     );
     if (st.calendar_warning) collectorLine(box, "Calendar", st.calendar_warning, "is-warn");
+    var tr = st.tracker;
+    if (tr) {
+      collectorLine(box, "Tracked spreads", tr.active_count + " active of " + tr.max_active_spreads);
+      if (tr.last_result) {
+        var lr = tr.last_result;
+        var lrBits = [lr.ticker, lr.status, collectorEtTime(lr.actual_run_utc || lr.planned_slot_utc)];
+        if (lr.missing_legs && lr.missing_legs.length) lrBits.push(lr.missing_legs.length + " leg(s) missing");
+        if (lr.quality_flags && lr.quality_flags.length) lrBits.push(lr.quality_flags.join(", "));
+        if (lr.error) lrBits.push(lr.error);
+        collectorLine(box, "Last tracker result", lrBits.join(" • "), lr.status === "OK" ? "" : "is-warn");
+      }
+      (tr.warnings || []).forEach(function (w) {
+        collectorLine(box, "Tracker", w, "is-warn");
+      });
+    }
     var src = collectorEl("div", "collector-muted collector-source");
     src.textContent = "Holidays & early closes: NYSE calendar (until " + st.calendar_valid_until + ")";
     box.appendChild(src);
