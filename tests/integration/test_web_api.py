@@ -465,7 +465,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".alert-banner.is-fresh" in r_css.text
             assert ".alert-banner-close" in r_css.text
             assert ".chain-add-leg-btn" in r_css.text
-            assert 'href="/static/css/tokens.css?v=20261111i"' in html
+            assert 'href="/static/css/tokens.css?v=20261112j"' in html
 
             r_js = await client.get("/static/js/dashboard.js")
             assert r_js.status_code == 200
@@ -493,7 +493,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert 'src="/static/js/dashboard.js?v=20261112t"' in html
+            assert 'src="/static/js/dashboard.js?v=20261112u"' in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
             assert "Port 4001" not in r_js.text
             for js_hook in (
@@ -570,7 +570,10 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'data-panel-target="strategy"' in html
             assert 'data-panel-target="corridor"' in html
             assert "panel-toggle-btn" not in html
-            assert html.count('class="panel-toggle-pill') == 6
+            assert html.count('class="panel-toggle-pill') == 7
+            assert 'data-panel-target="backtest"' in html
+            assert 'id="backtest-card"' in html and 'data-panel-id="backtest"' in html
+            assert "Steps are evenly spaced, not to time scale." in html
             assert 'data-panel-id="corridor"' in html
             assert 'id="wall-corridor-card"' in html
             assert 'id="corridor-refresh-btn"' in html
@@ -1335,3 +1338,257 @@ def test_scheduled_cycle_quotes_tracked_legs_through_the_broker(tmp_path: Path) 
     assert getattr(subscribed[-3], "secType", "") == "STK"  # tracker spot, then the two legs
     assert all(c in mock_ib.cancelled for c in subscribed)
     assert svc.refresh_lock.locked() is False
+
+
+# ------------------------------------------------------------------ backtest panel API
+@pytest.fixture(autouse=True)
+def _backtest_inline_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the backtest API's worker-thread calls inline (these tests use no real event loop)."""
+    from src.web import backtest_api
+
+    async def _inline(func: Callable[..., Any], *args: Any) -> Any:
+        return func(*args)
+
+    monkeypatch.setattr(backtest_api, "_in_thread", _inline)
+
+
+def _backtest_app(world: Any, **tracker_cfg: Any) -> Any:
+    from src.core.config import TrackerSettings
+
+    settings = Settings(storage=StorageSettings(), tracker=TrackerSettings(**tracker_cfg))
+    client = IBKRBrokerClient(settings, ib_factory=lambda: _MockIB(offline=True))
+    return create_app(settings=settings, repo=world.repo, broker_client=client)
+
+
+def _bt_post(app: Any, body: dict[str, Any]) -> httpx.Response:
+    async def _go() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.post("/api/backtest/run", json=body)
+
+    return _run(_go())
+
+
+def _bt_get(app: Any, url: str) -> httpx.Response:
+    async def _go() -> httpx.Response:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get(url)
+
+    return _run(_go())
+
+
+def _legs_body(world: Any, **change: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "source": "LEGS",
+        "ticker": "NVDA",
+        "entry_snapshot_id": world.entry_id,
+        "expiry": "2026-12-18",
+        "short_strike": 100.0,
+        "long_strike": 95.0,
+        "qty": 1,
+    }
+    body.update(change)
+    return body
+
+
+def test_backtest_entries_are_newest_first_with_quality(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World
+
+    w = World(tmp_path)
+    later = w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",), md_type=4)
+    body = _bt_get(_backtest_app(w), "/api/backtest/entries/nvda").json()
+    assert body["ticker"] == "NVDA"
+    assert [e["snapshot_id"] for e in body["entries"]] == [later, w.entry_id]
+    newest = body["entries"][0]
+    assert newest["usable"] is False
+    assert any("market_data_type" in r for r in newest["quality_reasons"])
+    assert body["entries"][1]["usable"] is True
+    assert newest["ts_et"].endswith(" ET") and newest["ts_poland"].endswith(" PL")
+    assert _bt_get(_backtest_app(w), "/api/backtest/entries/NVDA1").status_code == 422
+
+
+def test_backtest_my_spread_open_trade(tmp_path: Path) -> None:
+    from tests.unit.test_backtest import ENTRY_QUOTES
+    from tests.unit.test_backtest_tracked import World, _et
+
+    w = World(tmp_path)
+    w.snapshot(_et(date(2026, 11, 20), 11, 45), 103.0, ENTRY_QUOTES)
+    r = _bt_post(_backtest_app(w), _legs_body(w, qty=2))
+    assert r.status_code == 200, r.text
+    data = r.json()
+    res = data["result"]
+    assert data["source"] == "LEGS" and data["outcome"] == "OPEN"
+    assert [(leg["side"], leg["strike"], leg["qty"]) for leg in res["entry"]["legs"]] == [
+        ("SELL", 100.0, 2),
+        ("BUY", 95.0, 2),
+    ]
+    assert res["entry"]["entry_cash_mid_dollars"] == pytest.approx(220.0)
+    assert len(data["ts_poland"]) == len(res["steps"]) == 2
+    assert [x["code"] for x in data["warnings"]] == ["TRADE_OPEN"]
+    assert data["tracked"] is None
+    assert data["collector"] == {"enabled": False, "ever_enabled": True}
+    assert data["days_held"] == pytest.approx(4.0, abs=0.01)
+    assert res["summary"]["steps_gap"] == 0
+    assert len(data["assumptions"]) == 6
+
+
+@pytest.mark.parametrize(
+    ("change", "status", "fragment"),
+    [
+        ({"long_strike": 105.0}, 422, "below the short"),
+        ({"short_strike": 101.0}, 422, "not found"),
+        ({"ticker": "NVDA1"}, 422, ""),
+        ({"entry_snapshot_id": "NVDA_20261116_000000"}, 404, ""),
+        ({"qty": 101}, 422, ""),
+        ({"expiry": None}, 422, "needs expiry"),
+    ],
+)
+def test_backtest_my_spread_validation(
+    tmp_path: Path, change: dict[str, Any], status: int, fragment: str
+) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    r = _bt_post(_backtest_app(w), _legs_body(w, **change))
+    assert r.status_code == status, r.text
+    assert fragment.lower() in r.text.lower()
+
+
+def test_backtest_auto_build_and_no_valid_spread(tmp_path: Path) -> None:
+    import polars as pl
+
+    from tests.unit.test_backtest import _auto_chain
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    first = _auto_chain("2026-11-11T15:30:00", 100.0)
+    w.repo.save_snapshot("NVDA", first.to_dicts(), spot_source="LAST")
+    w.repo.save_snapshot(
+        "NVDA", _auto_chain("2026-11-11T18:30:00", 103.0).to_dicts(), spot_source="LAST"
+    )
+    sid = str(first["snapshot_id"][0])
+    app = _backtest_app(w)
+    r = _bt_post(app, {"source": "AUTO_BUILD", "ticker": "NVDA", "entry_snapshot_id": sid})
+    assert r.status_code == 200, r.text
+    entry = r.json()["result"]["entry"]
+    assert [leg["side"] for leg in entry["legs"]] == ["SELL", "BUY"] and entry["rationale"]
+
+    calls_only = _auto_chain("2026-11-11T20:30:00", 100.0).filter(pl.col("right") == "C")
+    w.repo.save_snapshot("NVDA", calls_only.to_dicts(), spot_source="LAST")
+    bad = _bt_post(
+        app,
+        {"source": "AUTO_BUILD", "ticker": "NVDA", "entry_snapshot_id": "NVDA_20261111_203000"},
+    )
+    assert bad.status_code == 422 and "no valid bull put spread" in bad.text
+
+
+def test_backtest_single_snapshot_warns_few_snapshots(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    codes = [x["code"] for x in data["warnings"]]
+    assert "FEW_SNAPSHOTS" in codes and "TRADE_OPEN" in codes
+    assert data["history_snapshot_count"] == 1
+
+
+def test_backtest_settled_and_unresolved(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World, _et
+
+    expiry = date(2026, 12, 18)
+    w = World(tmp_path / "settled")
+    w.snapshot(_et(expiry, 16, 15), 104.0, expiries=("2027-01-15",))
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    s = data["result"]["settlement"]
+    assert data["outcome"] == "SETTLED" and s["spot_from"] == "SNAPSHOT"
+    assert (s["spot"], s["spot_source"], s["market_data_type"]) == (104.0, "LAST", 3)
+    assert data["settlement_ts_poland"] == "2026-12-18 22:15 PL"
+
+    w2 = World(tmp_path / "unresolved")
+    w2.snapshot(_et(expiry, 16, 5), 104.0, expiries=("2027-01-15",), scheduled=False)
+    w2.snapshot(_et(date(2026, 12, 21), 10, 0), 104.0, expiries=("2027-01-15",), scheduled=False)
+    data2 = _bt_post(_backtest_app(w2), _legs_body(w2)).json()
+    assert data2["outcome"] == "UNRESOLVED"
+    assert "SETTLEMENT_UNRESOLVED" in [x["code"] for x in data2["warnings"]]
+
+
+def test_backtest_tracked_spread_by_id_and_already_tracked(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, SPREAD_ID, World
+
+    w = World(tmp_path)
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    w.track(SLOT_OUT)
+    app = _backtest_app(w)
+    by_id = _bt_post(app, {"source": "TRACKED", "spread_id": SPREAD_ID})
+    assert by_id.status_code == 200, by_id.text
+    legs = _bt_post(app, _legs_body(w)).json()
+    assert by_id.json()["result"] == legs["result"]  # same as mode A with the registry legs
+    assert legs["tracked"] == {"spread_id": SPREAD_ID, "source": "USER", "status": "ACTIVE"}
+    assert legs["result"]["reproducibility"]["tracked_data_used"] is True
+    unknown = _bt_post(app, {"source": "TRACKED", "spread_id": "NVDA-20261116-00000000"})
+    assert unknown.status_code == 404
+    assert _bt_post(app, {"source": "TRACKED"}).status_code == 422
+
+
+def test_backtest_passes_tracked_dir_and_serializes_gap_steps(tmp_path: Path) -> None:
+    from src.tracker.store import TrackerStore
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World, _et
+
+    w = World(tmp_path)
+    w.tracker = TrackerStore(w.repo.index_path.parent, tmp_path / "data" / "tracked_alt")
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    tid = w.track(SLOT_OUT)
+    w.track(_et(date(2026, 11, 25), 13, 45), status="MISSED", write_file=False)
+    data = _bt_post(_backtest_app(w, tracked_dir="data/tracked_alt"), _legs_body(w)).json()
+    res = data["result"]
+    assert res["reproducibility"]["tracked_files"] == [tid]  # read from the configured folder
+    gap = next(s for s in res["steps"] if s["kind"] == "GAP")
+    assert (gap["spot"], gap["market_data_type"], gap["quote_coverage"]) == (None, None, None)
+    assert gap["pnl_dollars"] is None and gap["status"] == "INCOMPLETE"
+    assert res["summary"]["steps_gap"] == 1
+    # With the default folder the tracked file is not found: the leg stays missing.
+    default = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    assert default["result"]["reproducibility"]["tracked_files"] == []
+
+
+def test_backtest_warns_when_the_collector_log_is_missing(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import SLOT_OUT, World
+
+    w = World(tmp_path)
+    w.register()
+    w.snapshot(SLOT_OUT, 101.0, expiries=("2027-01-15",))
+    w.track(SLOT_OUT)
+    (tmp_path / "data" / "metadata" / "collector_runs.jsonl").unlink()
+    data = _bt_post(_backtest_app(w), _legs_body(w)).json()
+    assert "COLLECTOR_LOG_MISSING" in [x["code"] for x in data["warnings"]]
+    kinds = [s["kind"] for s in data["result"]["steps"]]
+    assert kinds.count("TRACKED_ONLY") == 1  # the doubled step the warning explains
+
+
+def test_tracking_the_same_legs_twice_is_refused(tmp_path: Path) -> None:
+    from tests.unit.test_backtest_tracked import World
+
+    w = World(tmp_path)
+    app = _backtest_app(w)
+    body = {
+        "ticker": "NVDA",
+        "snapshot_id": w.entry_id,
+        "legs": [
+            {"side": "SELL", "right": "P", "expiry": "2026-12-18", "strike": 100.0},
+            {"side": "BUY", "right": "P", "expiry": "2026-12-18", "strike": 95.0},
+        ],
+    }
+
+    async def _go() -> tuple[int, int]:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            a = await client.post("/api/tracker/spreads", json=body)
+            b = await client.post("/api/tracker/spreads", json=body)
+            return a.status_code, b.status_code
+
+    assert _run(_go()) == (201, 409)
+    data = _bt_post(app, _legs_body(w)).json()
+    assert data["tracked"] is not None and data["tracked"]["status"] == "ACTIVE"
