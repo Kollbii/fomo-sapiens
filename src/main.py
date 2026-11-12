@@ -52,6 +52,7 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         app_instance.state.service = service
+        service.repo.ensure_layout()
         try:
             service.repo.load_index()
         except Exception:  # pragma: no cover - defensive

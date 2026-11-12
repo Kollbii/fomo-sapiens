@@ -76,6 +76,11 @@ class CSVRepository:
         self.index_path = self._resolve(self.storage.metadata_index_file)
         self._lock = threading.RLock()
 
+    def ensure_layout(self) -> None:
+        """Create the Mode 1 storage directories (idempotent; never touches existing files)."""
+        for directory in (self.snapshots_dir, self.latest_dir, self.index_path.parent):
+            directory.mkdir(parents=True, exist_ok=True)
+
     # ------------------------------------------------------------------ paths
     def _resolve(self, value: str) -> Path:
         path = Path(value)

@@ -263,3 +263,17 @@ def test_values_survive_roundtrip(repo: CSVRepository) -> None:
     assert row["delta"] == -0.5
     assert math.isclose(row["moneyness_pct"], (145.0 - SPOT) / SPOT * 100.0)
     assert row["greeks_source"] == "IBKR_MODEL"
+
+
+def test_ensure_layout_creates_dirs_idempotently_without_touching_files(tmp_path: Path) -> None:
+    repo = CSVRepository(StorageSettings(), root=tmp_path)
+    assert not repo.snapshots_dir.exists()
+
+    repo.ensure_layout()
+    for directory in (repo.snapshots_dir, repo.latest_dir, repo.index_path.parent):
+        assert directory.is_dir()
+
+    sentinel = repo.latest_dir / "keep.txt"
+    sentinel.write_text("x", encoding="utf-8")
+    repo.ensure_layout()
+    assert sentinel.read_text(encoding="utf-8") == "x"

@@ -838,3 +838,18 @@ def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
                 assert "4001" not in err_msg
 
     _run(_exercise())
+
+
+def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
+    settings = Settings(storage=StorageSettings())
+    repo = CSVRepository(settings.storage, root=tmp_path)
+    client = IBKRBrokerClient(settings, ib_factory=lambda: _MockIB(offline=True))
+    app = create_app(settings=settings, repo=repo, broker_client=client)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            assert repo.snapshots_dir.is_dir()
+            assert repo.latest_dir.is_dir()
+            assert repo.index_path.parent.is_dir()
+
+    _run(_exercise())
