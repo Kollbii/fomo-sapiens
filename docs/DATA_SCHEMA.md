@@ -16,13 +16,23 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
     │   │   └── AVGO_20261111_160219.csv
     │   ├── CRDO/
     │   └── PLTR/
+    ├── tracked/
+    │   └── NVDA/
+    │       └── NVDA_20261112_153000.csv   # immutable paper-trade leg quotes (outside snapshots/)
     ├── latest/
     │   ├── NVDA_latest.csv
     │   ├── AVGO_latest.csv
     │   ├── CRDO_latest.csv
     │   └── PLTR_latest.csv
-    └── metadata/
-        └── snapshot_index.json
+    ├── metadata/
+    │   ├── snapshot_index.json
+    │   ├── paper_trades.json
+    │   └── paper_quotes.jsonl
+    └── ledger/
+        ├── executions.csv
+        ├── open_positions.csv
+        ├── sync_state.json
+        └── imports/
 
 ### 1.2 File Naming & Atomic Write Protocol
 - **Archive Filename Pattern:** `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv` (UTC timestamp).
@@ -100,14 +110,20 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
               "expirations": ["2026-12-18", "2026-12-24", "2026-12-31", "2027-01-08"],
               "range_pct": 0.20,
               "strike_step": 5.0,
-              "requested_strike_step": 5.0
+              "requested_strike_step": 5.0,
+              "spot_source": "LAST",
+              "quoted_contract_count": 118,
+              "quote_coverage": 0.9833,
+              "prior_close_only_count": 2
             }
           ]
         }
       }
     }
 
-If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible).
+`SnapshotMeta` defines optional quality/provenance fields alongside pull scope: `spot_source` (`SpotSource = Literal["LAST", "MID", "CLOSE"]`), `quoted_contract_count` (contracts with `bid > 0` or `ask > 0` or `last > 0`), `quote_coverage` (`quoted_contract_count / contract_count`), and `prior_close_only_count` (contracts with `close > 0` but no `bid`/`ask`/`last`). `src/storage/quality.py` uses these fields (`MIN_QUOTE_COVERAGE = 0.90`, `USABLE_SPOT_SOURCES = {"LAST", "MID"}`, `USABLE_MARKET_DATA_TYPES = {1, 3}`) to score each snapshot for daily-bar backtest selection and off-hours UI indicators.
+
+If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible, recomputing quote quality from each CSV, and preserving any prior `spot_source`).
 
 ---
 
@@ -179,5 +195,22 @@ Atomically replaced via `LedgerRepository.replace_positions()`, sorted by `(unde
 
 ---
 
-## 6. Implementation Notes
+## 6. Paper Trade Registry & Tracked Leg-Quote Archive (`data/metadata/`, `data/tracked/`)
+
+Forward paper trades registered via `POST /api/backtest/paper-trades` and leg quotes captured on manual refresh follow-ups are stored independently of full-chain archives so `CSVRepository.rebuild_index()` never treats narrow leg-only CSVs as option chain snapshots (`Settings._check_tracked_dir()` enforces `tracker.tracked_dir` strictly inside `storage.data_dir` and never inside `storage.snapshots_dir`):
+
+1. **Paper Trade Registry (`data/metadata/paper_trades.json`, `PaperTradeStore` in `src/storage/paper_trade_store.py`):**
+   - Stores registered `PaperTrade` records keyed inside `trades`, guarded by `threading.RLock` and written atomically via `.tmp` + `os.replace()`.
+   - Each `PaperTrade` holds `trade_id`, `ticker` (`TickerValidator`-validated), `strategy_type`, `status` (`"ACTIVE" | "EXPIRED" | "STOPPED"`), `legs` (`1..8` `PaperTradeLeg` items with `conid`, `right`, `strike`, `expiry`, `side`, `qty`, `entry_mid`, `entry_bid`, `entry_ask`), optional `entry_snapshot_id` / `entry_snapshot_ts_utc` / `entry_spot`, `entry_net_cashflow`, `created_at_utc`, optional `stopped_at_utc` / `expired_at_utc`, exit config (`tp_pct`, `sl_pct`, `exit_dte`, `tp_sl_basis`), and optional `notes`. Active trade count is bounded by `tracker.max_active_trades` (default `120`, max `200`).
+2. **Tracked Quote Follow-Up Log (`data/metadata/paper_quotes.jsonl`):**
+   - Append-only JSON Lines ledger of `PaperQuoteRecord` events (`ts_utc`, `ticker`, `snapshot_id`, `tracked_csv`, `trade_ids`, `contracts_requested`, `contracts_quoted`, `contracts_failed`, `status`: `"QUOTED" | "ERROR"`, `error_code`, `error_message`), flushed with `os.fsync()` after each manual-refresh follow-up.
+3. **Immutable Tracked Leg-Quote Snapshots (`data/tracked/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`):**
+   - Uses the exact canonical **27-column `OPTION_CHAIN_POLARS_SCHEMA`** (`src/storage/schema.py`), written atomically via `.tmp` + `os.replace()` with overwrite refusal (`StorageSchemaError` on duplicate path).
+   - Populated solely during manual `POST /api/refresh` follow-ups (`PaperTradeService.quote_active_trades_for_refresh`) for non-expired active paper-trade legs, ensuring `< 30 DTE` legs falling outside `[30, 120]` chain snapshots remain markable down to expiration.
+4. **Daily Bar Selection & Merging (`src/storage/backtest_store.py`):**
+   - `select_daily_bar_snapshots()` pre-filters archive filenames in `O(window)` by `[start_date, end_date]` before parsing metadata/CSVs, selects one canonical snapshot per NYSE trading day (preferring the latest usable snapshot per `quality.is_usable_snapshot()`, otherwise the latest snapshot with `NO_USABLE_DAILY_SNAPSHOT`), and `load_daily_chain_bars()` attaches same-ET-date `data/tracked/{TICKER}/` CSV slices (`load_tracked_quotes_by_date()`) for leg-level fallback pricing.
+
+---
+
+## 7. Implementation Notes
 Repository/schema implementation details live in `docs/reference/IMPLEMENTATION_NOTES.md` §2.

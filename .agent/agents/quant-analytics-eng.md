@@ -5,7 +5,8 @@ description: >-
   (OI with Volume fallback), unusual activity (Volume > OI, Volume Z-score), multi-DTE profiles,
   the Strategy Lab engine (spreads, condors, diagonals, CUSTOM legs, POP, expected move, T+n/dIV
   payoff curves), Trade Ledger strategy classifier & multi-step FIFO roll-chain engine
-  (src/analytics/ledger/), and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).
+  (src/analytics/ledger/), Daily-Bar Backtest simulation engine (src/analytics/backtest/),
+  and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).
 profile: deep-reasoning
 color: green
 tools: [read, edit, write, bash, grep, glob]
@@ -14,13 +15,18 @@ owns:
   - tests/unit/test_bsm_and_analytics.py
   - tests/unit/test_strategies.py
   - tests/unit/test_ledger_analytics.py
+  - tests/unit/test_backtest_pricing.py
+  - tests/unit/test_backtest_engine.py
 reads:
-  - docs/DATA_SCHEMA.md (sections 2 and 5 columns only)
+  - docs/DATA_SCHEMA.md (sections 2, 5, and 6 columns only)
   - docs/ARCHITECTURE.md (section 4 only)
   - docs/reference/IMPLEMENTATION_NOTES.md (section 4 only)
   - docs/FUTURE_IMPROVEMENTS.md (only the section being implemented)
+  - src/core/calendar.py
   - src/storage/schema.py
   - src/storage/ledger_schema.py
+  - src/storage/quality.py
+  - src/storage/backtest_store.py
   - src/analytics/
 forbidden:
   - src/broker/ (it imports bsm_greeks, solve_implied_volatility, compute_walls, ChainWallsReport, WallBasis — keep those signatures stable)
@@ -60,6 +66,11 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 - `classifier.py`: clusters fills per underlying by `ib_order_id` or `<= 2.0s` (`cluster_option_episodes`), classifies 17 `LedgerStrategyType` variants, and checks uncovered stock shares before choosing `COVERED_CALL` vs `NAKED_CALL`.
 - `rolls.py`: FIFO option/stock lot matching (never creating phantom opening lots for pre-window orphan closes), assignment/expiration/exercise handling, simultaneous + sequential roll stitching within `roll_max_gap_hours` (`24.0h`), and assignment stock-realization linkage.
 - `engine.py`: keeps `realized` (ex-fee P&L, net option premium, sidecar `fees`, daily curve) strictly separate from `open_mtm` (`LIVE_GATEWAY` -> `FLEX_MARK` -> `NONE` unrealized MTM) and honors `include_stock_gain`.
+
+## 4b. Daily-Bar Backtest Engine (`backtest/`: `models`, `context`, `pricing`, `rules`, `metrics`, `engine`)
+- Pure, clock-free daily simulation over pre-loaded `DailyChainBar` sequences (`backtest_store.py`, `core/calendar.py`); zero file/network I/O.
+- `pricing.py`: runs `BSMFallbackEngine` strictly on contract-filtered rows (`enrich_filtered_greeks`) and checks canonical chain bars before `bar.tracked_df` fallback quotes across `PriceBasis` and `ClosePriceMode`.
+- `rules.py` & `engine.py`: process bar `i` exits strictly before bar `i` entries in deterministic priority (`EXPIRY_SETTLED` past `expiry_settlement_cutoff_utc` with `$0` closing commission -> missing-price hold -> `EXIT_DTE` -> `PROFIT_TARGET` -> `STOP_LOSS` against `TpSlBasis`).
 
 ## 5. Testing
 - Validate against closed-form references (e.g. S=K=100, T=1, r=0.05, σ=0.2 → call ≈ 10.4506, put ≈ 5.5735) and put-call parity; round-trip IV(price(σ)) ≈ σ within `1e-4`.
