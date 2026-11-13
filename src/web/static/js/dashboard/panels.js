@@ -29,6 +29,9 @@ import {
 import {
   renderLedgerChart,
 } from "./ledger.js";
+import {
+  renderBacktestChart,
+} from "./backtest_charts.js";
 
 // ------------------------------------------------------------------ Panel Visibility
 export function readPanelVisibility() {
@@ -162,6 +165,10 @@ export function applyPanelVisibility(nextVis, options) {
         if (pid === "trade_ledger") {
           if (state.ledgerData && state.ledgerData.report) {
             renderLedgerChart(state.ledgerData.report, t);
+          }
+        } else if (pid === "backtest") {
+          if (state.backtestResult && state.backtestResult.simulation) {
+            renderBacktestChart(state.backtestResult, t);
           }
         } else if (state.chainData) {
           renderPanelChartById(pid, state.chainData, t);

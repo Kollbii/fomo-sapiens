@@ -42,7 +42,7 @@ Gemini reasoning effort is applied through `.gemini/settings.json` → `agents.o
 | `quant-analytics-eng` | deep-reasoning | rw + bash | `src/analytics/` (BSM, walls, anomalies, term structure, Strategy Lab, roadmap GEX/diff/skew/max-pain) |
 | `ui-frontend-eng` | balanced-coding | rw + bash | `src/main.py`, `src/web/` (thin routes, `errors.py`, SSE, templates, `css/*.css`, `js/dashboard/*.js`) |
 | `doc-sync-auditor` | precise-writer | edit + bash | after any code change: `AGENTS.md`, `docs/*.md`, `CHANGELOG.md`, `README.md`, `.agent/agents/*.md` |
-| `safety-reviewer` | deep-reasoning | **read-only** + bash | review gate for diffs in `src/core/`, `src/services/`, `src/broker/`, `src/storage/`, `src/web/api.py`, `src/web/errors.py`, `scripts/security_guard.py` |
+| `safety-reviewer` | deep-reasoning | **read-only** + bash | review gate for diffs in `src/core/`, `src/services/`, `src/broker/`, `src/storage/`, `src/web/{api,backtest_api,errors}.py`, `scripts/security_guard.py` |
 | `qa-git-runner` | fast-executor | read + bash | `make check`, commit, tag, push (on request) |
 
 Cross-layer features (e.g. GEX: analytics + service + API + chart) are split by layer: `quant-analytics-eng` first (defines the Pydantic report), `broker-storage-eng` wires it into `src/services/`, then `ui-frontend-eng` (route + chart), each with its own HANDOFF.
@@ -55,7 +55,7 @@ Cross-layer features (e.g. GEX: analytics + service + API + chart) are split by 
 
     1. Build   -> domain agent (one per layer, in dependency order: core/storage/broker -> analytics -> web)
     2. Docs    -> doc-sync-auditor        (uses HANDOFF.docs_impact + git diff)
-    3. Review  -> safety-reviewer         (mandatory if core/broker/storage/services/web/{api,errors}.py changed; optional otherwise)
+    3. Review  -> safety-reviewer         (mandatory if core/broker/storage/services/web/{api,backtest_api,errors}.py changed; optional otherwise)
     4. Verify  -> qa-git-runner           (make check, commit; push only on explicit request)
 
 Every agent ends with the `[HANDOFF …]` block from `_shared/protocol.md`; the orchestrator passes only that block (not the full transcript) to the next agent.

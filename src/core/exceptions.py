@@ -49,3 +49,28 @@ class SnapshotNotFoundError(AnalyzerError):
 
 class FlexServiceError(AnalyzerError):
     """Raised when IBKR Flex Web Service requests or statement downloads fail."""
+
+
+class RefreshBusyError(AnalyzerError):
+    """Raised when a chain refresh cannot start because another refresh holds the lock."""
+
+    def __init__(self, message: str, *, owner: str, retry_after_sec: int) -> None:
+        super().__init__(message)
+        self.owner = owner
+        self.retry_after_sec = retry_after_sec
+
+
+class DuplicatePaperTradeError(InvalidRequestError):
+    """Raised when registering a paper trade whose active legs already exist."""
+
+
+class PaperTradeCapError(InvalidRequestError):
+    """Raised when registering a paper trade would exceed `max_active_trades`."""
+
+
+class PaperTradeStateError(InvalidRequestError):
+    """Raised on an invalid paper trade status transition."""
+
+
+class BacktestValidationError(InvalidRequestError):
+    """Raised when a backtest request or strategy specification fails validation."""

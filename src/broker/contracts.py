@@ -9,11 +9,11 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import Any, Protocol, TypeVar
-from zoneinfo import ZoneInfo
 
 from ib_async import Option, Stock
 
 from src.broker.client import IBKRBrokerClient, SleepFn, poll_until
+from src.core.calendar import et_date
 from src.core.config import Settings
 from src.core.exceptions import (
     InvalidTickerError,
@@ -21,11 +21,9 @@ from src.core.exceptions import (
     UnderlyingPriceUnavailableError,
 )
 from src.core.security import TickerValidator
-from src.storage.schema import sanitize_price
+from src.storage.schema import SpotSource, sanitize_price
 
 logger = logging.getLogger(__name__)
-
-US_EASTERN = ZoneInfo("America/New_York")
 _EPS = 1e-9
 _CANONICAL_STEPS: tuple[float, ...] = (0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0)
 EXACT_PREFETCH_MAX_CONCURRENCY = 3
@@ -65,6 +63,7 @@ class UnderlyingInfo:
     conid: int
     contract: Any
     spot: float
+    spot_source: SpotSource | None = None
 
 
 @dataclass(frozen=True)
@@ -126,7 +125,7 @@ def parse_ib_expiry(raw: str) -> date | None:
 
 def market_date_for(now: datetime) -> date:
     """US Eastern session date for an aware timestamp."""
-    return now.astimezone(US_EASTERN).date()
+    return et_date(now)
 
 
 def match_expirations(
@@ -394,6 +393,51 @@ def select_chain_for_expiration(
     )
 
 
+# When both `last` and the bid/ask midpoint exist and differ by more than this fraction, the
+# midpoint is used (a stale or bad `last` print must not become the snapshot spot).
+SPOT_LAST_MID_MAX_DEVIATION = 0.02
+
+
+def select_spot(ticker: Any) -> tuple[float, SpotSource] | None:
+    """Pick the snapshot spot and report its source.
+
+    Order: `last` (cross-checked against the midpoint), then the bid/ask midpoint, then the
+    previous session `close` (flagged `CLOSE`, never usable for history).
+    """
+    last = sanitize_price(getattr(ticker, "last", None))
+    bid = sanitize_price(getattr(ticker, "bid", None))
+    ask = sanitize_price(getattr(ticker, "ask", None))
+    mid = (bid + ask) / 2.0 if bid is not None and ask is not None else None
+    if last is not None and mid is not None:
+        if abs(last - mid) / mid > SPOT_LAST_MID_MAX_DEVIATION:
+            logger.warning(
+                "spot last=%.4f deviates more than %.0f%% from mid=%.4f (bid=%.4f ask=%.4f); "
+                "using mid",
+                last,
+                SPOT_LAST_MID_MAX_DEVIATION * 100,
+                mid,
+                bid,
+                ask,
+            )
+            return mid, "MID"
+        return last, "LAST"
+    if last is not None:
+        return last, "LAST"
+    if mid is not None:
+        return mid, "MID"
+    close = sanitize_price(getattr(ticker, "close", None))
+    if close is not None:
+        return close, "CLOSE"
+    return None
+
+
+def _spot_fields_complete(ticker: Any) -> bool:
+    """True once both `last` and a two-sided bid/ask are present (enables the cross-check)."""
+    return all(
+        sanitize_price(getattr(ticker, attr, None)) is not None for attr in ("last", "bid", "ask")
+    )
+
+
 def extract_spot(ticker: Any) -> float | None:
     """Reference price: last -> mid (bid/ask) -> close."""
     last = sanitize_price(getattr(ticker, "last", None))
@@ -492,7 +536,7 @@ class ContractDiscoveryService:
             raise InvalidTickerError(f"{symbol} is not a uniquely qualified US stock")
         return valid[0]
 
-    async def _snapshot_spot(self, contract: Any) -> float | None:
+    async def _snapshot_spot(self, contract: Any) -> tuple[float, SpotSource] | None:
         oc = self.settings.options_chain
         ib = self.client.ib
         stage = f"spot lookup ({getattr(contract, 'symbol', '?')})"
@@ -501,14 +545,25 @@ class ContractDiscoveryService:
         try:
             ticker = ib.reqMktData(contract, "", False, False)
             subscribed = True
+            # Wait for last + bid/ask so the cross-check can run; on timeout take what arrived.
             await poll_until(
-                lambda: extract_spot(ticker) is not None,
+                lambda: _spot_fields_complete(ticker),
                 oc.page_collect_timeout_sec,
                 oc.page_poll_interval_sec,
                 self.sleep,
             )
             self.client.ensure_still_connected(stage=stage)
-            return extract_spot(ticker)
+            picked = select_spot(ticker)
+            logger.info(
+                "spot fields %s: last=%s bid=%s ask=%s close=%s -> %s",
+                getattr(contract, "symbol", "?"),
+                getattr(ticker, "last", None),
+                getattr(ticker, "bid", None),
+                getattr(ticker, "ask", None),
+                getattr(ticker, "close", None),
+                picked,
+            )
+            return picked
         except Exception as exc:
             self.client.handle_stage_error(exc, stage=stage)
             raise
@@ -519,15 +574,19 @@ class ContractDiscoveryService:
                 except Exception:  # pragma: no cover - defensive
                     logger.exception("cancelMktData failed during %s", stage)
 
-    async def resolve_spot(self, contract: Any) -> float:
-        spot = await self._snapshot_spot(contract)
-        if spot is None and self.client.can_fallback():
+    async def resolve_spot_with_source(self, contract: Any) -> tuple[float, SpotSource]:
+        picked = await self._snapshot_spot(contract)
+        if picked is None and self.client.can_fallback():
             self.client.switch_to_fallback_data_type()
-            spot = await self._snapshot_spot(contract)
-        if spot is None or spot <= 0:
+            picked = await self._snapshot_spot(contract)
+        if picked is None or picked[0] <= 0:
             raise UnderlyingPriceUnavailableError(
                 f"No usable spot price for {getattr(contract, 'symbol', '?')}"
             )
+        return picked
+
+    async def resolve_spot(self, contract: Any) -> float:
+        spot, _source = await self.resolve_spot_with_source(contract)
         return spot
 
     async def fetch_chains(self, contract: Any) -> list[OptionChainLike]:
@@ -682,7 +741,7 @@ class ContractDiscoveryService:
             )
 
         contract = await self.qualify_underlying(ticker)
-        spot = await self.resolve_spot(contract)
+        spot, spot_source = await self.resolve_spot_with_source(contract)
         smart_chains = await self.fetch_chains(contract)
         primary_chain = select_chain(smart_chains, contract.symbol)
 
@@ -803,7 +862,9 @@ class ContractDiscoveryService:
             )
 
         return ChainPlan(
-            underlying=UnderlyingInfo(contract.symbol, int(contract.conId), contract, spot),
+            underlying=UnderlyingInfo(
+                contract.symbol, int(contract.conId), contract, spot, spot_source
+            ),
             market_date=market_date,
             exchange="SMART",
             trading_class=primary_chain.tradingClass,

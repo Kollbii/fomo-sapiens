@@ -44,20 +44,22 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 3. Expirations: inclusive `dte_min <= dte <= dte_max` (default `30..120`), one per ISO week, prefer Friday, else latest day of that week.
 4. Strikes: `spot * (1 ± range_pct)`; `strike_step=None` = Auto (`choose_auto_strike_step` over canonical steps, `<= 28` strikes). Exact per-expiration strikes via `reqContractDetailsAsync` (`Semaphore(3)` only inside a running loop, 900 s TTL cache, timeout falls back to `reqSecDefOptParams`) — prevents `Error 200` phantom strikes.
 5. Hard cap `max_total_contracts` = `max_contracts_per_page * max_pages_per_refresh` (80 x 5 = 400); auto-widen step + notice when exceeded. Reuse `conId > 0`; never re-qualify.
-6. Pages of `<= 80`; yield `0.01 s` every 20 subscribe/cancel calls; poll `0.25 s` up to `2.25 s`; `cancelMktData` in `finally:`; `0.35 s` inter-page cooldown. Generic ticks: delayed `"100,101,106"`, live `"100,101,104,106"`.
+6. Pages of `<= 80`; pause `PAGE_PACING_PAUSE_SEC = 0.55` before every `20` subscribe calls and inside `finally: _cancel_paced` (deferring `BaseException`/`CancelledError` until 100% cancels complete); poll `0.25 s` up to `2.25 s`; `0.35 s` inter-page cooldown (`1.0 s` on pacing warning). Generic ticks: delayed `"100,101,106"`, live `"100,101,104,106"`. `fetch_exact_contracts` quotes active non-expired paper-trade legs post-refresh (`<= 400` cap, zero background daemon).
 
 ## 5. Wall Corridor (`src/broker/corridor/`: `models`, `quotes`, `selection`, `service`)
 - Tier 0 Strategy legs -> Tier 1 primary wall side -> Tier 2 opposite right at walls -> Tier 3 ATM; `len(specs) <= max_contracts <= 60` else `PacingViolationError`.
 - One-shot (`fetch_corridor_quotes`) and single-active stream (`stream_corridor_quotes`) must cancel 100% of subscriptions on stop, SSE disconnect, `gen.aclose()`, ticker/expiry switch, gateway drop, and lifespan exit. Every new code path needs a cleanup test in `test_corridor.py`.
 
 ## 5a. Service Layer (`src/services/`)
-- `AnalyzerService` (with composed `LedgerService` in `src/services/ledger.py`) is the only layer that composes broker + storage + analytics; keep it HTTP-agnostic (raise `InvalidRequestError`, `ConfigurationError`, `FlexServiceError`, etc., never `HTTPException`).
+- `AnalyzerService` (with composed `LedgerService`, `PaperTradeService`, and `backtest.py`) is the only layer that composes broker + storage + analytics; keep it HTTP-agnostic (raise `InvalidRequestError`, `RefreshBusyError`, `ConfigurationError`, `FlexServiceError`, etc., never `HTTPException`).
+- `AnalyzerService.refresh_lock` (`asyncio.Lock`) serializes all IBKR pulls (`refresh_chain`, `fetch_corridor_quotes`, Gateway `LedgerService.sync_ledger`, `LedgerService.refresh_open_mtm`), tears down active corridor streams via `stop_all_streams()` prior to collection, and raises `RefreshBusyError` (`409 REFRESH_BUSY`) on contention so active lines stay below 100.
 - Corridor: derive `WallAnchors` via `wall_anchors_from_report(compute_walls(...))`, inject `make_bsm_greeks_fallback(rfr)` into `CorridorQuoteService`, validate + `ensure_connected()` before handing a stream generator to the web layer.
 - Trade Ledger: `LedgerService` orchestrates Flex Web Service v3 (`src/broker/flex.py`, `redact_flex_secrets()`), optional Gateway sync + `<= 60` MTM polling (`src/broker/ledger_sync.py`, storing live marks only in `_live_marks`), XML/CSV uploads (`MAX_LEDGER_IMPORT_BYTES` / `MAX_IMPORT_BYTES`, POSIX/`\` separator stripping, `StorageSchemaError` on malformed payloads), and `build_ledger_report()`.
 - Request/response models live in `src/services/schemas.py`; changing them is a public API change (`contracts_touched`).
 
 ## 6. Storage (`src/storage/`)
-- **Option chains:** Exactly the 27 columns in `docs/DATA_SCHEMA.md` §2; `OptionContractRow` (Pydantic) and `OPTION_CHAIN_POLARS_SCHEMA` (Polars) must agree. Sentinels `-1.0`, `NaN`, `2147483647`, `<= 0` prices -> `null`.
+- **Option chains & Snapshot Quality:** Exactly the 27 columns in `docs/DATA_SCHEMA.md` §2; `OptionContractRow` (Pydantic) and `OPTION_CHAIN_POLARS_SCHEMA` (Polars) must agree. Sentinels `-1.0`, `NaN`, `2147483647`, `<= 0` prices -> `null`. `SnapshotMeta` records `spot_source` (`LAST|MID|CLOSE`) and quote-coverage fields (`quality.py`).
+- **Paper Trades & Daily Bars (`paper_trade_store.py`, `backtest_store.py`):** Atomic `data/metadata/paper_trades.json`, append-only `data/metadata/paper_quotes.jsonl`, immutable `data/tracked/{T}/{T}_{YYYYMMDD_HHMMSS}.csv` (`tracked_dir` strictly inside `data_dir` and outside `snapshots_dir`), and `O(window)` canonical daily-bar + tracked-quote selection.
 - **Trade Ledger (`data/ledger/`):** 23-column `executions.csv` (`LedgerExecutionRow`, `LEDGER_EXECUTION_POLARS_SCHEMA`), 15-column `open_positions.csv` (`LedgerPositionRow`, `LEDGER_POSITION_POLARS_SCHEMA`), `sync_state.json`, and `imports/` (`LedgerRepository`). Store `commission` as non-negative cost (`abs(commission)`), timestamps in UTC ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`), and preserve authoritative `FLEX_*` precedence/upgrades over provisional `GATEWAY_LIVE` fills (`docs/DATA_SCHEMA.md` §5).
 - Paths: `data/snapshots/{T}/{T}_{YYYYMMDD_HHMMSS}.csv` (immutable), `data/latest/{T}_latest.csv`, `data/metadata/snapshot_index.json`, and `data/ledger/{executions,open_positions}.csv` — all via `.tmp` + `os.replace()`. Corrupt/off-schema files are rejected with `StorageSchemaError`, never silently coerced.
 - A schema change is a breaking contract: flag `contracts_touched` so `quant-analytics-eng`, `ui-frontend-eng`, and `doc-sync-auditor` are routed.
@@ -69,6 +71,7 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 ## Scope (Context Diet)
 
 **Owns (may edit):**
+- `src/core/calendar.py`
 - `src/core/config.py`
 - `src/core/exceptions.py`
 - `src/storage/`
@@ -76,15 +79,22 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - `src/services/`
 - `config/settings.yaml`
 - `.env.example`
+- `tests/unit/test_calendar.py`
 - `tests/unit/test_config.py`
 - `tests/unit/test_broker_client.py`
 - `tests/unit/test_contracts.py`
 - `tests/unit/test_parser.py`
 - `tests/unit/test_fetcher.py`
 - `tests/unit/test_corridor.py`
+- `tests/unit/test_snapshot_quality.py`
+- `tests/unit/test_paper_trade_store.py`
+- `tests/unit/test_backtest_store.py`
 - `tests/unit/test_flex_and_ledger_storage.py`
 - `tests/unit/test_ledger_sync.py`
+- `tests/unit/test_analyzer_concurrency.py`
 - `tests/unit/test_ledger_service.py`
+- `tests/unit/test_paper_trades_service.py`
+- `tests/unit/test_backtest_service.py`
 - `tests/integration/test_csv_pipeline.py`
 
 **Reads (context diet — nothing else on startup):**

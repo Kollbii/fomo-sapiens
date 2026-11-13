@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -32,6 +32,7 @@ from src.core.exceptions import (
     ConfigurationError,
     GatewayConnectionError,
     InvalidRequestError,
+    RefreshBusyError,
 )
 from src.core.security import TickerValidator
 from src.services.schemas import (
@@ -137,6 +138,11 @@ def _has_valid_mark_spec(pos: LedgerPositionRow) -> bool:
     return bool(pos.underlying)
 
 
+CorridorStopper = Callable[[], Awaitable[int]]
+RefreshAcquireFn = Callable[[str, float], Awaitable[bool]]
+RefreshReleaseFn = Callable[[], None]
+
+
 class LedgerService:
     """Coordinates Flex Web sync, manual XML/CSV import, Gateway sync, MTM, and analytics."""
 
@@ -149,6 +155,10 @@ class LedgerService:
         flex_client: FlexWebServiceClient | None = None,
         now_fn: Callable[[], datetime] | None = None,
         sleep: SleepFn = asyncio.sleep,
+        corridor_stopper: CorridorStopper | None = None,
+        refresh_acquire: RefreshAcquireFn | None = None,
+        refresh_release: RefreshReleaseFn | None = None,
+        refresh_owner_getter: Callable[[], str | None] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or LedgerRepository(self.settings.ledger.ledger_dir)
@@ -159,7 +169,25 @@ class LedgerService:
             sleep=sleep,
         )
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
+        self.corridor_stopper = corridor_stopper
+        self._refresh_acquire = refresh_acquire
+        self._refresh_release = refresh_release
+        self._refresh_owner_getter = refresh_owner_getter
         self._live_marks: dict[int, float] = {}
+
+    async def _acquire_ib_lock(self, owner: str) -> bool:
+        if self._refresh_acquire is None:
+            return False
+        if not await self._refresh_acquire(owner, 0.0):
+            holder = (
+                self._refresh_owner_getter() if self._refresh_owner_getter is not None else None
+            ) or "another operation"
+            raise RefreshBusyError(
+                f"Another IBKR refresh ({holder}) is currently in progress; retry shortly.",
+                owner=holder,
+                retry_after_sec=10,
+            )
+        return True
 
     def _utc_now_iso(self) -> str:
         dt = self.now_fn()
@@ -277,49 +305,62 @@ class LedgerService:
         flex_execs: list[LedgerExecutionRow] = []
         flex_positions: list[LedgerPositionRow] | None = None
         flex_primary_label = ""
-
-        if can_run_flex:
-            has_history = self.repo.has_existing_history()
-            query_plan = select_flex_query_ids(
-                cfg, mode=resolved_mode, has_existing_history=has_history
-            )
-            for query_id, source in query_plan:
-                raw_bytes = await self.flex_client.fetch_statement(query_id, token=cfg.flex_token)
-                if raw_bytes.lstrip().startswith(b"<"):
-                    q_execs, q_positions = parse_flex_xml(raw_bytes, default_source=source)
-                else:
-                    q_execs, q_positions = parse_activity_csv(raw_bytes, default_source=source)
-                queries_run.append(f"{source}:{query_id}")
-                flex_execs.extend(q_execs)
-                if source in ("FLEX_ACTIVITY_365", "FLEX_MONTHLY"):
-                    flex_positions = list(q_positions)
-                    flex_primary_label = "monthly" if source == "FLEX_MONTHLY" else "full"
-                elif q_positions and flex_positions is None:
-                    flex_positions = list(q_positions)
-            if not flex_primary_label and queries_run:
-                flex_primary_label = "trade_conf"
-
         gw_execs: list[LedgerExecutionRow] = []
         gw_positions: list[LedgerPositionRow] = []
         gateway_synced = False
         gateway_note: str | None = None
 
-        if run_gateway:
-            try:
-                gw_execs, gw_positions = await fetch_gateway_ledger(
-                    self.broker_client,
-                    include_stock=cfg.gateway_include_stock,
-                    clock=self.now_fn,
+        acquired = await self._acquire_ib_lock("ledger:sync") if run_gateway else False
+        try:
+            if can_run_flex:
+                has_history = self.repo.has_existing_history()
+                query_plan = select_flex_query_ids(
+                    cfg, mode=resolved_mode, has_existing_history=has_history
                 )
-                gateway_synced = True
-                gateway_note = (
-                    f"Gateway synced {len(gw_execs)} fills and {len(gw_positions)} positions."
-                )
-            except GatewayConnectionError as exc:
-                if not can_run_flex:
-                    raise
-                gateway_note = f"Gateway offline ({exc}); Flex results preserved."
-                notices.append(gateway_note)
+                for query_id, source in query_plan:
+                    raw_bytes = await self.flex_client.fetch_statement(
+                        query_id, token=cfg.flex_token
+                    )
+                    if raw_bytes.lstrip().startswith(b"<"):
+                        q_execs, q_positions = parse_flex_xml(raw_bytes, default_source=source)
+                    else:
+                        q_execs, q_positions = parse_activity_csv(raw_bytes, default_source=source)
+                    queries_run.append(f"{source}:{query_id}")
+                    flex_execs.extend(q_execs)
+                    if source in ("FLEX_ACTIVITY_365", "FLEX_MONTHLY"):
+                        flex_positions = list(q_positions)
+                        flex_primary_label = "monthly" if source == "FLEX_MONTHLY" else "full"
+                    elif q_positions and flex_positions is None:
+                        flex_positions = list(q_positions)
+                if not flex_primary_label and queries_run:
+                    flex_primary_label = "trade_conf"
+
+            if run_gateway:
+                if self.corridor_stopper is not None:
+                    stopped_lines = await self.corridor_stopper()
+                    if stopped_lines > 0:
+                        notices.append(
+                            f"Stopped {stopped_lines} active Wall Corridor subscription(s) "
+                            "before Gateway ledger sync."
+                        )
+                try:
+                    gw_execs, gw_positions = await fetch_gateway_ledger(
+                        self.broker_client,
+                        include_stock=cfg.gateway_include_stock,
+                        clock=self.now_fn,
+                    )
+                    gateway_synced = True
+                    gateway_note = (
+                        f"Gateway synced {len(gw_execs)} fills and {len(gw_positions)} positions."
+                    )
+                except GatewayConnectionError as exc:
+                    if not can_run_flex:
+                        raise
+                    gateway_note = f"Gateway offline ({exc}); Flex results preserved."
+                    notices.append(gateway_note)
+        finally:
+            if acquired and self._refresh_release is not None:
+                self._refresh_release()
 
         # Upsert Flex first, then Gateway so Gateway fills never overwrite settled Flex rows
         # and intra-run Flex+Gateway duplicates settle cleanly without double-counting.
@@ -452,7 +493,21 @@ class LedgerService:
                 notices=notices,
             )
 
-        marks = await refresh_open_option_marks(self.broker_client, pos_models, sleep=self.sleep)
+        acquired = await self._acquire_ib_lock("ledger:mtm")
+        try:
+            if self.corridor_stopper is not None:
+                stopped_lines = await self.corridor_stopper()
+                if stopped_lines > 0:
+                    notices.append(
+                        f"Stopped {stopped_lines} active Wall Corridor subscription(s) before "
+                        "live MTM refresh to stay under IBKR's 100-line market data ceiling."
+                    )
+            marks = await refresh_open_option_marks(
+                self.broker_client, pos_models, sleep=self.sleep
+            )
+        finally:
+            if acquired and self._refresh_release is not None:
+                self._refresh_release()
         self._live_marks.update(marks)
         unquoted = len(eligible_conids) - len(marks)
         if unquoted > 0:

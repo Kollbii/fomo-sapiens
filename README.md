@@ -18,6 +18,8 @@ Strategy Lab in a dual-theme (NYT Print / Obsidian Terminal) web UI.
 - Put/Call Walls (OI with Volume fallback), `Volume > OI` and Z-score anomalies, IV smile and Greeks overlays.
 - Wall Corridor: `<= 60` targeted live quotes around the walls (one-shot or SSE stream).
 - Strategy Lab: spreads, iron condors, diagonals, custom legs; risk, POP, expected move, `T+n` payoff curves.
+- Trade Ledger & Roll Chains: Flex Web Service v3 + optional Gateway sync, FIFO matching, and realized vs. open MTM views.
+- Daily-Bar Options Backtester & Paper Tracker: offline daily-bar systematic/single-trade simulation plus manual-refresh leg quote follow-up (`data/tracked/`).
 
 ## Quickstart
 
@@ -45,8 +47,7 @@ Defaults live in `config/settings.yaml`; override with `.env` / environment vari
 `DEFAULT_MARKET_DATA_TYPE`, `FALLBACK_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`,
 `APP_HOST`, `APP_PORT`.
 
-Snapshots are written to `data/snapshots/{TICKER}/`, the latest cache to `data/latest/`, and the index
-to `data/metadata/snapshot_index.json` (created automatically on startup).
+Snapshots are written to `data/snapshots/{TICKER}/`, tracked paper-trade leg quotes to `data/tracked/{TICKER}/`, the latest cache to `data/latest/`, and metadata (`snapshot_index.json`, `paper_trades.json`, `paper_quotes.jsonl`) to `data/metadata/` (created automatically on startup).
 
 ## Development
 
@@ -56,10 +57,11 @@ to `data/metadata/snapshot_index.json` (created automatically on startup).
 
 Project layout:
 
-    src/core/       config, exceptions, read-only guard, ticker validation
-    src/storage/    CSV schema + Mode 1 archive repository
-    src/broker/     ib-async client, chain discovery, paged fetcher, Wall Corridor
-    src/analytics/  BSM fallback, walls, anomalies, multi-DTE profiles, Strategy Lab
+    src/core/       calendar, config, exceptions, read-only guard, ticker validation
+    src/storage/    CSV/ledger schemas, quality scoring, Mode 1/paper/ledger archives
+    src/broker/     ib-async client, chain discovery, paged/exact fetcher, Wall Corridor, Flex
+    src/analytics/  BSM fallback, walls, anomalies, multi-DTE profiles, Strategy Lab, Ledger, Backtest
+    src/services/   AnalyzerService, Corridor glue, LedgerService, PaperTradeService, Backtest orchestration
     src/web/        FastAPI routes, Jinja2 templates, CSS tokens, dashboard JS
     tests/          unit/, integration/, support/ helpers, fixtures/ golden snapshots
     scripts/        security guard, JS check, agent-spec generator

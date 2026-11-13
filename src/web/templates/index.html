@@ -97,12 +97,19 @@
       </select>
     </label>
 
-    <label class="field-group">
-      <span class="field-label">Snapshot</span>
-      <select id="snapshot-select" class="select-control" aria-label="Historical Snapshot Archive">
+    <div class="field-group">
+      <span class="field-label" id="snapshot-picker-label">Snapshot</span>
+      <select id="snapshot-select" class="select-control snap-picker__native" aria-label="Historical Snapshot Archive" tabindex="-1" aria-hidden="true">
         <option value="">Latest Archive</option>
       </select>
-    </label>
+      <div class="snap-picker" id="snapshot-picker">
+        <button type="button" id="snapshot-picker-toggle" class="select-control snap-picker__toggle" aria-haspopup="listbox" aria-expanded="false" aria-labelledby="snapshot-picker-label snapshot-picker-current">
+          <span id="snapshot-picker-current" class="snap-picker__current">Latest Archive</span>
+          <span class="snap-picker__caret" aria-hidden="true"></span>
+        </button>
+        <div id="snapshot-picker-panel" class="snap-picker__panel" role="listbox" aria-label="Snapshots by day" hidden></div>
+      </div>
+    </div>
 
     <button id="refresh-btn" class="btn btn-primary" type="button">
       REFRESH FROM IBKR
@@ -182,6 +189,15 @@
       >
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Trade Ledger</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="backtest"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Backtest</span>
       </button>
     </div>
     <button
@@ -791,6 +807,277 @@
       </div>
     </div>
   </article>
+
+  <article id="backtest-card" class="panel-card panel-card--span-12 panel-card--backtest" data-panel-id="backtest" data-default-span="12">
+    <div class="panel-head">
+      <div class="panel-head-left">
+        <h2 class="panel-title">Daily Options Backtester &amp; Paper Tracker</h2>
+        <span class="panel-meta">ARCHIVED DAILY SNAPSHOT REPLAY + PORTFOLIO RULES</span>
+      </div>
+      <div class="panel-actions backtest-head-actions">
+        <span id="backtest-status-badge" class="badge badge--muted">READY</span>
+        <div id="backtest-mode-group" class="backtest-seg-group" role="group" aria-label="Backtest Mode">
+          <button type="button" class="backtest-seg-btn is-active" data-bt-mode="SYSTEMATIC" aria-pressed="true">Systematic Study</button>
+          <button type="button" class="backtest-seg-btn" data-bt-mode="SINGLE_TRADE" aria-pressed="false">Single Trade Replay</button>
+        </div>
+        <button type="button" id="backtest-save-paper-btn" class="btn">Save Paper Trade</button>
+        <button type="button" id="backtest-run-btn" class="btn btn-primary">RUN BACKTEST</button>
+      </div>
+    </div>
+
+    <div class="panel-body backtest-body">
+      <form id="backtest-form" class="backtest-controls">
+        <div id="backtest-single-controls" class="backtest-single-controls" hidden>
+          <div class="backtest-switch-group">
+            <span class="field-label">Replay Source</span>
+            <div id="backtest-source-group" class="backtest-seg-group" role="group" aria-label="Single Trade Source">
+              <button type="button" class="backtest-seg-btn is-active" data-bt-source="AUTO_BUILD" aria-pressed="true">Auto Build</button>
+              <button type="button" class="backtest-seg-btn" data-bt-source="LEGS" aria-pressed="false">Custom Legs</button>
+              <button type="button" class="backtest-seg-btn" data-bt-source="PAPER_TRADE" aria-pressed="false">Paper Trade</button>
+            </div>
+          </div>
+          <label class="backtest-field backtest-field--wide" data-bt-entry-wrap>
+            <span class="field-label">Entry Snapshot</span>
+            <select id="backtest-entry-select" class="select-control" aria-label="Backtest Entry Snapshot"></select>
+          </label>
+          <label class="backtest-field" data-bt-end-wrap>
+            <span class="field-label">Replay End Snapshot (Opt)</span>
+            <select id="backtest-end-select" class="select-control" aria-label="Backtest End Snapshot">
+              <option value="">Latest Available</option>
+            </select>
+          </label>
+          <label class="backtest-field backtest-field--wide" data-bt-paper-wrap hidden>
+            <span class="field-label">Saved Paper Trade</span>
+            <select id="backtest-paper-select" class="select-control" aria-label="Select Saved Paper Trade"></select>
+          </label>
+        </div>
+
+        <div class="backtest-config-grid">
+          <label class="backtest-field">
+            <span class="field-label">Strategy</span>
+            <select id="backtest-strategy-select" class="select-control" aria-label="Backtest Strategy">
+              <option value="BULL_PUT_SPREAD" selected>Bull Put Spread</option>
+              <option value="BULL_CALL_SPREAD">Bull Call Spread</option>
+              <option value="DIAGONAL_SPREAD">Diagonal Spread</option>
+              <option value="IRON_CONDOR">Iron Condor</option>
+              <option value="CUSTOM">Custom Legs</option>
+            </select>
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">DTE Min</span>
+            <input id="backtest-dte-min" class="input-control" type="number" min="0" max="120" step="1" value="30" inputmode="numeric" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">DTE Max</span>
+            <input id="backtest-dte-max" class="input-control" type="number" min="1" max="120" step="1" value="60" inputmode="numeric" />
+          </label>
+          <label class="backtest-field" data-bt-systematic>
+            <span class="field-label">Entry Cadence</span>
+            <select id="backtest-cadence-select" class="select-control" aria-label="Entry Cadence">
+              <option value="WEEKLY_DAY" selected>Weekly Day</option>
+              <option value="EVERY_N_DAYS">Every N Days</option>
+              <option value="WHEN_FLAT">When Flat</option>
+            </select>
+          </label>
+          <label class="backtest-field" data-bt-systematic data-bt-weekday>
+            <span class="field-label">Entry Weekday</span>
+            <select id="backtest-weekday-select" class="select-control" aria-label="Entry Weekday">
+              <option value="0">Monday</option>
+              <option value="1">Tuesday</option>
+              <option value="2">Wednesday</option>
+              <option value="3">Thursday</option>
+              <option value="4" selected>Friday</option>
+            </select>
+          </label>
+          <label class="backtest-field" data-bt-systematic data-bt-every-n hidden>
+            <span class="field-label">Every N Bars</span>
+            <input id="backtest-every-n-days" class="input-control" type="number" min="1" max="60" step="1" value="5" inputmode="numeric" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">Initial Capital ($)</span>
+            <input id="backtest-initial-capital" class="input-control" type="number" min="100" step="100" value="10000" inputmode="decimal" />
+          </label>
+          <label class="backtest-field" data-bt-systematic>
+            <span class="field-label">Max Open Trades</span>
+            <input id="backtest-max-open" class="input-control" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">Qty</span>
+            <input id="backtest-qty" class="input-control" type="number" min="1" max="100" step="1" value="1" inputmode="numeric" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">Comm ($/contract)</span>
+            <input id="backtest-commission" class="input-control" type="number" min="0" max="50" step="0.05" value="0.65" inputmode="decimal" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">Start Date</span>
+            <input id="backtest-start-date" class="input-control" type="date" aria-label="Backtest Start Date" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">End Date</span>
+            <input id="backtest-end-date" class="input-control" type="date" aria-label="Backtest End Date" />
+          </label>
+        </div>
+
+        <div class="backtest-switches-row">
+          <div class="backtest-switch-group">
+            <span class="field-label">Price Basis</span>
+            <div id="backtest-price-basis-group" class="backtest-seg-group" role="group" aria-label="Option Price Basis">
+              <button type="button" class="backtest-seg-btn is-active" data-bt-price-basis="AUTO_MID_LAST_CLOSE" aria-pressed="true">Auto (Mid &rarr; Last &rarr; Close)</button>
+              <button type="button" class="backtest-seg-btn" data-bt-price-basis="LAST_CLOSE_ONLY" aria-pressed="false">Last / Close Only</button>
+            </div>
+          </div>
+
+          <div class="backtest-switch-group">
+            <span class="field-label">Close Fill</span>
+            <div id="backtest-close-mode-group" class="backtest-seg-group" role="group" aria-label="Close Fill Assumption">
+              <button type="button" class="backtest-seg-btn is-active" data-bt-close-mode="MID" aria-pressed="true">Mid</button>
+              <button type="button" class="backtest-seg-btn" data-bt-close-mode="NATURAL_SPREAD" aria-pressed="false">Natural Spread</button>
+            </div>
+          </div>
+
+          <div class="backtest-switch-group">
+            <span class="field-label">TP / SL Basis</span>
+            <div id="backtest-tpsl-basis-group" class="backtest-seg-group" role="group" aria-label="TP and SL Basis">
+              <button type="button" class="backtest-seg-btn is-active" data-bt-tpsl-basis="CREDIT_DEBIT_PCT" aria-pressed="true">% of Entry Credit / Debit</button>
+              <button type="button" class="backtest-seg-btn" data-bt-tpsl-basis="MAX_RISK_PCT" aria-pressed="false">% of Max Risk</button>
+            </div>
+          </div>
+
+          <div class="backtest-tpsl-inputs">
+            <label class="backtest-field">
+              <span class="field-label">Profit Target %</span>
+              <input id="backtest-tp-pct" class="input-control" type="number" min="1" max="1000" step="5" value="50" placeholder="Off" inputmode="decimal" />
+            </label>
+            <label class="backtest-field">
+              <span class="field-label">Stop Loss %</span>
+              <input id="backtest-sl-pct" class="input-control" type="number" min="1" max="2000" step="5" value="100" placeholder="Off" inputmode="decimal" />
+            </label>
+            <label class="backtest-field">
+              <span class="field-label">Exit DTE</span>
+              <input id="backtest-exit-dte" class="input-control" type="number" min="0" max="120" step="1" value="" placeholder="Off" inputmode="numeric" />
+            </label>
+          </div>
+        </div>
+
+        <div id="backtest-legs-box" class="backtest-legs-box" hidden>
+          <div class="backtest-legs-head">
+            <span class="field-label">Custom Legs Spec (max 8 legs &bull; used for Custom Legs &amp; Save Paper Trade)</span>
+            <div class="backtest-legs-actions">
+              <button type="button" id="backtest-import-lab-btn" class="btn btn-sm">Copy Strategy Lab Legs</button>
+              <button type="button" id="backtest-add-leg-btn" class="btn btn-sm">+ Add Leg</button>
+            </div>
+          </div>
+          <table class="backtest-legs-table">
+            <thead>
+              <tr>
+                <th>Side</th>
+                <th>Right</th>
+                <th>Expiry</th>
+                <th>Strike</th>
+                <th>Qty</th>
+                <th><span class="sr-only">Remove</span></th>
+              </tr>
+            </thead>
+            <tbody id="backtest-legs-body"></tbody>
+          </table>
+        </div>
+      </form>
+
+      <section id="backtest-paper-strip" class="backtest-paper-strip" aria-label="Tracked Paper Trades">
+        <div class="backtest-paper-head">
+          <div class="backtest-paper-title">
+            <span>Paper Trades</span>
+            <span id="backtest-paper-summary" class="badge badge--muted">0 active</span>
+          </div>
+          <div class="backtest-paper-actions">
+            <select id="backtest-paper-filter" class="select-control" aria-label="Filter Paper Trades">
+              <option value="ALL">All Statuses</option>
+              <option value="ACTIVE" selected>Active Only</option>
+              <option value="EXPIRED">Expired</option>
+              <option value="STOPPED">Stopped</option>
+            </select>
+            <button type="button" id="backtest-paper-refresh-btn" class="btn btn-sm">Reload</button>
+          </div>
+        </div>
+        <p class="backtest-paper-hint">
+          Manual <strong>REFRESH FROM IBKR</strong> automatically quotes open paper trade legs &lt; 30 DTE (down to expiry) into your local archive.
+        </p>
+        <div id="backtest-paper-list" class="backtest-paper-list"></div>
+      </section>
+
+      <div id="backtest-warnings" class="backtest-warnings" role="status" aria-live="polite"></div>
+
+      <div id="backtest-kpis" class="backtest-kpis" aria-label="Backtest Summary KPIs"></div>
+
+      <div id="backtest-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Backtest Equity and P&amp;L Chart">
+        <div class="strategy-empty-state">
+          Configure rules and click <strong>RUN BACKTEST</strong> to simulate daily portfolio rules or replay a single trade across archived snapshots.
+        </div>
+      </div>
+
+      <div class="backtest-tables-grid">
+        <section class="backtest-pane" aria-label="Simulated Trade Log">
+          <div class="backtest-pane-head">
+            <strong>Trade Log</strong>
+            <span id="backtest-trades-meta">0 trades &bull; click a row to inspect daily steps</span>
+          </div>
+          <div class="backtest-table-wrap">
+            <table id="backtest-trades-table" class="backtest-table">
+              <thead>
+                <tr>
+                  <th class="text-left">Trade</th>
+                  <th class="text-left">Entry &rarr; Exit</th>
+                  <th class="text-left">Reason</th>
+                  <th>Qty</th>
+                  <th>Entry $</th>
+                  <th>Net P&amp;L</th>
+                  <th>Ret %</th>
+                  <th class="text-left">Status</th>
+                </tr>
+              </thead>
+              <tbody id="backtest-trades-body">
+                <tr>
+                  <td colspan="8" class="text-left">Run a backtest to populate simulated trades.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="backtest-pane" aria-label="Daily Step Valuation and Flags">
+          <div class="backtest-pane-head">
+            <strong id="backtest-steps-title">Daily Valuation &amp; Flags</strong>
+            <span id="backtest-steps-meta">Select a trade row</span>
+          </div>
+          <div class="backtest-table-wrap">
+            <table id="backtest-steps-table" class="backtest-table">
+              <thead>
+                <tr>
+                  <th class="text-left">Date / Snap</th>
+                  <th>DTE</th>
+                  <th>Spot</th>
+                  <th>Mark $</th>
+                  <th>Nat $</th>
+                  <th>Net P&amp;L</th>
+                  <th>Basis %</th>
+                  <th class="text-left">Status</th>
+                  <th class="text-left">Flags</th>
+                </tr>
+              </thead>
+              <tbody id="backtest-steps-body">
+                <tr>
+                  <td colspan="9" class="text-left">Select a trade to inspect daily leg valuation and data flags.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <ul id="backtest-assumptions" class="backtest-assumptions" aria-label="Simulation Assumptions"></ul>
+    </div>
+  </article>
 </section>
 
 <!-- Row 6: High-Density Option Chain Table -->
@@ -961,5 +1248,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261112c"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261113a"></script>
 {% endblock %}

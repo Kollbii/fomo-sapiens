@@ -58,6 +58,9 @@ def test_offline_ui_and_chain_render_from_golden_snapshot(fixture_repo: CSVRepos
                 index = await http.get("/")
                 assert index.status_code == 200
                 assert "editorial-banner-slot" in index.text
+                assert 'id="backtest-card"' in index.text
+                assert 'id="trade-ledger-card"' in index.text
+                assert 'id="snapshot-picker"' in index.text
 
                 chain = await http.get("/api/chain/NVDA")
                 assert chain.status_code == 200

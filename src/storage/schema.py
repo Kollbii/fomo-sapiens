@@ -23,6 +23,7 @@ _STANDARD_RANGE_PCTS = (0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
 GreeksSource = Literal["IBKR_MODEL", "BSM_FALLBACK", "NONE"]
 OptionRight = Literal["C", "P"]
 WallBasis = Literal["OPEN_INTEREST", "VOLUME"]
+SpotSource = Literal["LAST", "MID", "CLOSE"]
 
 
 def _is_missing(value: Any) -> bool:
@@ -225,6 +226,10 @@ class SnapshotMeta(BaseModel):
     available_strike_steps: list[float] | None = None
     available_range_pcts: list[float] | None = None
     exchange_native_verified: bool | None = None
+    spot_source: SpotSource | None = None
+    quoted_contract_count: int | None = None
+    quote_coverage: float | None = None
+    prior_close_only_count: int | None = None
 
 
 def infer_chain_step_and_range(df: pl.DataFrame) -> tuple[float | None, float | None]:

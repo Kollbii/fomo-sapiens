@@ -70,14 +70,16 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │       └── IMPLEMENTATION_NOTES.md  # per-module implementation details (not contracts)
     ├── data/
     │   ├── snapshots/
+    │   ├── tracked/              # immutable paper-trade leg quotes (outside snapshots/)
     │   ├── latest/
-    │   ├── metadata/
+    │   ├── metadata/             # snapshot_index.json, paper_trades.json, paper_quotes.jsonl
     │   └── ledger/               # executions.csv, open_positions.csv, sync_state.json, imports/
     ├── src/
     │   ├── __init__.py
     │   ├── main.py
     │   ├── core/
     │   │   ├── __init__.py
+    │   │   ├── calendar.py       # 2026-2027 NYSE trading calendar & 15m data delay cutoff
     │   │   ├── config.py
     │   │   ├── exceptions.py
     │   │   └── security.py
@@ -86,7 +88,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── client.py
     │   │   ├── contracts.py
     │   │   ├── corridor/         # models, quotes, selection (pure), service (subscriptions)
-    │   │   ├── fetcher.py
+    │   │   ├── fetcher.py        # paged 80/page + fetch_exact_contracts, 20-burst 0.55s pacing
     │   │   ├── flex.py           # Flex Web Service v3 client & XML/CSV statement parser
     │   │   ├── ledger_sync.py    # opt-in Gateway execution/position sync & <= 60 MTM marks
     │   │   └── parser.py
@@ -94,6 +96,9 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── __init__.py
     │   │   ├── schema.py
     │   │   ├── csv_repository.py
+    │   │   ├── quality.py            # SpotSource & quote coverage snapshot usability scoring
+    │   │   ├── paper_trade_store.py  # atomic paper_trades.json, paper_quotes.jsonl & data/tracked/
+    │   │   ├── backtest_store.py     # O(window) daily bar selection & tracked fallback merge
     │   │   ├── ledger_schema.py      # 23-col execution & 15-col open position contracts
     │   │   └── ledger_repository.py  # atomic data/ledger/ archive & Gateway -> Flex upgrade
     │   ├── analytics/
@@ -103,26 +108,31 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── anomalies.py
     │   │   ├── term_greeks.py
     │   │   ├── strategies/       # models, chain, builders (wall presets), engine (evaluate)
-    │   │   └── ledger/           # models, classifier, rolls (FIFO + roll chains), engine
+    │   │   ├── ledger/           # models, classifier, rolls (FIFO + roll chains), engine
+    │   │   └── backtest/         # models, context, pricing, rules, metrics, engine
     │   ├── services/
     │   │   ├── __init__.py
-    │   │   ├── analyzer.py       # AnalyzerService: refresh, chain analytics, Strategy Lab, corridor
+    │   │   ├── analyzer.py       # AnalyzerService: refresh_lock, refresh, analytics, Lab, corridor
     │   │   ├── corridor.py       # WallAnchors / BSM GreeksFallback glue, live-quote overlay cache
     │   │   ├── ledger.py         # LedgerService: Flex/Gateway sync, XML/CSV import, MTM overlay
+    │   │   ├── paper_trades.py   # PaperTradeService: register/stop, post-refresh leg quoting
+    │   │   ├── backtest.py       # daily-bar entries & systematic/single-trade orchestration
     │   │   └── schemas.py        # request/response models (public API contract)
     │   └── web/
     │       ├── __init__.py
     │       ├── api.py            # thin FastAPI routes + SSE
+    │       ├── backtest_api.py   # /api/backtest/* & paper-trades routes
     │       ├── errors.py         # domain exception -> JSON mapping
     │       ├── templates/
     │       │   ├── base.html
     │       │   └── index.html
     │       └── static/
     │           ├── css/          # tokens, layout, controls, charts, corridor, strategy_lab,
-    │           │                 # ledger, chain_table, responsive (cascade order = base.html)
-    │           └── js/dashboard/ # native ES modules: main.js entry + state, helpers, badges,
+    │           │                 # ledger, snapshot_picker, backtest, chain_table, responsive
+    │           └── js/dashboard/ # 19 native ES modules: main.js entry + state, helpers, badges,
     │                             # charts, panels, chain_table, snapshots, strategy_lab,
-    │                             # corridor, ledger, network, events, ai_prompt, grid_layout
+    │                             # corridor, ledger, backtest, backtest_charts, backtest_paper,
+    │                             # backtest_tables, network, events, ai_prompt, grid_layout
     └── tests/
         ├── conftest.py          # fixtures_dir, fixture_repo
         ├── support/             # aio.py (run_coro, run_virtual_loop, noop_sleep), ib_fakes.py
@@ -135,7 +145,10 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 ## 3. Core Component Responsibilities
 
 ### 3.0 Layering & Service Layer
-`src/web/` is a thin HTTP adapter over `src/services/AnalyzerService` (and its composed `LedgerService` in `src/services/ledger.py`), which is the only layer composing broker, storage, and analytics (full dependency rules in `docs/CODING_STANDARDS.md` §1). The broker never imports analytics: `AnalyzerService` derives `WallAnchors` from `compute_walls()` and injects the vectorized BSM `GreeksFallback` into `CorridorQuoteService`. Services raise domain exceptions only; `src/web/errors.py` maps them to structured JSON (`InvalidRequestError` -> `422 INVALID_REQUEST`, `ConfigurationError` -> `422 CONFIGURATION_ERROR`, `FlexServiceError` -> `502 FLEX_SERVICE_ERROR`, echoed as `detail`).
+`src/web/` (`api.py` and `backtest_api.py`) is a thin HTTP adapter over `src/services/AnalyzerService` and its composed services (`LedgerService`, `PaperTradeService`, and `services/backtest.py`), which is the only layer composing broker, storage, and analytics (full dependency rules in `docs/CODING_STANDARDS.md` §1). The broker never imports analytics: `AnalyzerService` derives `WallAnchors` from `compute_walls()` and injects the vectorized BSM `GreeksFallback` into `CorridorQuoteService`.
+
+- **Single-Flight IBKR Concurrency & Line-Budget Coordination:** Because IBKR enforces a 100-simultaneous market-data-line limit, `AnalyzerService.refresh_lock` (`asyncio.Lock`) serializes all IBKR market-data pulls across `refresh_chain`, `fetch_corridor_quotes`, Gateway-backed `LedgerService.sync_ledger`, and `LedgerService.refresh_open_mtm` (coordinated via injected `acquire_refresh`, `release_refresh`, and `corridor_stopper` callbacks). Every acquired pull calls `stop_all_streams()` to tear down active Corridor streams before subscribing new chain, ledger MTM, or paper-trade follow-up lines; overlapping IBKR calls immediately raise `RefreshBusyError` (`409 REFRESH_BUSY`, `Retry-After: 10`), and `open_corridor_stream` rejects new SSE streams while `refresh_lock` is held. `PaperTradeService.quote_active_trades_for_refresh` runs as a bounded post-refresh follow-up inside `refresh_chain` (zero background polling daemon).
+- **Structured Error Mapping:** Services raise domain exceptions only; `src/web/errors.py` maps them to JSON (`RefreshBusyError` -> `409 REFRESH_BUSY`, `DuplicatePaperTradeError` -> `409 DUPLICATE_PAPER_TRADE`, `PaperTradeCapError` -> `409 PAPER_TRADE_CAP`, `PaperTradeStateError` -> `409 PAPER_TRADE_STATE`, `InvalidRequestError`/`BacktestValidationError` -> `422 INVALID_REQUEST`/`422 BACKTEST_VALIDATION_ERROR`, `ConfigurationError` -> `422 CONFIGURATION_ERROR`, `FlexServiceError` -> `502 FLEX_SERVICE_ERROR`, echoed as `detail`).
 
 ### 3.1 FastAPI Lifespan & Shared Event Loop (`src/main.py`, `src/broker/client.py`)
 - `ib-async` requires an active `asyncio` event loop. FastAPI's `lifespan` context manager initializes a singleton `IBKRBrokerClient` bound to the Uvicorn event loop.
@@ -159,7 +172,7 @@ Every manual refresh executes a bounded **5-Stage Pipeline** to stay well below 
 1. **Stage 1 — Underlying Qualification & Spot Resolution:**
    - Validate ticker via `TickerValidator.validate(symbol)`.
    - Qualify `Stock(symbol, 'SMART', 'USD')` via `qualifyContractsAsync`.
-   - Fetch underlying reference price (`last`, `mid`, or `close` under configured primary/fallback market data types, e.g. `Type 1/2` or `Type 3/4`). Abort with `UnderlyingPriceUnavailableError` if spot `<= 0`.
+   - Fetch underlying reference price via `select_spot` (`last` cross-checked against `mid` within `SPOT_LAST_MID_MAX_DEVIATION = 0.02`, else `mid`, else `close`) under configured primary/fallback market data types (`Type 1/2` or `Type 3/4`), recording `SpotSource` (`LAST` | `MID` | `CLOSE`). Abort with `UnderlyingPriceUnavailableError` if spot `<= 0`.
 2. **Stage 2 — Chain Definition Lookup:**
    - Call `reqSecDefOptParamsAsync(underlying.symbol, '', underlying.secType, underlying.conId)` and select the primary `SMART` exchange definition with multiplier `'100'`.
 3. **Stage 3 — Weekly Expiration Matching (`30 <= DTE <= 120`):**
@@ -172,8 +185,9 @@ Every manual refresh executes a bounded **5-Stage Pipeline** to stay well below 
 5. **Stage 5 — Paged Micro-Batch Downloader & Future OPRA Streaming Placeholder:**
    - Construct `Option` contracts (`Right='C'` and `Right='P'`) for the filtered grid and qualify them in chunks via `qualifyContractsAsync`.
    - Partition qualified contracts into pages of **`options_chain.max_contracts_per_page = 80`**.
-   - **Execution Modes in `fetcher.py` (via unified `_collect_page_with_fallback`):**
-     - **`DELAYED` Collector (`_fetch_page_delayed`):** Calls `reqMktData(contract, genericTickList="100,101,106", snapshot=False, regulatorySnapshot=False)` for the page of `<= 80` contracts, polls every `0.25s` up to `2.25s`, cascades to `fallback_market_data_type` (`4`) when `>80%` quotes remain empty, cancels subscriptions (`cancelMktData`) in `finally:`, and waits `0.35s` before the next page.
+   - **Execution Modes & Burst Pacing in `fetcher.py` (via unified `_collect_page_with_fallback`):**
+     - **Burst Pacing & Cleanup:** Both paged pulls and exact-contract pulls pace IBKR API bursts every `PAGE_PACING_CHUNK_SIZE = 20` calls with `PAGE_PACING_PAUSE_SEC = 0.55` before subscribing, and cancel every subscribed ticker in `finally: await self._cancel_paced(...)` (which paces cancels at 20/`0.55s` and defers `BaseException`/`CancelledError` until 100% cancels complete).
+     - **`DELAYED` Collector (`_fetch_page_delayed`):** Calls `reqMktData(contract, genericTickList="100,101,106", snapshot=False, regulatorySnapshot=False)` for the page of `<= 80` contracts, polls every `0.25s` up to `2.25s`, cascades to `fallback_market_data_type` (`4`) when `>80%` quotes remain empty, cleans up via `_cancel_paced`, and waits inter-page cooldown (`0.35s`, widened to `1.0s` on pacing warnings) before the next page.
      - **`LIVE_OPRA` Collector (`_fetch_page_live_opra`):** Requests live OPRA generic ticks `"100,101,104,106"` under configured live primary/fallback (`1 -> 2`) and waits for both `modelGreeks` and `callOpenInterest`/`putOpenInterest` (tick `101`) confirmation; if `Error 10089`/`354` triggers during collection, seamlessly delegates to `_fetch_page_delayed`.
 
 ### 3.4 Hybrid Trade Ledger Acquisition (`src/broker/flex.py`, `src/broker/ledger_sync.py`, `src/services/ledger.py`)
@@ -191,6 +205,14 @@ Trade Ledger data is ingested from up to three complementary read-only channels 
    - When explicitly enabled, uses `scripts/security_guard.py`'s `SCOPED_ALLOWLIST` permitting ONLY `reqExecutionsAsync` (`OPT`, plus optional `STK` via `GATEWAY_LEDGER_INCLUDE_STOCK`) and `reqPositionsAsync` inside `src/broker/ledger_sync.py`. Account attributes are discarded immediately; Gateway executions persist with `source="GATEWAY_LIVE"` and auto-upgrade in place when authoritative Flex statements arrive (`docs/DATA_SCHEMA.md` §5.3).
 3. **Bounded Open-Position Live MTM (`refresh_open_option_marks`, `POST /api/ledger/mtm`):**
    - Explicit click-only snapshot poll capped at `MAX_MARK_CONTRACTS = 60` open option positions (reusing `conid` when present, yielding every 20 subscriptions, applying `1 -> 3 -> 4` / `LIVE 1->2` / `DELAYED 3->4` fallback, and isolating pacing-sleep `CancelledError` inside `finally:` so 100% of subscriptions call `cancelMktData`). Live quotes populate an in-memory mark overlay on `LedgerService` (`_live_marks`) without modifying `data/ledger/*.csv`.
+
+### 3.5 Daily Bar Selection & Manual Paper-Trade Follow-Up (`src/storage/backtest_store.py`, `src/services/paper_trades.py`)
+1. **O(window) Daily Bar Selection (`backtest_store.py`, `quality.py`):**
+   - `select_daily_bar_snapshots()` pre-filters archived filenames in `O(window)` by `[start_date, end_date]` ET dates before parsing metadata or reading CSV files, then selects one canonical snapshot per NYSE trading day (`src/core/calendar.py`): preferring the latest usable snapshot per `quality.is_usable_snapshot()` (`quote_coverage >= 0.90`, `spot_source in {"LAST", "MID"}`, `market_data_type in {1, 3}`), otherwise falling back to the day's latest snapshot tagged `NO_USABLE_DAILY_SNAPSHOT`.
+   - `load_daily_chain_bars()` loads each canonical CSV and pairs it with any same-ET-date tracked leg CSV under `data/tracked/{TICKER}/` (`load_tracked_quotes_by_date()`).
+2. **Exact-Contract Follow-Up (`fetch_exact_contracts`, `PaperTradeService.quote_active_trades_for_refresh`):**
+   - Strictly event-free outside manual refreshes (zero background collector daemon): inside `AnalyzerService.refresh_chain()` under `refresh_lock`, after paged option collection finishes and disconnects subscriptions cleanly, `PaperTradeService` gathers all unique non-expired legs (`expiry >= market_day`) across `ACTIVE` `PaperTrade` entries for the refreshed ticker.
+   - `PagedOptionChainFetcher.fetch_exact_contracts()` filters expired legs into `missing`, deduplicates specs `(expiry, round(strike, 4), right)`, enforces `<= max_contracts_per_page * max_pages_per_refresh` (`400`), reuses known `conId` / qualifies unknown contracts, collects quotes using `fetch_pages()`, applies `enrich_missing_greeks()`, writes an immutable 27-col CSV under `data/tracked/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`, and appends a `PaperQuoteRecord` (`QUOTED` or `ERROR`) to `data/metadata/paper_quotes.jsonl` without failing the primary chain refresh if a leg quote fails.
 
 ---
 
@@ -220,12 +242,24 @@ Pure, deterministic quantitative P&L and campaign reconstruction over normalized
 - **FIFO Lot Accounting & Roll Stitching (`rolls.py`):** Matches closing, expiring, assigned, and exercised option/stock fills (`TRADE`, `EXPIRED`, `ASSIGNED`, `EXERCISED`) via FIFO lots (sorting same-second opens before closes) without fabricating opening lots for pre-window orphan closes; orphan closes classify against their implied opening orientation (`_invert_legs_for_classification`) while keeping actual `BTC`/`STC`/`Expired`/`Assigned`/`Exercised` `RollStep` labels. Stitches both simultaneous close+open rolls and sequential rolls within `LEDGER_ROLL_MAX_GAP_HOURS` (default `24.0h`) into multi-step roll campaigns (`RollStep`, `LedgerCampaignRow`, e.g. `Roll Up & Out`, `Roll Down & Out`), and links assignment-driven stock realizations (`_link_stock_realizations_to_assignments`) when `include_stock_gain=True`.
 - **Strict View & Fee Separation (`engine.py`):** Builds `realized` view (`1W|1M|3M|YTD|1Y|ALL` window over closed/rolled realized ex-fee P&L, net option premium, sidecar `fees`, and cumulative P&L curve across `campaigns | strategy | ticker | executions` groupings) cleanly separated from `open_mtm` view (open option/stock lots plus unmatched `open_positions.csv` rows priced via `LIVE_GATEWAY` live mark overlay -> `FLEX_MARK` -> `NONE` unrealized MTM).
 
+### 4.4 Daily-Bar Options Backtest Engine (`src/analytics/backtest/`, `src/core/calendar.py`, `src/web/backtest_api.py`)
+Pure, clock-free simulation over canonical daily chain + tracked leg bars (`models.py`, `context.py`, `pricing.py`, `rules.py`, `metrics.py`, `engine.py`), wired by `src/services/backtest.py` and exposed on `/api/backtest/*` via `asyncio.to_thread`:
+
+- **NYSE Trading Calendar & Settlement Cutoff (`src/core/calendar.py`, `context.py`):** Covers `2026-01-01`..`2027-12-31` (`NYSE_HOLIDAYS`, `NYSE_EARLY_CLOSES`, `SESSION_OPEN_ET = 09:30`, `SESSION_CLOSE_ET = 16:00`, `EARLY_CLOSE_ET = 13:00`, `DATA_DELAY = 15 min`). `expiry_settlement_cutoff_utc()` requires `bar.snapshot_ts_utc >= close_utc + 15 min` on expiration day before settling expiring legs via intrinsic payoff (`$0` closing commission on expired legs); earlier intraday snapshots evaluate remaining intraday prices.
+- **Pricing, Contract-Filtered BSM & Tracked Fallback (`pricing.py`):** `enrich_filtered_greeks()` executes `BSMFallbackEngine` strictly on contract-filtered rows rather than re-solving the entire archive. Leg lookup (`lookup_legs_on_bar`) queries the canonical daily chain bar first and falls back to `bar.tracked_df` (`data/tracked/`) when a leg is absent or lacks usable quotes (e.g., tracked `< 30 DTE` paper-trade legs). Supports `PriceBasis` (`AUTO_MID_LAST_CLOSE` | `LAST_CLOSE_ONLY`), `ClosePriceMode` (`MID` | `NATURAL_SPREAD`), and `TpSlBasis` (`CREDIT_DEBIT_PCT` | `MAX_RISK_PCT`).
+- **Modes, Cadences & Exit Priority (`rules.py`, `engine.py`):**
+  - `SYSTEMATIC`: enters `AUTO_BUILD` wall-anchored strategies (`TARGET_DTE_CENTER = 38`, `dte_min..dte_max`) on `WEEKLY_DAY`, `EVERY_N_DAYS`, or `WHEN_FLAT` cadences constrained by `max_open_trades` and `initial_capital`.
+  - `SINGLE_TRADE`: replays one `AUTO_BUILD` preset, manual `LEGS`, or saved `PAPER_TRADE` forward from its entry snapshot/bar (`_ensure_snapshot_bar` injects the exact requested entry snapshot when needed).
+  - Evaluates bar `i` exits strictly before bar `i` entries in deterministic priority: `EXPIRY_SETTLED` -> missing-price hold -> `EXIT_DTE` -> `PROFIT_TARGET` -> `STOP_LOSS`, recording unclosed positions at window end (`END_OF_DATA`) and surfacing `BACKTEST_ASSUMPTIONS` on every response.
+- **Endpoints (`src/web/backtest_api.py`):** `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop` (zero IBKR/network side effects).
+
 ---
 
 ## 5. Resilience & Error Handling Matrix
 
 | Failure Scenario | Detection Mechanism | System Recovery & UI Behavior |
 | :--- | :--- | :--- |
+| **Overlapping IBKR Request (`Refresh` / `Corridor` / `Ledger MTM`)** | `AnalyzerService.refresh_lock` detects an in-flight `refresh_chain`, `fetch_corridor_quotes`, Gateway `LedgerService.sync_ledger`, `refresh_open_mtm`, or active lock during SSE open. | Raises `RefreshBusyError` (HTTP `409 REFRESH_BUSY`, `Retry-After: 10`), protecting IBKR's 100-line session cap; `#alert-banner` surfaces the active owner so the user retries once finished. |
 | **IBKR Gateway Closed (`ConnectionRefusedError`)** | Caught in `IBKRBrokerClient.ensure_connected()` within `3.0s` timeout. | Returns status `GATEWAY_OFFLINE` reporting dynamic `{IBKR_HOST}:{IBKR_PORT}`. UI loads `data/latest/{TICKER}_latest.csv` with dynamic status badge `OFFLINE CACHE • PORT {IBKR_PORT}`. |
 | **Missing Live Subscription (`Error 10089 / 354`)** | Intercepted in `ib.errorEvent` callback (`_on_error`). | Marks `live_subscription_missing=True`, safely downgrades `reqMarketDataType(3)` (even during page/corridor fetches), emits fallback notice, and continues delayed collection without crashing. |
 | **Outside Market Hours / Unpopulated Primary Ticks** | Page/corridor collector detects `>80%` (chain) or `100%` (corridor) of contracts have empty `bid`/`ask`/`last`. | Automatically switches to configured `fallback_market_data_type` (`4` in `DELAYED`, `2` in `LIVE`) and re-polls so frozen closing prices populate. |

@@ -7,12 +7,12 @@ Coding agents must enforce strict boundaries between the 6 layers in `src/` (enf
     services -> {core, storage, broker, analytics}
     web -> {core, services}            main.py (composition root) -> anything
 
-1. **`src/core/`:** Pure configuration (`config.py`), domain exceptions (`exceptions.py`), and security guards (`security.py`). Imports only `src.core`.
-2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`; plus `ledger_schema.py` execution/position models) and CSV persistence (`csv_repository.py`, `ledger_repository.py`). Must never import `ib_async` or `fastapi`.
-3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged fetching, raw tick parsing, corridor subscriptions, Flex Web Service v3 (`flex.py`), and opt-in scoped ledger sync (`ledger_sync.py`). Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
-4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs. Zero network or disk I/O; may import `src.storage.schema` and `src.storage.ledger_schema` types only.
-5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `ledger.py` `LedgerService`, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
-6. **`src/web/`:** FastAPI routes (`api.py`), exception-to-JSON mapping (`errors.py`), Jinja2 templates, and static assets. Imports only `src.core` and `src.services`.
+1. **`src/core/`:** Pure configuration (`config.py`), domain exceptions (`exceptions.py`), security guards (`security.py`), and NYSE trading calendar (`calendar.py`). Imports only `src.core`.
+2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`, `SpotSource`; plus `ledger_schema.py` execution/position models), snapshot usability (`quality.py`), daily-bar selector (`backtest_store.py`), and CSV/JSON persistence (`csv_repository.py`, `paper_trade_store.py`, `ledger_repository.py`). Must never import `ib_async` or `fastapi`.
+3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged/exact-leg fetching, raw tick parsing, corridor subscriptions, Flex Web Service v3 (`flex.py`), and opt-in scoped ledger sync (`ledger_sync.py`). Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
+4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs (`bsm_fallback.py`, `walls.py`, `anomalies.py`, `term_greeks.py`, `strategies/`, `ledger/`, `backtest/`). Zero network or disk I/O; may import `src.storage.{schema,ledger_schema,quality,backtest_store}` types/pure helpers only.
+5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `ledger.py` `LedgerService`, `paper_trades.py` `PaperTradeService`, `backtest.py`, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
+6. **`src/web/`:** FastAPI routes (`api.py`, `backtest_api.py`), exception-to-JSON mapping (`errors.py`), Jinja2 templates, and static assets. Imports only `src.core` and `src.services`.
 
 ---
 
@@ -88,6 +88,16 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies `LedgerService` status reporting, Flex/Gateway sync coordination, XML/CSV upload bounds/validation, and in-memory live MTM mark caching without disk CSV mutation.
 17. **`tests/integration/test_ledger_api.py`:**
    - Verifies `GET /api/ledger`, `POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`, structured `422` (`CONFIGURATION_ERROR` / `INVALID_REQUEST`), `502` (`FLEX_SERVICE_ERROR`), `503` (`GATEWAY_OFFLINE`), and rendered `#trade-ledger-card` HTML smoke checks.
+18. **`tests/unit/test_calendar.py`:**
+   - Verifies the 2026–2027 NYSE trading calendar (`is_trading_day`, `NYSE_HOLIDAYS`, `NYSE_EARLY_CLOSES`, `session_for`, `et_date`, `trading_days_between`, `next_trading_day`, `fmt_et`) and 15-minute `DATA_DELAY` session cutoffs.
+19. **`tests/unit/test_snapshot_quality.py`, `test_paper_trade_store.py`, `test_backtest_store.py`:**
+   - Verifies `SpotSource` / quote-coverage usability scoring (`quality.py`), atomic `paper_trades.json`, append-only `paper_quotes.jsonl`, immutable `data/tracked/{TICKER}/` writes, and `O(window)` canonical daily-bar + tracked-quote merging (`backtest_store.py`).
+20. **`tests/unit/test_backtest_pricing.py` & `test_backtest_engine.py`:**
+   - Verifies contract-filtered BSM enrichment, chain + tracked fallback leg pricing (`PriceBasis`, `ClosePriceMode`), `TpSlBasis` rules, expiry settlement cutoffs (`$0` closing fees on expired legs), `SYSTEMATIC` cadences, `SINGLE_TRADE` replay, and portfolio metrics.
+21. **`tests/unit/test_analyzer_concurrency.py`, `test_paper_trades_service.py`, `test_backtest_service.py`:**
+   - Verifies `AnalyzerService.refresh_lock` (`RefreshBusyError` on overlapping refreshes/corridor/MTM/SSE), pre-refresh `stop_all_streams()`, `fetch_exact_contracts` / `PaperTradeService` follow-up quoting, and `services/backtest.py` entry listing + `SYSTEMATIC`/`SINGLE_TRADE` orchestration.
+22. **`tests/integration/test_backtest_api.py`:**
+   - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
 ---
 

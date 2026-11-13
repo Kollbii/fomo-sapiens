@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -15,14 +16,19 @@ from src.broker.fetcher import (
     LIVE_OPRA_GENERIC_TICKS,
     PACING_COOLDOWN_SEC,
     PAGE_PACING_CHUNK_SIZE,
-    PAGE_PACING_YIELD_SEC,
+    PAGE_PACING_PAUSE_SEC,
+    ExactContractSpec,
     PagedOptionChainFetcher,
     empty_quote_ratio,
+    empty_real_quote_ratio,
+    has_real_quote,
     paginate_contracts,
 )
 from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import (
     GatewayConnectionError,
+    InvalidTickerError,
+    OptionChainFetchError,
     PacingViolationError,
 )
 from tests.support.aio import noop_sleep, run_coro
@@ -47,7 +53,9 @@ def test_fetcher_cancels_mkt_data_on_exception() -> None:
         Option("NVDA", "20261211", float(130 + i), "C", "SMART", conId=i + 1) for i in range(5)
     ]
 
-    async def _boom_sleep(_sec: float) -> None:
+    async def _boom_sleep(sec: float) -> None:
+        if sec == PAGE_PACING_PAUSE_SEC:
+            return
         raise RuntimeError("simulated poll failure")
 
     fetcher.sleep = _boom_sleep
@@ -263,8 +271,8 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
     tickers, pages = run_coro(fetcher.fetch_pages(contracts))
     assert pages == 1
     assert len(tickers) == len(contracts)
-    # 2 chunks during subscribe + 2 chunks during cancel = 4 pacing yields
-    assert sleeps.count(PAGE_PACING_YIELD_SEC) == 4
+    # 3 chunks during subscribe (idx 0, 20, 40) + 3 chunks during cancel = 6 pacing pauses
+    assert sleeps.count(PAGE_PACING_PAUSE_SEC) == 6
     assert len(fake_ib.cancelled) == len(contracts)
 
     # Now simulate a mid-batch socket drop inside reqMktData / poll loop -> GatewayConnectionError
@@ -286,3 +294,114 @@ def test_fetcher_burst_pacing_yields_and_mid_batch_disconnect_raises_gateway_err
     assert not client2.is_connected
     # Already-subscribed contracts prior to socket failure are still cancelled cleanly
     assert fake_ib2.cancelled == contracts[:2]
+
+
+def test_cancel_paced_cancels_all_contracts_on_cancelled_error() -> None:
+    fake_ib = FakeChainIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    run_coro(client.ensure_connected())
+
+    calls = 0
+
+    async def _cancel_sleep(_sec: float) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise asyncio.CancelledError()
+
+    fetcher = PagedOptionChainFetcher(client, sleep=_cancel_sleep)
+    contracts = [
+        Option("NVDA", "20261211", float(100 + i), "C", "SMART", conId=i + 1)
+        for i in range(PAGE_PACING_CHUNK_SIZE + 5)
+    ]
+    with pytest.raises(asyncio.CancelledError):
+        run_coro(fetcher._cancel_paced(contracts))
+    assert len(fake_ib.cancelled) == len(contracts)
+
+
+def test_fetch_exact_contracts_quotes_dedupes_and_skips_expired() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    live_exp = "2026-12-18"
+    live_ib_exp = "20261218"
+    expired_exp = "2026-11-06"
+
+    def _qualify(*contracts: Any) -> list[Any]:
+        out: list[Any] = []
+        for idx, c in enumerate(contracts, start=1):
+            if c.secType == "STK":
+                c.conId = 4815
+            elif int(getattr(c, "conId", 0) or 0) <= 0:
+                c.conId = 9000 + idx
+            out.append(c)
+        return out
+
+    fake_ib.qualify_handler = _qualify
+    fake_ib.ticker_factory = lambda c, _ticks: (
+        SimpleNamespace(contract=c, bid=139.9, ask=140.1, last=140.0, close=139.5)
+        if c.secType == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=2.40,
+            ask=2.60,
+            last=2.50,
+            close=2.30,
+            volume=50,
+            callOpenInterest=200,
+            putOpenInterest=200,
+            modelGreeks=OptionComputation(
+                tickAttrib=0, impliedVol=0.45, delta=0.32, gamma=0.02, theta=-0.05, vega=0.14
+            ),
+        )
+    )
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
+
+    specs = [
+        ExactContractSpec(option_conid=0, expiry=live_exp, strike=130.0, right="P"),
+        # Duplicate leg with known conId should win deduplication so only 1 option is queried
+        ExactContractSpec(option_conid=7701, expiry=live_exp, strike=130.0, right="P"),
+        ExactContractSpec(option_conid=7702, expiry=live_exp, strike=125.0, right="P"),
+        ExactContractSpec(option_conid=7703, expiry=expired_exp, strike=120.0, right="P"),
+    ]
+    res = run_coro(fetcher.fetch_exact_contracts("NVDA", specs, underlying_conid=4815))
+    assert res.underlying_price == pytest.approx(140.0)
+    assert res.spot_source == "LAST"
+    assert len(res.rows) == 2
+    assert {r.option_conid for r in res.rows} == {7701, 7702}
+    assert {r.expiry for r in res.rows} == {live_exp}
+    assert len(res.missing) == 1
+    assert res.missing[0].expiry == expired_exp
+    assert all(
+        c.lastTradeDateOrContractMonth == live_ib_exp
+        for c in fake_ib.cancelled
+        if c.secType == "OPT"
+    )
+
+    with pytest.raises(InvalidTickerError):
+        run_coro(fetcher.fetch_exact_contracts("../BAD", specs))
+    with pytest.raises(OptionChainFetchError, match="No contracts"):
+        run_coro(fetcher.fetch_exact_contracts("NVDA", []))
+    with pytest.raises(OptionChainFetchError, match="expired"):
+        run_coro(
+            fetcher.fetch_exact_contracts(
+                "NVDA",
+                [ExactContractSpec(option_conid=7703, expiry=expired_exp, strike=120.0, right="P")],
+                4815,
+            )
+        )
+    too_many = [
+        ExactContractSpec(option_conid=1000 + i, expiry=live_exp, strike=100.0 + i, right="C")
+        for i in range(401)
+    ]
+    with pytest.raises(PacingViolationError):
+        run_coro(fetcher.fetch_exact_contracts("NVDA", too_many, underlying_conid=4815))
+
+    # Real-quote helper sanity (recognizes delayedBid/delayedAsk too)
+    assert has_real_quote(SimpleNamespace(delayedBid=1.2, delayedAsk=None, close=1.0))
+    assert not has_real_quote(SimpleNamespace(bid=None, ask=None, last=1.0, close=1.0))
+    assert (
+        empty_real_quote_ratio([SimpleNamespace(close=1.0), SimpleNamespace(bid=1.0, ask=1.2)])
+        == 0.5
+    )

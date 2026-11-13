@@ -76,6 +76,15 @@
   .ledger-timeline-step {
     grid-template-columns: 1fr 1fr;
   }
+  .backtest-config-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .backtest-kpis {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .backtest-tables-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 680px) {
@@ -86,7 +95,13 @@
   .corridor-kpi-strip,
   .strategy-kpi-grid,
   .ledger-kpi-strip,
-  .strategy-sim-bar {
+  .strategy-sim-bar,
+  .backtest-config-grid,
+  .backtest-kpis {
     grid-template-columns: 1fr;
+  }
+  .backtest-field--wide {
+    grid-column: span 1;
+    min-width: 0;
   }
 }

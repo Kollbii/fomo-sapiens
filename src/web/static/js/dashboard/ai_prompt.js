@@ -365,7 +365,7 @@ function buildWallsAiPrompt(data) {
         ? "$" +
           promptNum(wMatch.primary_call_wall.strike, 2) +
           " (" +
-          promptInt(wMatch.primary_call_wall.value) +
+          promptInt(wMatch.primary_call_wall.metric_value) +
           ")"
         : "n/a";
     var pw =
@@ -373,7 +373,7 @@ function buildWallsAiPrompt(data) {
         ? "$" +
           promptNum(wMatch.primary_put_wall.strike, 2) +
           " (" +
-          promptInt(wMatch.primary_put_wall.value) +
+          promptInt(wMatch.primary_put_wall.metric_value) +
           ")"
         : "n/a";
     var atmIv =

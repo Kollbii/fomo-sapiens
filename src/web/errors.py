@@ -5,17 +5,24 @@ Stack traces never reach the browser; every error body carries `error_code` + `m
 
 from __future__ import annotations
 
+import math
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.core.exceptions import (
+    BacktestValidationError,
     ConfigurationError,
+    DuplicatePaperTradeError,
     FlexServiceError,
     GatewayConnectionError,
     InvalidRequestError,
     InvalidTickerError,
     OptionChainFetchError,
     PacingViolationError,
+    PaperTradeCapError,
+    PaperTradeStateError,
+    RefreshBusyError,
     SecurityViolationError,
     SnapshotNotFoundError,
     StorageSchemaError,
@@ -122,4 +129,73 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=403,
             content={"error_code": "SECURITY_VIOLATION", "message": str(exc)},
+        )
+
+    @app.exception_handler(RefreshBusyError)
+    async def _handle_refresh_busy(_req: Request, exc: RefreshBusyError) -> JSONResponse:
+        msg = str(exc)
+        retry_header = str(max(1, math.ceil(exc.retry_after_sec)))
+        return JSONResponse(
+            status_code=409,
+            headers={"Retry-After": retry_header},
+            content={
+                "error_code": "REFRESH_BUSY",
+                "message": msg,
+                "detail": msg,
+                "retry_after_sec": exc.retry_after_sec,
+            },
+        )
+
+    @app.exception_handler(DuplicatePaperTradeError)
+    async def _handle_duplicate_paper_trade(
+        _req: Request,
+        exc: DuplicatePaperTradeError,
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_code": "DUPLICATE_PAPER_TRADE",
+                "message": msg,
+                "detail": msg,
+            },
+        )
+
+    @app.exception_handler(PaperTradeCapError)
+    async def _handle_paper_trade_cap(_req: Request, exc: PaperTradeCapError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_code": "PAPER_TRADE_CAP",
+                "message": msg,
+                "detail": msg,
+            },
+        )
+
+    @app.exception_handler(PaperTradeStateError)
+    async def _handle_paper_trade_state(_req: Request, exc: PaperTradeStateError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error_code": "PAPER_TRADE_STATE",
+                "message": msg,
+                "detail": msg,
+            },
+        )
+
+    @app.exception_handler(BacktestValidationError)
+    async def _handle_backtest_validation(
+        _req: Request,
+        exc: BacktestValidationError,
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error_code": "BACKTEST_VALIDATION_ERROR",
+                "message": msg,
+                "detail": msg,
+            },
         )

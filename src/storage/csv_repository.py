@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from src.core.config import PROJECT_ROOT, StorageSettings
 from src.core.exceptions import SnapshotNotFoundError, StorageSchemaError
 from src.core.security import TickerValidator
+from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     COLUMNS,
     NON_NULLABLE_COLUMNS,
@@ -25,6 +26,7 @@ from src.storage.schema import (
     SNAPSHOT_ID_RE,
     OptionContractRow,
     SnapshotMeta,
+    SpotSource,
     infer_chain_step_and_range,
 )
 
@@ -55,14 +57,23 @@ def _atomic_copy(src: Path, dest: Path) -> None:
     os.replace(tmp, dest)
 
 
-def validate_frame(df: pl.DataFrame, source: str) -> pl.DataFrame:
+def validate_frame(
+    df: pl.DataFrame,
+    source: str,
+    schema: pl.Schema | None = None,
+) -> pl.DataFrame:
     """Reject frames violating the canonical option chain column contract."""
     if df.height == 0:
         raise StorageSchemaError(f"{source}: no data rows")
-    if tuple(df.columns) != COLUMNS:
-        raise StorageSchemaError(f"{source}: columns do not match the {len(COLUMNS)}-column schema")
+    expected_cols = tuple(schema.names()) if schema is not None else COLUMNS
+    if tuple(df.columns) != expected_cols:
+        raise StorageSchemaError(
+            f"{source}: columns do not match the {len(expected_cols)}-column schema"
+        )
+    if schema is not None and df.schema != schema:
+        raise StorageSchemaError(f"{source}: column dtypes do not match expected schema")
     for name in NON_NULLABLE_COLUMNS:
-        if df[name].null_count() > 0:
+        if name in df.columns and df[name].null_count() > 0:
             raise StorageSchemaError(f"{source}: null values in required column '{name}'")
     return df
 
@@ -112,6 +123,7 @@ class CSVRepository:
         range_pct: float | None = None,
         strike_step: float | None = None,
         requested_strike_step: float | None = None,
+        spot_source: SpotSource | None = None,
     ) -> SnapshotMeta:
         """Validate rows and archive them as a new immutable snapshot (never overwrites)."""
         symbol = TickerValidator.validate(ticker)
@@ -143,7 +155,7 @@ class CSVRepository:
             range_pct,
             strike_step,
             requested_strike_step=requested_strike_step,
-        )
+        ).model_copy(update={"spot_source": spot_source})
 
         with self._lock:
             if target.exists():
@@ -224,6 +236,7 @@ class CSVRepository:
                 resolved_step = inf_step
             if resolved_range is None:
                 resolved_range = inf_range
+        quality = measure_quote_quality(df)
         return SnapshotMeta(
             snapshot_id=first["snapshot_id"],
             file_path=self._rel(path),
@@ -236,6 +249,9 @@ class CSVRepository:
             range_pct=resolved_range,
             strike_step=resolved_step,
             requested_strike_step=requested_strike_step,
+            quoted_contract_count=quality.quoted_contract_count,
+            quote_coverage=quality.quote_coverage,
+            prior_close_only_count=quality.prior_close_only_count,
         )
 
     def _write_index(self, tickers: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -264,6 +280,7 @@ class CSVRepository:
                         snap["range_pct"] = meta.range_pct
                         snap["strike_step"] = meta.strike_step
                         snap["requested_strike_step"] = meta.requested_strike_step
+                        snap["spot_source"] = meta.spot_source
                 self._write_index(rebuilt["tickers"])
             return
         existing = [
