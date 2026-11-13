@@ -212,6 +212,29 @@ class LedgerSettings(_StrictModel):
         return stripped
 
 
+class PaperTrackerSettings(_StrictModel):
+    """Paper trade tracker configuration: active cap and leg-quote archive location."""
+
+    max_active_trades: int = Field(default=120, ge=1, le=200)
+    tracked_dir: str = Field(default="data/tracked", min_length=1)
+
+    @field_validator("tracked_dir", mode="before")
+    @classmethod
+    def _strip_tracked_dir(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("tracked_dir must be a non-empty string")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("tracked_dir must not be empty")
+        return stripped
+
+
+def resolve_project_path(value: str) -> Path:
+    """Resolve a configured path (relative paths are relative to `PROJECT_ROOT`)."""
+    path = Path(value)
+    return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
+
+
 class Settings(_StrictModel):
     app: AppSettings = AppSettings()
     ibkr: IBKRSettings = IBKRSettings()
@@ -221,6 +244,25 @@ class Settings(_StrictModel):
     corridor: CorridorSettings = CorridorSettings()
     storage: StorageSettings = StorageSettings()
     ledger: LedgerSettings = Field(default_factory=LedgerSettings)
+    tracker: PaperTrackerSettings = Field(default_factory=PaperTrackerSettings)
+
+    @model_validator(mode="after")
+    def _check_tracked_dir(self) -> Settings:
+        """Ensure `tracker.tracked_dir` sits strictly inside `storage.data_dir`."""
+        tracked = resolve_project_path(self.tracker.tracked_dir)
+        data_dir = resolve_project_path(self.storage.data_dir)
+        snapshots = resolve_project_path(self.storage.snapshots_dir)
+        if tracked == data_dir or not tracked.is_relative_to(data_dir):
+            raise ValueError(
+                f"tracker.tracked_dir must be a folder inside {self.storage.data_dir}/, "
+                f"got {self.tracker.tracked_dir!r}"
+            )
+        if tracked == snapshots or tracked.is_relative_to(snapshots):
+            raise ValueError(
+                f"tracker.tracked_dir must not be {self.storage.snapshots_dir} or inside it, "
+                f"got {self.tracker.tracked_dir!r}"
+            )
+        return self
 
 
 class _EnvOverrides(BaseSettings):

@@ -89,3 +89,7 @@ ledger:
   gateway_include_stock: true       # Include STK fills & positions when Gateway ledger sync runs
   roll_max_gap_hours: 24.0          # Max time gap when pairing close->open option rolls
   ledger_dir: "data/ledger"
+
+tracker:
+  max_active_trades: 120            # Cap on ACTIVE paper trades (1-200)
+  tracked_dir: "data/tracked"       # Inside data/, never inside data/snapshots
