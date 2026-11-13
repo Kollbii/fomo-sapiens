@@ -13,6 +13,7 @@ from ib_async import Option, Stock
 from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import (
     EXACT_PREFETCH_MAX_CONCURRENCY,
+    SPOT_LAST_MID_MAX_DEVIATION,
     ContractDiscoveryService,
     choose_auto_strike_step,
     detect_available_range_pcts,
@@ -21,6 +22,7 @@ from src.broker.contracts import (
     extract_spot,
     match_expirations,
     select_chain,
+    select_spot,
     select_strikes,
 )
 from src.broker.fetcher import (
@@ -549,3 +551,49 @@ def test_prefetch_exact_contracts_runs_bounded_concurrency_in_event_loop() -> No
     assert 2 <= max_active <= EXACT_PREFETCH_MAX_CONCURRENCY
     assert [spec.match.ib_expiry for spec in plan.expiration_specs] == exps
     assert all(spec.exact_strikes_verified for spec in plan.expiration_specs)
+
+
+def test_select_spot_cross_check_and_resolve_spot_with_source() -> None:
+    assert SPOT_LAST_MID_MAX_DEVIATION == 0.02
+    assert select_spot(SimpleNamespace(last=140.0, bid=139.9, ask=140.1, close=138.0)) == (
+        140.0,
+        "LAST",
+    )
+    # Outlier `last` >2% from bid/ask midpoint resolves to `MID`
+    assert select_spot(SimpleNamespace(last=160.0, bid=139.9, ask=140.1, close=138.0)) == (
+        140.0,
+        "MID",
+    )
+    assert select_spot(SimpleNamespace(last=None, bid=139.8, ask=140.2, close=138.0)) == (
+        140.0,
+        "MID",
+    )
+    assert select_spot(SimpleNamespace(last=None, bid=None, ask=None, close=138.5)) == (
+        138.5,
+        "CLOSE",
+    )
+    assert select_spot(SimpleNamespace(last=None, bid=None, ask=None, close=None)) is None
+
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    exps = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in (37, 44, 51, 58)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[135.0, 140.0, 145.0],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, last=160.0, bid=139.9, ask=140.1, close=138.0
+    )
+    settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, settings, clock=lambda: now, sleep=noop_sleep)
+
+    plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert plan.underlying.spot == pytest.approx(140.0)
+    assert plan.underlying.spot_source == "MID"

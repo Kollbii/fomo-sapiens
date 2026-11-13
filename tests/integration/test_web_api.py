@@ -427,7 +427,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261112c"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261113a"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -452,7 +452,9 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".alert-banner.is-fresh" in r_css.text
             assert ".alert-banner-close" in r_css.text
             assert ".chain-add-leg-btn" in r_css.text
-            assert len(sheets) == 9
+            assert ".snap-picker__panel" in r_css.text
+            assert ".panel-card--backtest" in r_css.text
+            assert len(sheets) == 11
 
             # Dashboard ES modules: crawl the import graph from the served entry point.
             r_main = await client.get("/static/js/dashboard/main.js")
@@ -493,8 +495,9 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261112c">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261113a">' in html
             assert html.count('<option value="">Auto (Follow Walls)</option>') == 2
+            assert 'id="collector-control"' not in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
             assert "Port 4001" not in r_js.text
             for js_hook in (
@@ -578,10 +581,14 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'data-panel-target="strategy"' in html
             assert 'data-panel-target="corridor"' in html
             assert 'data-panel-target="trade_ledger"' in html
+            assert 'data-panel-target="backtest"' in html
             assert "panel-toggle-btn" not in html
-            assert html.count('class="panel-toggle-pill') == 7
+            assert html.count('class="panel-toggle-pill') == 8
             assert 'data-panel-id="corridor"' in html
             assert 'data-panel-id="trade_ledger"' in html
+            assert 'data-panel-id="backtest"' in html
+            assert 'id="backtest-card"' in html
+            assert 'id="snapshot-picker"' in html
             assert 'id="wall-corridor-card"' in html
             assert 'id="corridor-refresh-btn"' in html
             assert 'id="corridor-stream-toggle"' in html

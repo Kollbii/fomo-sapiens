@@ -8,11 +8,15 @@ from pydantic import ValidationError
 
 from src.core.config import (
     DEFAULT_YAML_PATH,
+    PROJECT_ROOT,
     LedgerSettings,
+    PaperTrackerSettings,
     Settings,
+    StorageSettings,
     configure_logging,
     get_settings,
     load_settings,
+    resolve_project_path,
 )
 from src.core.exceptions import ConfigurationError
 
@@ -229,3 +233,26 @@ def test_ledger_settings_defaults_env_overrides_and_secret_redaction(tmp_path: P
     bad_env.write_text("LEDGER_ROLL_MAX_GAP_HOURS=0\n", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         load_settings(DEFAULT_YAML_PATH, bad_env)
+
+
+def test_paper_tracker_settings_and_resolve_project_path(tmp_path: Path) -> None:
+    defaults = load_settings(DEFAULT_YAML_PATH, tmp_path / "missing.env")
+    assert defaults.tracker == PaperTrackerSettings(
+        max_active_trades=120, tracked_dir="data/tracked"
+    )
+    assert resolve_project_path("data/tracked") == (PROJECT_ROOT / "data/tracked").resolve()
+    assert resolve_project_path(str(tmp_path)) == tmp_path.resolve()
+
+    with pytest.raises(ValidationError, match=r"tracker\.tracked_dir must be a folder inside"):
+        Settings(tracker=PaperTrackerSettings(tracked_dir="outside/tracked"))
+
+    with pytest.raises(ValidationError, match=r"data/snapshots"):
+        Settings(
+            storage=StorageSettings(),
+            tracker=PaperTrackerSettings(tracked_dir="data/snapshots/sub"),
+        )
+
+    with pytest.raises(ValidationError):
+        PaperTrackerSettings(max_active_trades=0)
+    with pytest.raises(ValidationError):
+        PaperTrackerSettings(max_active_trades=201)

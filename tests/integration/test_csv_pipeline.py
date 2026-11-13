@@ -12,7 +12,7 @@ import pytest
 from src.core.config import StorageSettings
 from src.core.exceptions import InvalidTickerError, SnapshotNotFoundError, StorageSchemaError
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
-from src.storage.schema import COLUMNS, OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
+from src.storage.schema import COLUMNS, OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow, SnapshotMeta
 
 SPOT = 142.65
 WEEKLY_DTES = (37, 43, 50, 58)
@@ -277,3 +277,58 @@ def test_ensure_layout_creates_dirs_idempotently_without_touching_files(tmp_path
     sentinel.write_text("x", encoding="utf-8")
     repo.ensure_layout()
     assert sentinel.read_text(encoding="utf-8") == "x"
+
+
+def test_snapshot_quality_metadata_roundtrip_and_legacy_index_compat(
+    repo: CSVRepository,
+) -> None:
+    rows = make_rows()
+    saved = repo.save_snapshot(
+        "NVDA",
+        rows,
+        range_pct=0.20,
+        strike_step=5.0,
+        spot_source="LAST",
+    )
+    assert saved.spot_source == "LAST"
+    assert saved.quoted_contract_count == 32
+    assert saved.quote_coverage == pytest.approx(1.0)
+    assert saved.prior_close_only_count == 0
+
+    # Rows with prior `close` only (no live/delayed bid/ask) report zero quote coverage
+    ts2 = MARKET_DATE + timedelta(minutes=1)
+    stale_rows = [
+        {
+            **r,
+            "snapshot_id": make_snapshot_id("NVDA", ts2),
+            "bid": None,
+            "ask": None,
+            "last": None,
+            "close": 4.0,
+        }
+        for r in make_rows()
+    ]
+    stale = repo.save_snapshot("NVDA", stale_rows, spot_source="CLOSE")
+    assert stale.spot_source == "CLOSE"
+    assert stale.quoted_contract_count == 0
+    assert stale.quote_coverage == pytest.approx(0.0)
+    assert stale.prior_close_only_count == 32
+
+    # Legacy index entries without quality fields must still parse cleanly
+    raw = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    nvda_entries = raw["tickers"]["NVDA"]["snapshots"]
+    target_entry = next(e for e in nvda_entries if e["snapshot_id"] == saved.snapshot_id)
+    for key in ("spot_source", "quoted_contract_count", "quote_coverage", "prior_close_only_count"):
+        target_entry.pop(key, None)
+    repo.index_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    entries = repo.list_snapshots("NVDA")
+    legacy = next(e for e in entries if e.snapshot_id == saved.snapshot_id)
+    assert isinstance(legacy, SnapshotMeta)
+    assert legacy.spot_source is None
+    assert legacy.quote_coverage is None
+
+    rebuilt = repo.rebuild_index()
+    rebuilt_snaps = rebuilt["tickers"]["NVDA"]["snapshots"]
+    assert len(rebuilt_snaps) == 2
+    assert all(item["quoted_contract_count"] is not None for item in rebuilt_snaps)
