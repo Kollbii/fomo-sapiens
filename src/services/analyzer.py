@@ -6,10 +6,12 @@ it is the only module allowed to do so. It knows nothing about HTTP.
 
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from datetime import UTC
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import polars as pl
 
@@ -35,7 +37,12 @@ from src.broker.corridor import (
 )
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
-from src.core.exceptions import InvalidRequestError, InvalidTickerError, SnapshotNotFoundError
+from src.core.exceptions import (
+    InvalidRequestError,
+    InvalidTickerError,
+    RefreshBusyError,
+    SnapshotNotFoundError,
+)
 from src.core.security import TickerValidator
 from src.services.corridor import (
     CorridorQuoteCache,
@@ -43,6 +50,7 @@ from src.services.corridor import (
     wall_anchors_from_report,
 )
 from src.services.ledger import LedgerService
+from src.services.paper_trades import PaperTradeService
 from src.services.schemas import (
     ChainAnalyticsResponse,
     ChainMetadataPayload,
@@ -61,7 +69,8 @@ from src.services.schemas import (
 )
 from src.storage.csv_repository import CSVRepository
 from src.storage.ledger_repository import LedgerRepository
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, infer_chain_step_and_range
+from src.storage.quality import measure_quote_quality
+from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SpotSource, infer_chain_step_and_range
 
 
 class AnalyzerService:
@@ -79,6 +88,7 @@ class AnalyzerService:
         fetcher: PagedOptionChainFetcher | None = None,
         corridor: CorridorQuoteService | None = None,
         ledger_service: LedgerService | None = None,
+        paper_trades: PaperTradeService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
@@ -91,14 +101,27 @@ class AnalyzerService:
             sleep=self.fetcher.sleep,
             greeks_fallback=make_bsm_greeks_fallback(self.settings.analytics.risk_free_rate),
         )
+        self.refresh_lock = asyncio.Lock()
+        self.refresh_owner: str | None = None
+        self.last_corridor_stop: dict[str, Any] | None = None
         ledger_repo = LedgerRepository(self.settings.ledger.ledger_dir, root=self.repo.root)
         self.ledger = ledger_service or LedgerService(
             settings=self.settings,
             repo=ledger_repo,
             broker_client=self.broker_client,
             sleep=self.fetcher.sleep,
+            corridor_stopper=self._stop_corridor_for_ledger,
+            refresh_acquire=self.acquire_refresh,
+            refresh_release=self.release_refresh,
+            refresh_owner_getter=lambda: self.refresh_owner,
         )
         self.ledger.ensure_layout()
+        self.paper_trades = paper_trades or PaperTradeService(
+            self.settings,
+            self.repo,
+            self.fetcher,
+            clock=self.fetcher.clock,
+        )
         self.validator = TickerValidator(
             watchlist=self.settings.watchlist.hardcoded_tickers,
             allow_custom=self.settings.watchlist.allow_custom_ticker,
@@ -106,10 +129,65 @@ class AnalyzerService:
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
         self.corridor_cache = CorridorQuoteCache()
 
+    @property
+    def tracked_dir(self) -> Path:
+        """Tracked paper-trade quote directory resolved strictly under `repo.root`."""
+        return self.paper_trades.store.tracked_dir
+
+    def _utc_now_iso(self) -> str:
+        dt = self.fetcher.clock()
+        aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+        return aware.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    async def acquire_refresh(self, owner: str, timeout_sec: float = 0.0) -> bool:
+        """Acquire the IBKR 100-line budget lock; waits up to `timeout_sec` when `> 0`."""
+        if not self.refresh_lock.locked():
+            await self.refresh_lock.acquire()
+            self.refresh_owner = owner
+            return True
+        if timeout_sec <= 0.0:
+            return False
+        try:
+            await asyncio.wait_for(self.refresh_lock.acquire(), timeout=timeout_sec)
+        except TimeoutError:
+            return False
+        self.refresh_owner = owner
+        return True
+
+    def release_refresh(self) -> None:
+        """Release the IBKR refresh lock if currently held."""
+        self.refresh_owner = None
+        if self.refresh_lock.locked():
+            self.refresh_lock.release()
+
+    def _busy_error(self) -> RefreshBusyError:
+        holder = self.refresh_owner or "another operation"
+        return RefreshBusyError(
+            f"Another IBKR refresh ({holder}) is currently in progress; retry shortly.",
+            owner=holder,
+            retry_after_sec=10,
+        )
+
+    async def _stop_corridor(self, *, reason: str, ticker: str | None = None) -> int:
+        if self.corridor.active_stream_count <= 0:
+            return 0
+        stopped = await self.corridor.stop_all_streams()
+        self.last_corridor_stop = {
+            "reason": reason,
+            "ticker": ticker,
+            "stopped_subscriptions": stopped,
+            "stopped_at_utc": self._utc_now_iso(),
+        }
+        return stopped
+
+    async def _stop_corridor_for_ledger(self) -> int:
+        return await self._stop_corridor(reason="ledger")
+
     def ensure_layout(self) -> None:
-        """Ensure chain CSV and ledger archive directories exist."""
+        """Ensure chain CSV, ledger archive, and paper-trade directories exist."""
         self.repo.ensure_layout()
         self.ledger.ensure_layout()
+        self.paper_trades.ensure_layout()
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -195,6 +273,10 @@ class AnalyzerService:
         exchange_native_verified: bool | None = None,
         available_strike_steps: list[float] | None = None,
         available_range_pcts: list[float] | None = None,
+        spot_source: SpotSource | None = None,
+        quoted_contract_count: int | None = None,
+        quote_coverage: float | None = None,
+        prior_close_only_count: int | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
         first = enriched.row(0, named=True)
@@ -237,6 +319,20 @@ class AnalyzerService:
             exchange_native_verified if exchange_native_verified is not None else (caps is not None)
         )
 
+        if (
+            quoted_contract_count is None
+            or quote_coverage is None
+            or prior_close_only_count is None
+        ):
+            quality = measure_quote_quality(enriched)
+            resolved_quoted = quality.quoted_contract_count
+            resolved_coverage = quality.quote_coverage
+            resolved_prior_close = quality.prior_close_only_count
+        else:
+            resolved_quoted = quoted_contract_count
+            resolved_coverage = quote_coverage
+            resolved_prior_close = prior_close_only_count
+
         meta = ChainMetadataPayload(
             snapshot_id=str(first["snapshot_id"]),
             snapshot_ts_utc=str(first["snapshot_ts_utc"]),
@@ -258,6 +354,10 @@ class AnalyzerService:
             greeks_source_counts=source_counts,
             source=source,
             notices=list(notices or []),
+            spot_source=spot_source,
+            quoted_contract_count=resolved_quoted,
+            quote_coverage=resolved_coverage,
+            prior_close_only_count=resolved_prior_close,
         )
 
         walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
@@ -305,6 +405,11 @@ class AnalyzerService:
             (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
             None,
         )
+        has_meta_quality = snap_meta is not None and (
+            (snap_meta.quoted_contract_count or 0) > 0
+            or (snap_meta.prior_close_only_count or 0) > 0
+            or snap_meta.contract_count == 0
+        )
         return self.build_analytics_payload(
             df,
             source="CACHE",
@@ -317,6 +422,14 @@ class AnalyzerService:
             exchange_native_verified=(snap_meta.exchange_native_verified if snap_meta else None),
             available_strike_steps=(snap_meta.available_strike_steps if snap_meta else None),
             available_range_pcts=(snap_meta.available_range_pcts if snap_meta else None),
+            spot_source=snap_meta.spot_source if snap_meta else None,
+            quoted_contract_count=(
+                snap_meta.quoted_contract_count if snap_meta and has_meta_quality else None
+            ),
+            quote_coverage=(snap_meta.quote_coverage if snap_meta and has_meta_quality else None),
+            prior_close_only_count=(
+                snap_meta.prior_close_only_count if snap_meta and has_meta_quality else None
+            ),
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -377,7 +490,7 @@ class AnalyzerService:
             raise InvalidRequestError(str(exc)) from exc
 
     async def fetch_corridor_quotes(self, payload: CorridorQuotesRequest) -> CorridorQuoteFrame:
-        _, snap_id, enriched = self._load_enriched_chain(
+        symbol, snap_id, enriched = self._load_enriched_chain(
             payload.ticker,
             payload.snapshot_id,
             apply_corridor_overlay=False,
@@ -389,7 +502,10 @@ class AnalyzerService:
             max_contracts=payload.max_contracts,
             priority_legs=payload.priority_legs,
         )
+        if not await self.acquire_refresh(f"corridor:{symbol}"):
+            raise self._busy_error()
         try:
+            await self._stop_corridor(reason="corridor_snapshot", ticker=symbol)
             return await self.corridor.fetch_corridor_quotes(
                 selection,
                 snapshot_id=snap_id,
@@ -397,6 +513,8 @@ class AnalyzerService:
             )
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
+        finally:
+            self.release_refresh()
 
     async def open_corridor_stream(
         self,
@@ -415,6 +533,8 @@ class AnalyzerService:
         Raising here (before streaming begins) lets the HTTP layer answer `422` / `503`
         instead of opening an SSE response that immediately errors.
         """
+        if self.refresh_lock.locked():
+            raise self._busy_error()
         _, snap_id, enriched = self._load_enriched_chain(
             raw_ticker,
             snapshot_id,
@@ -438,6 +558,13 @@ class AnalyzerService:
 
     async def stop_corridor_streams(self) -> CorridorStopResponse:
         stopped = await self.corridor.stop_all_streams()
+        if stopped > 0:
+            self.last_corridor_stop = {
+                "reason": "manual_stop",
+                "ticker": None,
+                "stopped_subscriptions": stopped,
+                "stopped_at_utc": self._utc_now_iso(),
+            }
         return CorridorStopResponse(
             stopped_subscriptions=stopped,
             active_streams=self.corridor.active_stream_count,
@@ -498,69 +625,92 @@ class AnalyzerService:
 
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
         symbol = self.validate_ticker(req.ticker)
-        fetch_res = await self.fetcher.fetch_option_chain(
-            symbol,
-            range_pct=req.range_pct,
-            strike_step=req.strike_step,
-            dte_min=req.dte_min,
-            dte_max=req.dte_max,
-        )
-        raw_df = pl.DataFrame(
-            [r.model_dump() for r in fetch_res.rows],
-            schema=OPTION_CHAIN_POLARS_SCHEMA,
-        )
-        enriched_df = BSMFallbackEngine.enrich_missing_greeks(
-            raw_df, risk_free_rate=self.settings.analytics.risk_free_rate
-        )
-        inferred_step, _ = infer_chain_step_and_range(enriched_df)
-        plan_step = fetch_res.plan.strikes.effective_step
-        actual_step = (
-            inferred_step
-            if (inferred_step is not None and inferred_step > plan_step + 1e-6)
-            else plan_step
-        )
-        req_step = fetch_res.plan.strikes.requested_step
-        notices = list(fetch_res.notices)
-        if actual_step > plan_step + 1e-6:
-            notices.append(
-                f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."
+        if not await self.acquire_refresh(f"refresh:{symbol}"):
+            raise self._busy_error()
+        try:
+            notices: list[str] = []
+            stopped_lines = await self._stop_corridor(reason="refresh_chain", ticker=symbol)
+            if stopped_lines > 0:
+                notices.append(
+                    f"Stopped {stopped_lines} active Wall Corridor quote stream(s) "
+                    "before chain refresh to stay within IBKR's 100-line ceiling."
+                )
+            fetch_res = await self.fetcher.fetch_option_chain(
+                symbol,
+                range_pct=req.range_pct,
+                strike_step=req.strike_step,
+                dte_min=req.dte_min,
+                dte_max=req.dte_max,
             )
-        plan = fetch_res.plan
-        avail_steps = (
-            list(plan.available_strike_steps)
-            if plan.available_strike_steps
-            else list(self.settings.options_chain.allowed_strike_steps)
-        )
-        avail_ranges = (
-            list(plan.available_range_pcts)
-            if plan.available_range_pcts
-            else list(self.settings.options_chain.allowed_range_pcts)
-        )
-        validated_count = (
-            int(plan.exchange_validated_strike_count)
-            if plan.exchange_validated_strike_count > 0
-            else len({float(r.strike) for r in fetch_res.rows})
-        )
-        self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
-        self.repo.save_snapshot(
-            symbol,
-            enriched_df.to_dicts(),
-            range_pct=plan.range_pct,
-            strike_step=actual_step,
-            requested_strike_step=req_step,
-        )
-        return self.build_analytics_payload(
-            enriched_df,
-            source="LIVE_REFRESH",
-            notices=notices,
-            range_pct=plan.range_pct,
-            strike_step=actual_step,
-            requested_strike_step=req_step,
-            exchange_validated_strike_count=validated_count,
-            exchange_native_verified=bool(plan.exchange_native_verified),
-            available_strike_steps=avail_steps,
-            available_range_pcts=avail_ranges,
-        )
+            raw_df = pl.DataFrame(
+                [r.model_dump() for r in fetch_res.rows],
+                schema=OPTION_CHAIN_POLARS_SCHEMA,
+            )
+            enriched_df = BSMFallbackEngine.enrich_missing_greeks(
+                raw_df, risk_free_rate=self.settings.analytics.risk_free_rate
+            )
+            inferred_step, _ = infer_chain_step_and_range(enriched_df)
+            plan = fetch_res.plan
+            plan_step = plan.strikes.effective_step
+            actual_step = (
+                inferred_step
+                if (inferred_step is not None and inferred_step > plan_step + 1e-6)
+                else plan_step
+            )
+            req_step = plan.strikes.requested_step
+            notices.extend(fetch_res.notices)
+            if actual_step > plan_step + 1e-6:
+                notices.append(
+                    f"IBKR strikes for {symbol} spaced at ${actual_step:g} "
+                    f"(requested ${req_step:g})."
+                )
+            avail_steps = (
+                list(plan.available_strike_steps)
+                if plan.available_strike_steps
+                else list(self.settings.options_chain.allowed_strike_steps)
+            )
+            avail_ranges = (
+                list(plan.available_range_pcts)
+                if plan.available_range_pcts
+                else list(self.settings.options_chain.allowed_range_pcts)
+            )
+            validated_count = (
+                int(plan.exchange_validated_strike_count)
+                if plan.exchange_validated_strike_count > 0
+                else len({float(r.strike) for r in fetch_res.rows})
+            )
+            self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
+            meta = self.repo.save_snapshot(
+                symbol,
+                enriched_df.to_dicts(),
+                range_pct=plan.range_pct,
+                strike_step=actual_step,
+                requested_strike_step=req_step,
+                spot_source=plan.underlying.spot_source,
+            )
+            _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
+                symbol,
+                underlying_conid=plan.underlying.conid,
+            )
+            notices.extend(quote_notices)
+            return self.build_analytics_payload(
+                enriched_df,
+                source="LIVE_REFRESH",
+                notices=notices,
+                range_pct=plan.range_pct,
+                strike_step=actual_step,
+                requested_strike_step=req_step,
+                exchange_validated_strike_count=validated_count,
+                exchange_native_verified=bool(plan.exchange_native_verified),
+                available_strike_steps=avail_steps,
+                available_range_pcts=avail_ranges,
+                spot_source=meta.spot_source,
+                quoted_contract_count=meta.quoted_contract_count,
+                quote_coverage=meta.quote_coverage,
+                prior_close_only_count=meta.prior_close_only_count,
+            )
+        finally:
+            self.release_refresh()
 
     def get_ledger_dashboard(
         self,
@@ -587,7 +737,18 @@ class AnalyzerService:
         include_gateway: bool | None = None,
     ) -> LedgerSyncResponse:
         """Synchronize the trade ledger via Flex Web Service and/or Gateway."""
-        return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+        if getattr(self.ledger, "_refresh_acquire", None) is not None:
+            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+        run_gateway = self.settings.ledger.gateway_sync_enabled and include_gateway is not False
+        if not run_gateway:
+            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+        if not await self.acquire_refresh("ledger:sync"):
+            raise self._busy_error()
+        try:
+            await self._stop_corridor(reason="ledger_sync")
+            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+        finally:
+            self.release_refresh()
 
     def import_ledger_file(self, filename: str, raw_bytes: bytes) -> LedgerImportResponse:
         """Import a manual IBKR Flex XML or Activity CSV file into the trade ledger."""
@@ -595,4 +756,12 @@ class AnalyzerService:
 
     async def refresh_open_ledger_mtm(self) -> LedgerMTMRefreshResponse:
         """Refresh live mark-to-market quotes for open ledger positions."""
-        return await self.ledger.refresh_open_mtm()
+        if getattr(self.ledger, "_refresh_acquire", None) is not None:
+            return await self.ledger.refresh_open_mtm()
+        if not await self.acquire_refresh("ledger:mtm"):
+            raise self._busy_error()
+        try:
+            await self._stop_corridor(reason="ledger_mtm")
+            return await self.ledger.refresh_open_mtm()
+        finally:
+            self.release_refresh()
