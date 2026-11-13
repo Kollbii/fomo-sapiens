@@ -48,6 +48,12 @@ import {
   stopCorridorStream,
   syncCorridorFromChain,
 } from "./corridor.js";
+import {
+  backtestOnSnapshotsLoaded,
+} from "./backtest.js";
+import {
+  loadPaperTrades,
+} from "./backtest_paper.js";
 
 // ------------------------------------------------------------------ Network Requests
 export async function apiJson(url, options) {
@@ -143,9 +149,11 @@ async function fetchSnapshots(ticker) {
   var res = await apiJson("/api/snapshots/" + encodeURIComponent(ticker));
   if (res.ok && res.body) {
     renderSnapshotSelect(res.body);
+    backtestOnSnapshotsLoaded(ticker);
     return;
   }
   renderSnapshotSelect({ snapshots: [] });
+  backtestOnSnapshotsLoaded(ticker);
 }
 
 export async function loadChain(ticker, snapshotId) {
@@ -360,6 +368,7 @@ export async function refreshFromIBKR() {
       updateExportLink();
       await fetchSnapshots(state.ticker);
       await fetchStatus();
+      loadPaperTrades();
       syncControlsFromMeta(res.body.meta, { fromRefresh: true });
       renderChainBadges(res.body.meta);
       renderKpis(res.body);

@@ -35,6 +35,9 @@ import {
 import {
   initChartResizeHandling,
 } from "./grid_layout.js";
+import {
+  initBacktestPanel,
+} from "./backtest.js";
 
 // ------------------------------------------------------------------ Init
 function init() {
@@ -52,6 +55,7 @@ function init() {
   fetchStatus();
   loadChain(state.ticker, "");
   loadLedger();
+  initBacktestPanel();
 }
 
 if (document.readyState === "loading") {

@@ -171,11 +171,13 @@ export function initChartResizeHandling() {
           var minGuard =
             key === "strategy-lab-card"
               ? 530
-              : key === "trade-ledger-card"
-                ? 500
-                : key === "wall-corridor-card"
-                  ? 460
-                  : 0;
+              : key === "backtest-card"
+                ? 540
+                : key === "trade-ledger-card"
+                  ? 500
+                  : key === "wall-corridor-card"
+                    ? 460
+                    : 0;
           if (restoredH >= minGuard) {
             card.style.height = restoredH + "px";
           }
@@ -207,7 +209,7 @@ export function initChartResizeHandling() {
           var curHeight = Math.round(card.getBoundingClientRect().height) || 410;
           card.style.width = "";
           card.style.maxWidth = "";
-          if (key === "strategy-lab-card") {
+          if (key === "strategy-lab-card" || key === "backtest-card") {
             card.style.height = "";
             savedLayout[key] = { span: nextSpan };
           } else {

@@ -21,6 +21,7 @@ from src.services.analyzer import AnalyzerService
 from src.services.ledger import LedgerService
 from src.storage.csv_repository import CSVRepository
 from src.web.api import get_web_service, router
+from src.web.backtest_api import backtest_router
 from src.web.errors import register_exception_handlers
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ def create_app(
 
     register_exception_handlers(application)
     application.include_router(router)
+    application.include_router(backtest_router)
 
     @application.get("/", response_class=HTMLResponse)
     async def index(

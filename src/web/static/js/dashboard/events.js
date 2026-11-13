@@ -72,6 +72,13 @@ import {
 import {
   copyWallsAiPrompt,
 } from "./ai_prompt.js";
+import {
+  wireSnapshotPicker,
+} from "./snapshots.js";
+import {
+  bindBacktestEvents,
+  rerenderBacktestChartOnTheme,
+} from "./backtest.js";
 
 // ------------------------------------------------------------------ Event Bindings
 export function bindEvents() {
@@ -91,8 +98,11 @@ export function bindEvents() {
       if (state.ledgerData && state.ledgerData.report && isPanelVisible("trade_ledger")) {
         renderLedgerChart(state.ledgerData.report, themeVars());
       }
+      rerenderBacktestChartOnTheme();
     });
   }
+  wireSnapshotPicker();
+  bindBacktestEvents();
 
   if (dom.watchlistPills) {
     dom.watchlistPills.addEventListener("click", function (ev) {
