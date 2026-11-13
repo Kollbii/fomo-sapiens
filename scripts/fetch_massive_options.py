@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import json
 import os
 import queue
@@ -78,6 +79,7 @@ COLUMNS: tuple[str, ...] = (
 US_EASTERN = ZoneInfo("America/New_York")
 DEFAULT_BASE_URL = "https://api.massive.com"
 _RETRY_BACKOFF_SEC = 62.0
+_CACHE_FLUSH_INTERVAL = 10
 _LOG_LOCK = threading.Lock()
 
 
@@ -560,6 +562,51 @@ def _tmp_path(target: Path) -> Path:
     return target.with_name(f".{target.name}.{os.getpid()}.{threading.get_ident()}.tmp")
 
 
+def _is_transient_replace_error(exc: OSError) -> bool:
+    winerr = getattr(exc, "winerror", None)
+    return (
+        isinstance(exc, PermissionError)
+        or winerr in {5, 32}
+        or exc.errno
+        in {
+            errno.EACCES,
+            errno.EBUSY,
+            errno.EPERM,
+        }
+    )
+
+
+def _atomic_replace(
+    src: Path,
+    dst: Path,
+    *,
+    max_attempts: int = 8,
+    initial_delay_sec: float = 0.05,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Replace `dst` with `src`, retrying transient Windows AV/indexer handle locks."""
+    for attempt in range(max_attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if not _is_transient_replace_error(exc) or attempt + 1 >= max_attempts:
+                src.unlink(missing_ok=True)
+                raise
+            delay = min(initial_delay_sec * (2**attempt), 0.5)
+            sleep(delay)
+
+
+def _atomic_write_text(target: Path, content: str) -> None:
+    tmp = _tmp_path(target)
+    try:
+        tmp.write_text(content, encoding="utf-8")
+        _atomic_replace(tmp, target)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 @contextmanager
 def _file_lock(lock_path: Path, *, timeout_sec: float = 60.0) -> Iterator[None]:
     """Cross-process advisory file lock for metadata JSON / snapshot CSV writes."""
@@ -657,9 +704,7 @@ def _update_snapshot_index(
         tickers_map[ticker] = entry
         index["updated_at_utc"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-        tmp = _tmp_path(index_path)
-        tmp.write_text(json.dumps(index, indent=2), encoding="utf-8")
-        os.replace(tmp, index_path)
+        _atomic_write_text(index_path, json.dumps(index, indent=2))
 
 
 def _cache_path_for(output_base: Path, ticker: str) -> Path:
@@ -696,10 +741,8 @@ def _save_bar_cache(
                     merged[k] = contracts[k]
         else:
             merged = contracts
-        tmp = _tmp_path(cache_path)
         payload = {"version": 1, "ticker": ticker, "contracts": merged}
-        tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-        os.replace(tmp, cache_path)
+        _atomic_write_text(cache_path, json.dumps(payload, separators=(",", ":")))
 
 
 def _bars_from_cache_entry(
@@ -889,11 +932,15 @@ def _write_day_snapshot(
             key=lambda r: (str(r["expiry"]), float(r["strike"]), str(r["right"])),
         )
         tmp = _tmp_path(out_file)
-        with tmp.open("w", encoding="utf-8", newline="") as fh:
-            writer = csv.DictWriter(fh, fieldnames=COLUMNS)
-            writer.writeheader()
-            writer.writerows(rows_sorted)
-        os.replace(tmp, out_file)
+        try:
+            with tmp.open("w", encoding="utf-8", newline="") as fh:
+                writer = csv.DictWriter(fh, fieldnames=COLUMNS)
+                writer.writeheader()
+                writer.writerows(rows_sorted)
+            _atomic_replace(tmp, out_file)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
 
     _update_snapshot_index(
         out_base,
@@ -973,123 +1020,6 @@ def _fetch_bars_with_pool(
     results_q: queue.Queue[tuple[dict[str, Any], dict[str, tuple[float, int]], bool]] = (
         queue.Queue()
     )
-    num_workers = min(key_pool.size(), len(work_items))
-
-    def _worker() -> None:
-        while not key_pool.is_stopped():
-            try:
-                contract, cached_bars, fetch_from = work_q.get_nowait()
-            except queue.Empty:
-                return
-            c_ticker = str(contract["ticker"])
-            new_bars = fetch_option_daily_bars(
-                base_url,
-                c_ticker,
-                fetch_from,
-                bars_end_date,
-                key_pool,
-                delay_sec=delay_sec,
-                debug=debug,
-            )
-            merged_bars = {**cached_bars, **new_bars} if cached_bars else new_bars
-            results_q.put((contract, merged_bars, bool(cached_bars)))
-
-    executor = ThreadPoolExecutor(max_workers=num_workers, thread_name_prefix="massive-key")
-    futures: list[Future[None]] = []
-    try:
-        futures = [executor.submit(_worker) for _ in range(num_workers)]
-        pending = len(work_items)
-        while pending > 0:
-            try:
-                contract, merged_bars, was_tail = results_q.get(timeout=0.2)
-            except queue.Empty:
-                for fut in futures:
-                    if fut.done():
-                        exc = fut.exception()
-                        if exc is not None:
-                            key_pool.stop()
-                            raise exc from None
-                if all(f.done() for f in futures) and results_q.empty():
-                    break
-                continue
-            on_result(contract, merged_bars, was_tail)
-            pending -= 1
-        # Surface any unexpected worker exceptions even if all expected items finished.
-        wait(futures, return_when=FIRST_COMPLETED)
-        for fut in futures:
-            if fut.done():
-                exc = fut.exception()
-                if exc is not None:
-                    raise exc
-    except BaseException:
-        key_pool.stop()
-        executor.shutdown(wait=False, cancel_futures=True)
-        raise
-    else:
-        executor.shutdown(wait=True)
-
-
-def _parse_expiry_filter(raw_expiries: Sequence[str] | None) -> set[str]:
-    selected: set[str] = set()
-    for item in raw_expiries or ():
-        for part in item.split(","):
-            clean = part.strip()
-            if clean:
-                date.fromisoformat(clean)
-                selected.add(clean)
-    return selected
-
-
-def _select_shard(
-    contracts: list[dict[str, Any]],
-    shard_index: int,
-    shard_count: int,
-) -> list[dict[str, Any]]:
-    """Deterministically partition `contracts` into `shard_count` disjoint slices."""
-    if shard_count < 1:
-        raise ValueError("--shard-count must be >= 1.")
-    if shard_index < 0 or shard_index >= shard_count:
-        raise ValueError(f"--shard-index must be in [0, {shard_count - 1}].")
-    if shard_count == 1:
-        return list(contracts)
-    return [c for idx, c in enumerate(contracts) if idx % shard_count == shard_index]
-
-
-def _order_contracts_deterministically(contracts: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Sort reverse by expiry (earliest flush first) with deterministic tie-breaking."""
-    tie_sorted = sorted(
-        contracts,
-        key=lambda c: (
-            float(c.get("strike_price", 0.0)),
-            str(c.get("contract_type", "")),
-            str(c.get("ticker", "")),
-        ),
-    )
-    return sorted(
-        tie_sorted,
-        key=lambda c: str(c.get("expiration_date", "")),
-        reverse=True,
-    )
-
-
-def _fetch_bars_with_pool(
-    work_items: Sequence[tuple[dict[str, Any], dict[str, tuple[float, int]], str]],
-    *,
-    base_url: str,
-    bars_end_date: str,
-    key_pool: KeyPool,
-    delay_sec: float,
-    debug: bool,
-    on_result: Callable[[dict[str, Any], dict[str, tuple[float, int]], bool], None],
-) -> None:
-    """Execute uncached/tail option bar fetches across `key_pool.size()` worker threads."""
-    if not work_items:
-        return
-    work_q: queue.Queue[tuple[dict[str, Any], dict[str, tuple[float, int]], str]] = queue.Queue()
-    for item in work_items:
-        work_q.put(item)
-
-    results_q: queue.Queue[tuple[dict[str, Any], dict[str, tuple[float, int]], bool]] = queue.Queue()
     num_workers = min(key_pool.size(), len(work_items))
 
     def _worker() -> None:
@@ -1512,6 +1442,13 @@ def main() -> None:
     unchanged_days = 0
     total_contracts = len(contracts_to_process)
     progress_idx = 0
+    dirty_cache_keys: set[str] = set()
+
+    def _flush_bar_cache() -> None:
+        if not dirty_cache_keys:
+            return
+        _save_bar_cache(cache_path, ticker, bar_cache, updated_keys=set(dirty_cache_keys))
+        dirty_cache_keys.clear()
 
     def _flush_ready_days() -> None:
         nonlocal written, merged_days, unchanged_days
@@ -1581,7 +1518,9 @@ def main() -> None:
                 "to": bars_end_date,
                 "bars": {d: [round(px, 4), vol] for d, (px, vol) in bars.items()},
             }
-            _save_bar_cache(cache_path, ticker, bar_cache, updated_keys={c_ticker})
+            dirty_cache_keys.add(c_ticker)
+            if len(dirty_cache_keys) >= _CACHE_FLUSH_INTERVAL:
+                _flush_bar_cache()
             suffix = " (tail extended)" if was_tail else ""
             _log(
                 f"    [{progress_idx}/{total_contracts}] {c_ticker} -> "
@@ -1642,6 +1581,10 @@ def main() -> None:
             on_result=lambda c, b, tail: _record_contract(c, b, from_cache=False, was_tail=tail),
         )
     except KeyboardInterrupt:
+        try:
+            _flush_bar_cache()
+        except OSError as exc:
+            _log(f"\n[WARN] Failed to flush remaining bar cache: {exc}", err=True)
         _log(
             f"\n[INTERRUPTED] Cached {len(bar_cache)} contract(s) in {cache_path}; "
             f"{written} new + {merged_days} merged day CSV(s) already saved. "
@@ -1649,6 +1592,8 @@ def main() -> None:
             err=True,
         )
         sys.exit(130)
+    finally:
+        _flush_bar_cache()
 
     if kept_days:
         print(f"    Skipped {kept_days} existing day CSV(s) (--skip-existing).")

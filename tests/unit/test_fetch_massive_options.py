@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import sys
 import threading
 from email.message import Message
 from io import BytesIO
@@ -292,3 +294,117 @@ def test_fetch_bars_with_pool_distributes_across_4_keys_and_merges_csvs(
     assert appended == 8 and updated == 0
     idx_data = json.loads((tmp_path / "metadata" / "snapshot_index.json").read_text("utf-8"))
     assert idx_data["tickers"]["NVDA"]["snapshots"][0]["contract_count"] == 8
+
+
+def test_atomic_replace_retries_transient_permission_error_and_cleans_tmp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    src = tmp_path / ".cache.tmp"
+    dst = tmp_path / ".cache.json"
+    src.write_text('{"ok":true}', encoding="utf-8")
+
+    real_replace = os.replace
+    attempts = [0]
+    sleeps: list[float] = []
+
+    def flaky_replace(s: Path | str, d: Path | str) -> None:
+        attempts[0] += 1
+        if attempts[0] <= 3:
+            raise PermissionError(13, "Access is denied")
+        real_replace(s, d)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    fmo._atomic_replace(src, dst, max_attempts=5, initial_delay_sec=0.05, sleep=sleeps.append)
+
+    assert attempts[0] == 4
+    assert sleeps == [0.05, 0.1, 0.2]
+    assert dst.read_text(encoding="utf-8") == '{"ok":true}'
+    assert not src.exists()
+
+    # When retries exhaust, PermissionError propagates and stale tmp file is unlinked
+    src2 = tmp_path / ".cache2.tmp"
+    src2.write_text("stale", encoding="utf-8")
+
+    def always_fail(s: Path | str, d: Path | str) -> None:
+        del s, d
+        raise PermissionError(13, "Locked")
+
+    monkeypatch.setattr(os, "replace", always_fail)
+    with pytest.raises(PermissionError):
+        fmo._atomic_replace(src2, dst, max_attempts=3, initial_delay_sec=0.05, sleep=lambda _: None)
+    assert not src2.exists()
+
+
+def test_main_batches_bar_cache_flushes_and_flushes_in_finally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    contracts: list[dict[str, Any]] = [
+        {
+            "ticker": f"O:NVDA261120C{100 + i * 5:05d}000",
+            "expiration_date": "2026-11-20",
+            "strike_price": float(100 + i * 5),
+            "contract_type": "call",
+        }
+        for i in range(13)
+    ]
+
+    monkeypatch.setattr(
+        fmo,
+        "fetch_stock_daily_bars",
+        lambda *a, **kw: {"2026-10-15": 130.0},
+    )
+    monkeypatch.setattr(
+        fmo,
+        "fetch_contracts_for_window",
+        lambda *a, **kw: contracts,
+    )
+    monkeypatch.setattr(
+        fmo,
+        "fetch_option_daily_bars",
+        lambda *a, **kw: {"2026-10-15": (5.0, 10)},
+    )
+
+    save_calls: list[int] = []
+    real_save = fmo._save_bar_cache
+
+    def tracked_save(
+        cache_path: Path,
+        ticker: str,
+        cache_dict: dict[str, dict[str, Any]],
+        *,
+        updated_keys: set[str] | None = None,
+    ) -> None:
+        save_calls.append(len(updated_keys or ()))
+        real_save(cache_path, ticker, cache_dict, updated_keys=updated_keys)
+
+    monkeypatch.setattr(fmo, "_save_bar_cache", tracked_save)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "fetch_massive_options.py",
+            "--ticker",
+            "NVDA",
+            "--date",
+            "2026-10-15",
+            "--spot",
+            "130.0",
+            "--no-until-expiry",
+            "--api-key",
+            "k1,k2",
+            "--delay-sec",
+            "0",
+            "--range-pct",
+            "0.5",
+            "--output-dir",
+            str(tmp_path / "snapshots"),
+        ],
+    )
+
+    fmo.main()
+    # 13 contracts -> 1 flush at batch size 10 + 1 final flush for remaining 3
+    assert save_calls == [10, 3]
+    cache_path = fmo._cache_path_for(tmp_path / "snapshots", "NVDA")
+    assert len(fmo._load_bar_cache(cache_path)) == 13
