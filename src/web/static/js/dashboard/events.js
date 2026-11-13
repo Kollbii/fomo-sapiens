@@ -10,6 +10,8 @@ import {
 import {
   clearAlertBanner,
   currentTheme,
+  isStrategyAutoPopulateEnabled,
+  syncAutoFollowOptionLabels,
   themeVars,
   updateThemeToggleLabel,
   writePref,
@@ -58,6 +60,16 @@ import {
   refreshFromIBKR,
 } from "./network.js";
 import {
+  importLedgerFile,
+  loadLedger,
+  refreshOpenLedgerMtm,
+  renderLedgerChart,
+  saveLedgerPreferences,
+  syncLedgerControlStates,
+  syncLedgerFromUI,
+  toggleCampaignExpand,
+} from "./ledger.js";
+import {
   copyWallsAiPrompt,
 } from "./ai_prompt.js";
 
@@ -75,6 +87,9 @@ export function bindEvents() {
       updateThemeToggleLabel();
       if (state.chainData) {
         renderAllCharts(state.chainData);
+      }
+      if (state.ledgerData && state.ledgerData.report && isPanelVisible("trade_ledger")) {
+        renderLedgerChart(state.ledgerData.report, themeVars());
       }
     });
   }
@@ -163,7 +178,7 @@ export function bindEvents() {
     });
   }
 
-  function onWallsControlChange() {
+  function onWallsControlChange(ev) {
     if (dom.wallsViewSelect) writePref("ibkr_walls_view", dom.wallsViewSelect.value);
     if (dom.wallsMetricSelect) writePref("ibkr_walls_metric", dom.wallsMetricSelect.value);
     if (dom.wallsSplitDte) writePref("ibkr_walls_split_dte", dom.wallsSplitDte.checked);
@@ -173,6 +188,23 @@ export function bindEvents() {
     syncWallsSplitCheckboxState();
     if (state.chainData && isPanelVisible("walls")) {
       renderWallsChart(state.chainData, themeVars());
+    }
+    if (ev && ev.target === dom.wallsDteSelect && state.chainData) {
+      syncAutoFollowOptionLabels(state.chainData);
+      if (dom.corridorExpirySelect && !dom.corridorExpirySelect.value) {
+        if (state.corridorStreaming || state.corridorStreamSource) {
+          stopCorridorStream({ silent: true });
+        }
+        applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+      }
+      if (
+        dom.strategyExpirySelect &&
+        !dom.strategyExpirySelect.value &&
+        state.strategyKind !== "CUSTOM" &&
+        (isStrategyAutoPopulateEnabled() || Boolean(state.strategyEvaluation))
+      ) {
+        autoBuildStrategy(state.strategyKind, { silent: true });
+      }
     }
   }
 
@@ -341,6 +373,15 @@ export function bindEvents() {
     });
   }
 
+  if (dom.strategyExpirySelect) {
+    dom.strategyExpirySelect.addEventListener("change", function () {
+      if (!state.chainData) return;
+      if (state.strategyKind !== "CUSTOM" || !state.strategyLegs.length) {
+        autoBuildStrategy(state.strategyKind, { silent: true });
+      }
+    });
+  }
+
   if (dom.strategyAutoPopulate) {
     dom.strategyAutoPopulate.addEventListener("change", function () {
       writePref(
@@ -425,6 +466,112 @@ export function bindEvents() {
         (state.corridorStreaming || state.corridorFrame.source !== "CACHED_PREVIEW")
       ) {
         evaluateStrategyRequest({ silent: true });
+      }
+    });
+  }
+
+  // Trade Ledger bindings
+  if (dom.ledgerWindowGroup) {
+    dom.ledgerWindowGroup.addEventListener("click", function (ev) {
+      var btn =
+        ev.target && ev.target.closest ? ev.target.closest("[data-ledger-window]") : null;
+      if (!btn) return;
+      var win = btn.getAttribute("data-ledger-window");
+      if (!win || win === state.ledgerWindow) return;
+      state.ledgerWindow = win;
+      saveLedgerPreferences();
+      syncLedgerControlStates(state.ledgerData ? state.ledgerData.report : null);
+      loadLedger();
+    });
+  }
+
+  if (dom.ledgerViewGroup) {
+    dom.ledgerViewGroup.addEventListener("click", function (ev) {
+      var btn =
+        ev.target && ev.target.closest ? ev.target.closest("[data-ledger-view]") : null;
+      if (!btn) return;
+      var viewVal = btn.getAttribute("data-ledger-view");
+      if (!viewVal || viewVal === state.ledgerView) return;
+      state.ledgerView = viewVal;
+      saveLedgerPreferences();
+      syncLedgerControlStates(state.ledgerData ? state.ledgerData.report : null);
+      loadLedger();
+    });
+  }
+
+  if (dom.ledgerGroupGroup) {
+    dom.ledgerGroupGroup.addEventListener("click", function (ev) {
+      if (state.ledgerView === "open_mtm") return;
+      var btn =
+        ev.target && ev.target.closest ? ev.target.closest("[data-ledger-group]") : null;
+      if (!btn || btn.disabled) return;
+      var grp = btn.getAttribute("data-ledger-group");
+      if (!grp || grp === state.ledgerGroupBy) return;
+      state.ledgerGroupBy = grp;
+      saveLedgerPreferences();
+      syncLedgerControlStates(state.ledgerData ? state.ledgerData.report : null);
+      loadLedger();
+    });
+  }
+
+  if (dom.ledgerStockGainToggle) {
+    dom.ledgerStockGainToggle.addEventListener("change", function () {
+      state.ledgerIncludeStockGain = Boolean(dom.ledgerStockGainToggle.checked);
+      saveLedgerPreferences();
+      loadLedger();
+    });
+  }
+
+  if (dom.ledgerTickerFilter) {
+    dom.ledgerTickerFilter.addEventListener("change", function () {
+      state.ledgerTicker = String(dom.ledgerTickerFilter.value || "ALL").toUpperCase();
+      saveLedgerPreferences();
+      loadLedger();
+    });
+  }
+
+  if (dom.ledgerSyncMode) {
+    dom.ledgerSyncMode.addEventListener("change", function () {
+      state.ledgerSyncMode = String(dom.ledgerSyncMode.value || "auto");
+      saveLedgerPreferences();
+    });
+  }
+
+  if (dom.ledgerSyncBtn) {
+    dom.ledgerSyncBtn.addEventListener("click", syncLedgerFromUI);
+  }
+
+  if (dom.ledgerImportBtn && dom.ledgerImportFile) {
+    dom.ledgerImportBtn.addEventListener("click", function () {
+      dom.ledgerImportFile.click();
+    });
+    dom.ledgerImportFile.addEventListener("change", function () {
+      var files = dom.ledgerImportFile.files;
+      if (files && files[0]) {
+        importLedgerFile(files[0]);
+      }
+    });
+  }
+
+  if (dom.ledgerMtmBtn) {
+    dom.ledgerMtmBtn.addEventListener("click", refreshOpenLedgerMtm);
+  }
+
+  if (dom.ledgerTableBody) {
+    dom.ledgerTableBody.addEventListener("click", function (ev) {
+      var toggleBtn =
+        ev.target && ev.target.closest ? ev.target.closest("[data-campaign-toggle]") : null;
+      if (toggleBtn && !toggleBtn.disabled) {
+        ev.stopPropagation();
+        toggleCampaignExpand(toggleBtn.getAttribute("data-campaign-toggle"));
+        return;
+      }
+      var row = ev.target && ev.target.closest ? ev.target.closest("[data-campaign-row]") : null;
+      if (row) {
+        var btn = row.querySelector("[data-campaign-toggle]");
+        if (btn && !btn.disabled) {
+          toggleCampaignExpand(row.getAttribute("data-campaign-row"));
+        }
       }
     });
   }

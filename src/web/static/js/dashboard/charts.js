@@ -5,12 +5,14 @@ import {
   dom,
 } from "./state.js";
 import {
+  DTE_BUCKET_DEFS,
   fmtInt,
   fmtNum,
   formatExpiryIso,
   formatRangeShort,
   formatStepShort,
   formatStrikeShort,
+  matchesDteFilterValue,
   readPref,
   snapDteValueToExpiries,
 } from "./helpers.js";
@@ -173,23 +175,6 @@ export function baseLayout(t, xTitle, yTitle, markers) {
       font: { family: t.fontMono, size: 11 },
     },
   };
-}
-
-var DTE_BUCKET_DEFS = [
-  { key: "BUCKET:30-60", label: "30\u201360d", min: 30, max: 60 },
-  { key: "BUCKET:61-90", label: "61\u201390d", min: 61, max: 90 },
-  { key: "BUCKET:91-120", label: "91\u2013120d", min: 91, max: 120 },
-];
-
-export function matchesDteFilterValue(dteVal, expiryStr, filterVal) {
-  if (!filterVal || filterVal === "ALL") return true;
-  for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
-    if (DTE_BUCKET_DEFS[b].key === filterVal) {
-      var nDte = Number(dteVal);
-      return !isNaN(nDte) && nDte >= DTE_BUCKET_DEFS[b].min && nDte <= DTE_BUCKET_DEFS[b].max;
-    }
-  }
-  return String(expiryStr) === String(filterVal);
 }
 
 function formatDteBucketLabel(filterVal) {

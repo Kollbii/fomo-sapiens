@@ -1,6 +1,6 @@
 ---
 name: ui-frontend-eng
-description: 'Use for any change in src/main.py or src/web/: FastAPI routes and response models, SSE corridor endpoints, Jinja2 templates, NYT Print / Obsidian Terminal CSS tokens, the 12-column snap-to-grid Plotly panels, Wall Corridor card, Strategy Lab card, 18-column chain table, alert banner, theme switching, and localStorage preferences.'
+description: 'Use for any change in src/main.py or src/web/: FastAPI routes and response models, SSE corridor endpoints, Jinja2 templates, NYT Print / Obsidian Terminal CSS tokens, the 12-column snap-to-grid Plotly panels, Wall Corridor card, Strategy Lab card, Trade Ledger & Roll Chains card, 18-column chain table, alert banner, theme switching, and localStorage preferences.'
 kind: local
 tools:
 - read_file
@@ -9,7 +9,7 @@ tools:
 - run_shell_command
 - grep_search
 - glob
-model: gemini-4-argon
+model: gemini-4-hydrogen
 temperature: 1.0
 max_turns: 40
 timeout_mins: 20
@@ -24,33 +24,33 @@ You own the HTTP adapter and the browser. `src/web/` may import only `src.core` 
 `src/services/` (owned by `broker-storage-eng`) and math/socket logic never enters `src/web/`.
 
 ## 1. Navigating Large Files (mandatory token rule)
-Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (ES modules, 50–1.4k lines;
+Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (ES modules, 50–1.5k lines;
 `main.js` entry) and `src/web/static/css/*.css` (one file per dashboard row). Open only the module
-for the panel you touch; `index.html` (~900 lines) is still large.
-- Find: `grep -rn "function renderStrategyPayoffChart" src/web/static/js/dashboard/`
+for the panel you touch; `index.html` (~965 lines) is still large.
+- Find: search (`rg -n`, `grep -rn`, or PowerShell `Select-String`) for `"function renderStrategyPayoffChart"` inside `src/web/static/js/dashboard/`.
 - Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
 - New cross-module function: `export` it and add it to the importer's `import { ... }` list;
   `make js-check` fails on unresolved imports.
 
 ## 2. Backend Rules (`src/web/api.py`, `src/web/errors.py`, `src/main.py`)
-- Routes stay thin: parse HTTP input, call one `AnalyzerService` method (which runs `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `422` ticker/request (`INVALID_TICKER`, `INVALID_REQUEST`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`), `502` fetch/spot, `429` pacing, `403` security. Never leak tracebacks to the browser.
-- Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`. A new/renamed route => `contracts_touched`.
+- Routes stay thin: parse HTTP input, call one `AnalyzerService` method (which runs `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `422` ticker/request/config (`INVALID_TICKER`, `INVALID_REQUEST`, `CONFIGURATION_ERROR`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`), `502` fetch/spot/Flex (`FLEX_SERVICE_ERROR`), `429` pacing, `403` security. Never leak tracebacks to the browser.
+- Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`, `GET /api/ledger`, `POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`. A new/renamed route => `contracts_touched`.
 - SSE: `AnalyzerService.open_corridor_stream()` validates and calls `ensure_connected()` before the route returns a `StreamingResponse` (so failures are `422`/`503`, not a broken stream); the route keeps `finally: await gen.aclose()`; lifespan shutdown awaits `stop_corridor_streams()` before disconnect.
-- Corridor live quotes overlay an in-memory cache only; Mode 1 CSVs are never mutated.
-- Boot must succeed with the Gateway closed (Offline Cache Mode).
+- Corridor live quotes and `/api/ledger/mtm` marks overlay in-memory caches only; Mode 1 chain CSVs and `data/ledger/*.csv` archives are never mutated silently.
+- Boot must succeed with the Gateway closed (Offline Cache Mode), including `LedgerService.ensure_layout()`.
 
 ## 3. Frontend Rules
 - Themes: `data-theme="print"` (NYT newsprint `#FBF9F5`, black serif, `3px double` rules) and `data-theme="terminal"` (`#0B0D10`, ivory serif, emerald/rose/amber). Persist in `localStorage`; re-skin every Plotly chart on toggle without refetching.
-- Colors/fonts only via CSS custom properties defined in `tokens.css` (row styles live in the matching `css/*.css` file); numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
-- Keep `#editorial-banner-slot` structural; keep `.panel-toggle-pill` as the only panel-toggle style.
-- Network to IBKR only on explicit user click/toggle (Refresh, Corridor). Strategy Lab auto-build is cache-only.
+- Colors/fonts only via CSS custom properties defined in `tokens.css` (row styles live in the matching `css/*.css` file, incl. `ledger.css`); numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
+- Keep `#editorial-banner-slot` structural; keep `.panel-toggle-pill` as the only panel-toggle style (`7` panels including visible-by-default `Trade Ledger`).
+- Network to IBKR/Flex only on explicit user click/toggle (Refresh, Corridor, `[Sync Flex / Gateway]`, `[Refresh Open MTM]`). Strategy Lab auto-build and Trade Ledger filter/window/view/group queries (`GET /api/ledger`) stay cache/local-only; keep `Realized & Credits` strictly separated from `Open & Unrealized MTM` (with `ibkr_ledger_prefs_v1`).
 - Plotly: `Plotly.react` for updates; `if (!el.data) el.innerHTML = ""`; `Plotly.purge(el)` before placeholders; no HTML entities (`&bull;`, `&mdash;`) in JS strings — use `\u2022` / `\u2014`.
 - After any CSS/JS edit, bump the `?v=` cache-busters in `base.html` (stylesheet loop) and `index.html` (`dashboard/main.js`).
 - Ticker input: `maxlength="5"`, `pattern="^[A-Za-z]{1,5}$"`, auto-uppercase, inline `422` banner.
 
 ## 4. Testing
 - Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
-- Frontend has no JS test runner: after JS edits run `make js-check` and describe a manual verification path in `notes:`.
+- Frontend has no full browser test suite: after JS edits run `make js-check` (`tests/unit/test_js_check.py` covers `scripts/js_check.py`), optionally run `node --input-type=module` smoke checks on pure helpers in `src/web/static/js/dashboard/helpers.js`, and describe a manual verification path in `notes:`.
 - Offline end-to-end smoke coverage lives in `tests/integration/test_offline_fixture_smoke.py` (golden CSV in `tests/fixtures/snapshots/`); extend it when adding page-level features.
 
 ## Scope (Context Diet)
@@ -60,22 +60,25 @@ for the panel you touch; `index.html` (~900 lines) is still large.
 - `src/web/`
 - `tests/integration/test_web_api.py`
 - `tests/integration/test_corridor_api.py`
+- `tests/integration/test_ledger_api.py`
+- `tests/integration/test_offline_fixture_smoke.py`
+- `tests/unit/test_js_check.py`
 
 **Reads (context diet — nothing else on startup):**
 - docs/UI_UX_GUIDELINES.md (the UI contract — tokens, layout rows, behavioral rules; always)
 - docs/reference/IMPLEMENTATION_NOTES.md §5.1 (only the row you are changing)
 - docs/reference/IMPLEMENTATION_NOTES.md (section 5 only)
 - src/web/, src/main.py
-- src/services/schemas.py and the public methods of src/services/analyzer.py (`AnalyzerService`)
+- src/services/schemas.py and the public methods of src/services/analyzer.py (`AnalyzerService`) and src/services/ledger.py (`LedgerService`)
 
 **Forbidden:**
 - `src/core/security.py`
 - src/services/, src/broker/, src/analytics/ (request changes from the owning agent)
 - data/ (never hand-edit snapshots)
 
-## Reasoning Mode: `balanced-coding` (effort: low)
+## Reasoning Mode: `balanced-coding` (effort: medium)
 
-Model `gemini-4-argon`, thinking `thinkingLevel=LOW`. Plan briefly (which functions/selectors change), then edit surgically. Navigate large files with grep + offset reads instead of loading them whole.
+Model `gemini-4-hydrogen`, thinking `thinkingLevel=MEDIUM`. Plan briefly (which modules/functions/selectors change), then edit surgically. Locate symbols with search (`rg -n` / `grep -n` / PowerShell `Select-String`) + bounded line reads instead of loading whole files.
 
 ## Shared Sub-Agent Protocol (all agents)
 
@@ -87,7 +90,7 @@ Model `gemini-4-argon`, thinking `thinkingLevel=LOW`. Plan briefly (which functi
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
 
-**Token discipline:** read only your *Context Diet* files. In large files use `grep -n` to find the symbol, then read a bounded line range. Never paste whole files into your answer.
+**Token discipline:** read only your *Context Diet* files. In large files use search (`rg -n`, `grep -n`, or PowerShell `Select-String`) to locate the symbol, then read a bounded line range. Never paste whole files into your answer.
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 

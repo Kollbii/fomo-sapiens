@@ -1,6 +1,6 @@
 ---
 name: broker-storage-eng
-description: Use for any change in src/core/ (config, exceptions, read-only guard, ticker validation), src/storage/ (27-column Polars schema, Mode 1 atomic CSV archive, snapshot index) or src/broker/ (ib-async client, DELAYED 3->4 / LIVE 1->2 cascade, weekly 30-120 DTE discovery, strike striding, <=80 paged fetcher, <=60 Wall Corridor streaming). Also use for IBKR error codes, pacing, disconnect recovery, and cancelMktData cleanup bugs.
+description: Use for any change in src/core/ (config, exceptions, read-only guard, ticker validation), src/storage/ (27-column option-chain Polars schema, Mode 1 atomic CSV archive, snapshot index, data/ledger/ execution & open-position CSV/JSON archives), src/broker/ (ib-async client, DELAYED 3->4 / LIVE 1->2 cascade, weekly 30-120 DTE discovery, strike striding, <=80 paged fetcher, <=60 Wall Corridor streaming, Flex Web Service v3, opt-in ledger_sync), or src/services/ (`AnalyzerService`, corridor glue, `LedgerService`). Also use for IBKR error codes, pacing, disconnect recovery, and cancelMktData cleanup bugs.
 kind: local
 tools:
 - read_file
@@ -25,12 +25,13 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 
 ## 1. Read-Only Enforcement (`src/core/security.py` — read, do not weaken)
 - `ReadOnlyIBGuard.lock(ib)` traps `BLOCKED_METHODS` (`placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, `whatIfOrder`, `whatIfOrderAsync`) on both `ib` and `ib.client`; `verify_locked(ib)` must stay `True`.
-- Never instantiate `ib_async.IB()` outside `src/broker/client.py`. Connect via `ib.client.connectAsync` (bypasses `IB.connectAsync` account/position/order bootstrap — zero account queries).
+- Never instantiate `ib_async.IB()` outside `src/broker/client.py`. Connect via `ib.client.connectAsync` (bypasses `IB.connectAsync` account/position/order bootstrap — zero implicit account queries).
+- `scripts/security_guard.py` enforces a strict `SCOPED_ALLOWLIST` permitting ONLY `.reqExecutionsAsync(` and `.reqPositionsAsync(` inside `src/broker/ledger_sync.py` (gated at runtime by `ENABLE_GATEWAY_LEDGER_SYNC=true`, dropping `account` attributes immediately); sync variants and all other files stay blocked.
 - `ibkr.read_only_enforced: false` must keep raising `ConfigurationError`.
 
 ## 2. Config (`src/core/config.py`)
-- Frozen, `extra="forbid"` Pydantic v2 models. YAML first, then flat env overrides (process env > `.env`): `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, `FALLBACK_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`, `APP_HOST`, `APP_PORT`.
-- Mode/type reconciliation: `1|2 -> LIVE`, `3|4 -> DELAYED`; setting only the mode aligns `(1,2)` / `(3,4)`. Any new key needs: model field, YAML default, `.env.example` entry (if env-overridable), and a `test_config.py` case.
+- Frozen, `extra="forbid"` Pydantic v2 models (`LedgerSettings` included). YAML first, then flat env overrides (process env > `.env`): `IBKR_HOST`, `IBKR_PORT`, `IBKR_CLIENT_ID`, `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, `FALLBACK_MARKET_DATA_TYPE`, `RISK_FREE_RATE`, `LOG_LEVEL`, `APP_HOST`, `APP_PORT`, `IBKR_FLEX_TOKEN`, `IBKR_FLEX_ACTIVITY_QUERY_ID`, `IBKR_FLEX_MONTHLY_QUERY_ID`, `IBKR_FLEX_TRADE_CONF_QUERY_ID`, `ENABLE_GATEWAY_LEDGER_SYNC`, `GATEWAY_LEDGER_INCLUDE_STOCK`, `LEDGER_ROLL_MAX_GAP_HOURS`, `LEDGER_DIR`.
+- Mode/type reconciliation: `1|2 -> LIVE`, `3|4 -> DELAYED`; setting only the mode aligns `(1,2)` / `(3,4)`. Any new key needs: model field, YAML default, `.env.example` entry (if env-overridable), and a `test_config.py` case. Keep `flex_token` (`Field(repr=False)`) out of YAML defaults and HTTP responses.
 
 ## 3. Market Data Cascade (`src/broker/client.py`)
 - `DELAYED`: Type 3 -> 4 when `>80%` of a page (100% of corridor) has empty bid/ask/last. `LIVE`: Type 1 -> 2 likewise.
@@ -50,13 +51,15 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - One-shot (`fetch_corridor_quotes`) and single-active stream (`stream_corridor_quotes`) must cancel 100% of subscriptions on stop, SSE disconnect, `gen.aclose()`, ticker/expiry switch, gateway drop, and lifespan exit. Every new code path needs a cleanup test in `test_corridor.py`.
 
 ## 5a. Service Layer (`src/services/`)
-- `AnalyzerService` is the only place that composes broker + storage + analytics; keep it HTTP-agnostic (raise `InvalidRequestError` / domain errors, never `HTTPException`).
+- `AnalyzerService` (with composed `LedgerService` in `src/services/ledger.py`) is the only layer that composes broker + storage + analytics; keep it HTTP-agnostic (raise `InvalidRequestError`, `ConfigurationError`, `FlexServiceError`, etc., never `HTTPException`).
 - Corridor: derive `WallAnchors` via `wall_anchors_from_report(compute_walls(...))`, inject `make_bsm_greeks_fallback(rfr)` into `CorridorQuoteService`, validate + `ensure_connected()` before handing a stream generator to the web layer.
+- Trade Ledger: `LedgerService` orchestrates Flex Web Service v3 (`src/broker/flex.py`, `redact_flex_secrets()`), optional Gateway sync + `<= 60` MTM polling (`src/broker/ledger_sync.py`, storing live marks only in `_live_marks`), XML/CSV uploads (`MAX_LEDGER_IMPORT_BYTES` / `MAX_IMPORT_BYTES`, POSIX/`\` separator stripping, `StorageSchemaError` on malformed payloads), and `build_ledger_report()`.
 - Request/response models live in `src/services/schemas.py`; changing them is a public API change (`contracts_touched`).
 
 ## 6. Storage (`src/storage/`)
-- Exactly the 27 columns in `docs/DATA_SCHEMA.md` §2; `OptionContractRow` (Pydantic) and `OPTION_CHAIN_POLARS_SCHEMA` (Polars) must agree. Sentinels `-1.0`, `NaN`, `2147483647`, `<= 0` prices -> `null`.
-- Paths: `data/snapshots/{T}/{T}_{YYYYMMDD_HHMMSS}.csv` (immutable), `data/latest/{T}_latest.csv`, `data/metadata/snapshot_index.json` — all via `.tmp` + `os.replace()`. Corrupt/off-schema files are rejected with `StorageSchemaError`, never silently coerced.
+- **Option chains:** Exactly the 27 columns in `docs/DATA_SCHEMA.md` §2; `OptionContractRow` (Pydantic) and `OPTION_CHAIN_POLARS_SCHEMA` (Polars) must agree. Sentinels `-1.0`, `NaN`, `2147483647`, `<= 0` prices -> `null`.
+- **Trade Ledger (`data/ledger/`):** 23-column `executions.csv` (`LedgerExecutionRow`, `LEDGER_EXECUTION_POLARS_SCHEMA`), 15-column `open_positions.csv` (`LedgerPositionRow`, `LEDGER_POSITION_POLARS_SCHEMA`), `sync_state.json`, and `imports/` (`LedgerRepository`). Store `commission` as non-negative cost (`abs(commission)`), timestamps in UTC ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`), and preserve authoritative `FLEX_*` precedence/upgrades over provisional `GATEWAY_LIVE` fills (`docs/DATA_SCHEMA.md` §5).
+- Paths: `data/snapshots/{T}/{T}_{YYYYMMDD_HHMMSS}.csv` (immutable), `data/latest/{T}_latest.csv`, `data/metadata/snapshot_index.json`, and `data/ledger/{executions,open_positions}.csv` — all via `.tmp` + `os.replace()`. Corrupt/off-schema files are rejected with `StorageSchemaError`, never silently coerced.
 - A schema change is a breaking contract: flag `contracts_touched` so `quant-analytics-eng`, `ui-frontend-eng`, and `doc-sync-auditor` are routed.
 
 ## 7. Testing
@@ -79,6 +82,9 @@ weaken the read-only guarantee. Favor explicit invariants over cleverness.
 - `tests/unit/test_parser.py`
 - `tests/unit/test_fetcher.py`
 - `tests/unit/test_corridor.py`
+- `tests/unit/test_flex_and_ledger_storage.py`
+- `tests/unit/test_ledger_sync.py`
+- `tests/unit/test_ledger_service.py`
 - `tests/integration/test_csv_pipeline.py`
 
 **Reads (context diet — nothing else on startup):**
@@ -109,7 +115,7 @@ Model `gemini-4-argon`, thinking `thinkingLevel=HIGH`. Think step by step before
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
 
-**Token discipline:** read only your *Context Diet* files. In large files use `grep -n` to find the symbol, then read a bounded line range. Never paste whole files into your answer.
+**Token discipline:** read only your *Context Diet* files. In large files use search (`rg -n`, `grep -n`, or PowerShell `Select-String`) to locate the symbol, then read a bounded line range. Never paste whole files into your answer.
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 

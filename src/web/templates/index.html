@@ -174,6 +174,15 @@
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Strategy Lab</span>
       </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="trade_ledger"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Trade Ledger</span>
+      </button>
     </div>
     <button
       id="panel-visibility-reset"
@@ -345,8 +354,9 @@
             id="corridor-expiry-select"
             class="select-control"
             aria-label="Corridor target expiration"
+            title="Target expiration for Wall Corridor; Auto follows the governing Put &amp; Call Walls DTE selection"
           >
-            <option value="">Front DTE</option>
+            <option value="">Auto (Follow Walls)</option>
           </select>
         </label>
         <label class="field-group">
@@ -484,8 +494,8 @@
         </div>
         <label class="field-group">
           <span class="field-label">Expiry</span>
-          <select id="strategy-expiry-select" class="select-control" aria-label="Strategy target expiry">
-            <option value="">Auto (Front)</option>
+          <select id="strategy-expiry-select" class="select-control" aria-label="Strategy target expiry" title="Target expiration for Strategy Lab; Auto follows the governing Put &amp; Call Walls DTE selection">
+            <option value="">Auto (Follow Walls)</option>
           </select>
         </label>
         <label class="field-group">
@@ -630,6 +640,152 @@
             <div class="strategy-empty-state">
               Click a preset or <strong>Auto-Build from Walls</strong> / <strong>Evaluate Legs</strong> to plot T+0, Midpoint, Expiration &amp; Simulated P&amp;L curves.
             </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </article>
+
+  <!-- Hybrid Options Trade Ledger, Roll Chains & Open MTM -->
+  <article
+    id="trade-ledger-card"
+    class="panel-card panel-card--span-12 panel-card--ledger"
+    data-panel-id="trade_ledger"
+    data-default-span="12"
+  >
+    <header class="panel-header panel-header--ledger">
+      <div class="panel-title-stack">
+        <h2 class="panel-title">Options Trade Ledger &amp; Roll Chains</h2>
+        <span id="ledger-status-badge" class="panel-meta">LEDGER IDLE &bull; OFFLINE CACHE READY</span>
+      </div>
+      <div class="panel-controls panel-controls--ledger">
+        <div id="ledger-window-group" class="ledger-seg-group" role="group" aria-label="Ledger Timeframe">
+          <button type="button" class="ledger-seg-btn" data-ledger-window="1W" aria-pressed="false">1W</button>
+          <button type="button" class="ledger-seg-btn active" data-ledger-window="1M" aria-pressed="true">1M</button>
+          <button type="button" class="ledger-seg-btn" data-ledger-window="3M" aria-pressed="false">3M</button>
+          <button type="button" class="ledger-seg-btn" data-ledger-window="YTD" aria-pressed="false">YTD</button>
+          <button type="button" class="ledger-seg-btn" data-ledger-window="1Y" aria-pressed="false">1Y</button>
+          <button type="button" class="ledger-seg-btn" data-ledger-window="ALL" aria-pressed="false">ALL</button>
+        </div>
+
+        <div id="ledger-view-group" class="ledger-seg-group" role="group" aria-label="Ledger View Mode">
+          <button type="button" class="ledger-seg-btn active" data-ledger-view="realized" aria-pressed="true">
+            Realized &amp; Credits
+          </button>
+          <button type="button" class="ledger-seg-btn" data-ledger-view="open_mtm" aria-pressed="false">
+            Open &amp; Unrealized MTM
+          </button>
+        </div>
+
+        <label
+          class="field-group field-group--checkbox"
+          title="Include realized stock capital gains and losses for covered calls and stock lots"
+        >
+          <input id="ledger-stock-gain-toggle" type="checkbox" />
+          <span class="field-label">Include Stock Gain (Covered Calls)</span>
+        </label>
+
+        <label class="field-group">
+          <span class="field-label">Ticker</span>
+          <select id="ledger-ticker-filter" class="select-control" aria-label="Filter ledger by ticker">
+            <option value="ALL" selected>All Tickers</option>
+          </select>
+        </label>
+
+        <div id="ledger-group-group" class="ledger-seg-group" role="group" aria-label="Ledger Grouping">
+          <button type="button" class="ledger-seg-btn active" data-ledger-group="campaigns" aria-pressed="true">
+            Roll Campaigns
+          </button>
+          <button type="button" class="ledger-seg-btn" data-ledger-group="strategy" aria-pressed="false">
+            By Strategy
+          </button>
+          <button type="button" class="ledger-seg-btn" data-ledger-group="ticker" aria-pressed="false">
+            By Ticker
+          </button>
+          <button type="button" class="ledger-seg-btn" data-ledger-group="executions" aria-pressed="false">
+            Executions
+          </button>
+        </div>
+
+        <div class="ledger-action-bar">
+          <select id="ledger-sync-mode" class="select-control" aria-label="Flex Sync Mode">
+            <option value="auto" selected>Auto (Monthly / Full)</option>
+            <option value="monthly">Monthly Quick Sync</option>
+            <option value="full">Full 365d Sync</option>
+          </select>
+          <button id="btn-ledger-sync" type="button" class="btn btn-primary btn-xs">
+            Sync Flex / Gateway
+          </button>
+          <input id="ledger-import-file" type="file" accept=".xml,.csv" hidden />
+          <button id="btn-ledger-import" type="button" class="btn btn-xs">
+            Import XML / CSV
+          </button>
+          <button id="btn-ledger-mtm" type="button" class="btn btn-xs">
+            Refresh Open MTM
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <div class="ledger-workspace">
+      <div id="ledger-kpi-strip" class="ledger-kpi-strip" aria-label="Trade Ledger KPIs">
+        <div class="ledger-kpi-card">
+          <span class="ledger-kpi-label">Realized P&amp;L (Ex-Fees)</span>
+          <strong class="ledger-kpi-value">&mdash;</strong>
+          <span class="ledger-kpi-sub">After Fees: &mdash;</span>
+        </div>
+        <div class="ledger-kpi-card ledger-kpi-card--fees">
+          <span class="ledger-kpi-label">Total Fees Paid</span>
+          <strong class="ledger-kpi-value">&mdash;</strong>
+          <span class="ledger-kpi-sub">Commissions &amp; fees</span>
+        </div>
+        <div class="ledger-kpi-card">
+          <span class="ledger-kpi-label">Net Option Premium</span>
+          <strong class="ledger-kpi-value">&mdash;</strong>
+          <span class="ledger-kpi-sub">Credits minus debits</span>
+        </div>
+        <div class="ledger-kpi-card">
+          <span class="ledger-kpi-label">Win Rate &amp; Activity</span>
+          <strong class="ledger-kpi-value">&mdash;</strong>
+          <span class="ledger-kpi-sub">0 closed &bull; 0 open &bull; 0 rolls</span>
+        </div>
+      </div>
+
+      <div class="ledger-split">
+        <section class="ledger-chart-pane" aria-label="Trade Ledger Performance Chart">
+          <div
+            id="chart-ledger"
+            class="chart-canvas chart-canvas--ledger is-idle"
+            aria-label="Trade Ledger Chart"
+          >
+            <div class="ledger-empty-state">
+              Loading trade ledger analytics... Click <strong>Sync Flex / Gateway</strong> or <strong>Import XML / CSV</strong> to populate P&amp;L and roll chains.
+            </div>
+          </div>
+        </section>
+
+        <section class="ledger-table-pane" aria-label="Trade Ledger Detail Table">
+          <div id="ledger-table-container" class="ledger-table-wrap">
+            <table class="ledger-table">
+              <thead id="ledger-table-head">
+                <tr>
+                  <th class="text-left">Roll</th>
+                  <th class="text-left">Ticker</th>
+                  <th class="text-left">Strategy</th>
+                  <th class="text-left">Status</th>
+                  <th class="text-left">Rolls</th>
+                  <th class="text-left">Chain</th>
+                  <th class="num">Net Credit</th>
+                  <th class="num">Realized P&amp;L</th>
+                  <th class="num">Fees</th>
+                </tr>
+              </thead>
+              <tbody id="ledger-table-body">
+                <tr>
+                  <td colspan="9" class="ledger-table-empty">Loading trade ledger...</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </section>
       </div>
@@ -805,5 +961,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261112a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261112c"></script>
 {% endblock %}

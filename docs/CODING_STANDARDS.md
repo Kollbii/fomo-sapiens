@@ -8,10 +8,10 @@ Coding agents must enforce strict boundaries between the 6 layers in `src/` (enf
     web -> {core, services}            main.py (composition root) -> anything
 
 1. **`src/core/`:** Pure configuration (`config.py`), domain exceptions (`exceptions.py`), and security guards (`security.py`). Imports only `src.core`.
-2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`) and CSV persistence (`csv_repository.py`). Must never import `ib_async` or `fastapi`.
-3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged fetching, raw tick parsing, and corridor subscriptions. Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
-4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs. Zero network or disk I/O; may import `src.storage.schema` types only.
-5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
+2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`; plus `ledger_schema.py` execution/position models) and CSV persistence (`csv_repository.py`, `ledger_repository.py`). Must never import `ib_async` or `fastapi`.
+3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged fetching, raw tick parsing, corridor subscriptions, Flex Web Service v3 (`flex.py`), and opt-in scoped ledger sync (`ledger_sync.py`). Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
+4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs. Zero network or disk I/O; may import `src.storage.schema` and `src.storage.ledger_schema` types only.
+5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `ledger.py` `LedgerService`, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
 6. **`src/web/`:** FastAPI routes (`api.py`), exception-to-JSON mapping (`errors.py`), Jinja2 templates, and static assets. Imports only `src.core` and `src.services`.
 
 ---
@@ -66,18 +66,28 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies REST/SSE Corridor endpoints (`/api/corridor/quotes`, `/api/corridor/stop`, `/api/corridor/stream/{ticker}`), `503 GATEWAY_OFFLINE` handling, Strategy Lab live quote overlay without mutating Mode 1 CSVs, and pure `_run()` coroutine stepping without Windows loopback sockets.
    - Keep JavaScript strings inside `src/web/static/js/dashboard/*.js` free of HTML entities `&bull;` / `&mdash;` (use `\u2022` / `\u2014`).
 7. **Dynamic Config & UI/API Verification (`tests/unit/test_config.py`, `tests/integration/test_web_api.py`):**
-   - Verifies `.env` `MARKET_DATA_MODE` / `DEFAULT_MARKET_DATA_TYPE` / `FALLBACK_MARKET_DATA_TYPE` reconciliation, `LIVE` (`1 -> 2` & mid-page `10089` fallback), server-reported `Ticker.marketDataType` observation, and non-default `IBKR_HOST:IBKR_PORT` + `LIVE` rendering across HTML, `/api/status`, and offline `503` responses.
+   - Verifies `.env` `MARKET_DATA_MODE` / `DEFAULT_MARKET_DATA_TYPE` / `FALLBACK_MARKET_DATA_TYPE` and `LedgerSettings` (`IBKR_FLEX_*`, `ENABLE_GATEWAY_LEDGER_SYNC`, `LEDGER_*`) overrides, `LIVE` (`1 -> 2` & mid-page `10089` fallback), server-reported `Ticker.marketDataType` observation, and non-default `IBKR_HOST:IBKR_PORT`, `LIVE`, and Flex/Gateway ledger status flags across HTML, `/api/status`, and offline `503` responses.
 
 8. **`tests/unit/test_security_guard.py`:**
-   - Verifies `scripts/security_guard.py` passes on `src/` and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), account/position queries (`reqPositions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
+   - Verifies `scripts/security_guard.py` passes on `src/`, enforces `SCOPED_ALLOWLIST` (`.reqExecutionsAsync(` and `.reqPositionsAsync(` allowed only inside `src/broker/ledger_sync.py`), and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), sync/disallowed account/position queries (`reqPositions`, `reqExecutions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
 9. **`tests/unit/test_agent_specs.py`:**
-   - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-3.8-flash` always `thinkingLevel: HIGH`) while preserving unrelated settings, and invalid specs are rejected.
+   - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-4-argon` at `thinkingLevel: HIGH`, `gemini-4-hydrogen` at `MEDIUM`/`LOW`, legacy `gemini-3.8-flash` at `HIGH`) while preserving unrelated settings, and invalid specs are rejected.
 10. **`tests/integration/test_offline_fixture_smoke.py`:**
    - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
 11. **`tests/unit/test_docs_consistency.py`:**
    - Fails when `AGENTS.md`, `docs/*.md`, or `.agent/agents/*.md` reference a `` `#<id>` `` missing from `src/web/` templates/JS/CSS, or a `GET|POST /api/...` route the app does not serve (checked against the OpenAPI schema).
 12. **`tests/unit/test_layering.py`:**
    - AST-scans every module in `src/{core,storage,broker,analytics,services,web}` and fails on imports that violate the §1 dependency rules (including banned third-party imports such as `fastapi` outside `web`).
+13. **`tests/unit/test_flex_and_ledger_storage.py`:**
+   - Verifies Flex XML & Activity CSV parsing (`parse_flex_xml`, `parse_activity_csv`), `redact_flex_secrets()`, `select_flex_query_ids()` (`auto`/`monthly`/`full` + `FLEX_TRADE_CONF`), `LedgerExecutionRow`/`LedgerPositionRow` normalization (positive commission cost, UTC ISO-8601 timestamps, deterministic `synthesize_exec_id`), and `LedgerRepository` atomic upserts + `GATEWAY_LIVE` -> `FLEX_*` upgrades.
+14. **`tests/unit/test_ledger_sync.py`:**
+   - Verifies `ENABLE_GATEWAY_LEDGER_SYNC` gating (`ConfigurationError` when disabled), account-attribute stripping in `fetch_gateway_ledger()`, bounded `<= 60` `refresh_open_option_marks()` polling, `DELAYED 3->4` / `LIVE 1->2` / `10089` mark fallback, and 100% `cancelMktData` cleanup.
+15. **`tests/unit/test_ledger_analytics.py`:**
+   - Verifies order/time clustering (`<= 2.0s`), 17-strategy classification (including uncovered-stock checks distinguishing `COVERED_CALL` vs `NAKED_CALL`), FIFO matching across trades/expirations/assignments/exercises, pre-window orphan-close safety, `roll_max_gap_hours` roll stitching, strict `realized` vs `open_mtm` separation, ex-fee P&L with sidecar `fees`, `include_stock_gain`, and live MTM mark precedence.
+16. **`tests/unit/test_ledger_service.py`:**
+   - Verifies `LedgerService` status reporting, Flex/Gateway sync coordination, XML/CSV upload bounds/validation, and in-memory live MTM mark caching without disk CSV mutation.
+17. **`tests/integration/test_ledger_api.py`:**
+   - Verifies `GET /api/ledger`, `POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`, structured `422` (`CONFIGURATION_ERROR` / `INVALID_REQUEST`), `502` (`FLEX_SERVICE_ERROR`), `503` (`GATEWAY_OFFLINE`), and rendered `#trade-ledger-card` HTML smoke checks.
 
 ---
 

@@ -45,3 +45,7 @@ class InvalidRequestError(AnalyzerError):
 
 class SnapshotNotFoundError(AnalyzerError):
     """Raised when a requested snapshot / latest CSV does not exist on disk."""
+
+
+class FlexServiceError(AnalyzerError):
+    """Raised when IBKR Flex Web Service requests or statement downloads fail."""

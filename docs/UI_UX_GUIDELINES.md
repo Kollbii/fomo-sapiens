@@ -54,24 +54,25 @@ Google Fonts `Newsreader`, `JetBrains Mono`, `Inter` with system fallbacks:
 2. **Reserved editorial banner `#editorial-banner-slot`:** full width, editorial double rules, kept structurally ready for future narrative modules (`docs/FUTURE_IMPROVEMENTS.md` §6); currently shows feed/DTE summary and snapshot metadata in `#editorial-banner-copy`.
 3. **Control strip:** watchlist pills (`NVDA`, `AVGO`, `CRDO`, `PLTR`); custom ticker input (`maxlength="5"`, `pattern="[A-Za-z]{1,5}"`, auto-uppercase, inline `422` error); Range % (default `±20%`), Strike Step (default `Auto`), DTE ceiling (default `30–120d`) — options the exchange cannot serve are shown disabled `(N/A)`; historical snapshot selector; `[REFRESH FROM IBKR]`; dismissible `#alert-banner`; `PANELS:` bar.
 4. **KPI strip (4 cards):** spot + pull scope + active expirations; Primary Call Wall; Primary Put Wall; unusual-activity count.
-5. **Panel grid (snap-to-grid, resizable):** `#chart-walls` (Put/Call Walls), IV smile, unusual activity, Greeks structure, `#wall-corridor-card` (Wall Corridor), `#strategy-lab-card` (Strategy Lab). Spans snap to `4/6/8/12` columns; layout persists in `localStorage`.
+5. **Panel grid (snap-to-grid, resizable):** `#chart-walls` (Put/Call Walls), IV smile, unusual activity, Greeks structure, `#wall-corridor-card` (Wall Corridor), `#strategy-lab-card` (Strategy Lab), `#trade-ledger-card` (Options Trade Ledger & Roll Chains). Spans snap to `4/6/8/12` columns; layout persists in `localStorage`. `#walls-dte-select` governs the target expiration resolved by Wall Corridor and Strategy Lab whenever those tiles are in `Auto (Follow Walls)` mode (manual per-tile expiry overrides and `CUSTOM` Strategy Lab legs remain preserved).
 6. **Option chain table `#chain-table`:** 18 monospaced columns, sortable headers (nulls last), per-column filters, DTE bucket tabs, `+Leg` buttons feeding Strategy Lab.
 
-**Defaults:** panels `walls`, `anomalies`, `corridor`, `strategy` visible; `iv_smile`, `greeks` hidden.
+**Defaults:** panels `walls`, `anomalies`, `corridor`, `strategy`, `trade_ledger` visible; `iv_smile`, `greeks` hidden (`7` toggle pills in `PANELS:`).
 
 ---
 
 ## 5. Behavioral Rules (Must Hold)
-1. **Network discipline:** the only calls that reach IBKR are explicit user actions — `[REFRESH FROM IBKR]`, `[Refresh Corridor Quotes]`, and the opt-in `Enable Live Constant Streaming` switch. Strategy Lab auto-build and every snapshot/table/chart interaction are cache-only.
+1. **Network discipline:** the only calls that reach IBKR (or Flex Web Service) are explicit user actions — `[REFRESH FROM IBKR]`, `[Refresh Corridor Quotes]`, the opt-in `Enable Live Constant Streaming` switch, `[Sync Flex / Gateway]`, and `[Refresh Open MTM]`. Strategy Lab auto-build, Trade Ledger filtering/window/view/grouping switches (`GET /api/ledger`), local file imports (`POST /api/ledger/import`), and every snapshot/table/chart interaction are cache/local-only.
 2. **Streaming teardown:** hiding the corridor panel, toggling streaming off, or leaving the page (`pagehide`) stops the SSE stream and calls `POST /api/corridor/stop`.
-3. **Immutable archives:** live corridor quotes update the in-memory chain only; the UI never implies archived CSVs changed.
+3. **Immutable archives:** live corridor quotes and open-position MTM refreshes (`POST /api/ledger/mtm`) update in-memory overlays only; the UI never implies archived chain or ledger CSVs changed.
 4. **Panel toggles** use `.panel-toggle-pill` (with `.active`) exclusively; no one-off toggle styles.
-5. **Persistence:** every user preference uses a versioned `localStorage` key (`ibkr_*_v1`, plus `ibkr_options_theme` and `ibkr_walls_*`); changing a stored shape requires a new version suffix.
+5. **Persistence:** every user preference uses a versioned `localStorage` key (`ibkr_*_v1` including `ibkr_ledger_prefs_v1`, plus `ibkr_options_theme` and `ibkr_walls_*`); changing a stored shape requires a new version suffix.
 6. **Errors:** API failures show a human-readable message (`detail`, then `message`) in `#alert-banner`; tracebacks are never rendered. HTTP/Gateway failures (Stage 1) are reported separately from client render failures (Stage 2 `UI_RENDER`), so a render bug is never blamed on the Gateway.
 7. **Plotly lifecycle:** update charts with `Plotly.react`; clear a container's `innerHTML` only when it has no `el.data`; call `Plotly.purge(el)` before replacing a chart with a placeholder; call `Plotly.Plots.resize` after a panel is revealed or resized.
 8. **JS strings** never contain HTML entities (`&bull;`, `&mdash;`); use `\u2022` / `\u2014`.
 9. **Cache-busting:** after any CSS/JS change, bump the `?v=` values in `base.html` (stylesheet loop) and `index.html` (`dashboard/main.js`).
 10. **Accessibility & focus:** sortable headers expose `aria-sort`; focus stays on table filter inputs while live corridor updates re-render rows.
+11. **Trade Ledger view, fee & stock-gain separation (`#trade-ledger-card`):** `Realized & Credits` (`realized`) and `Open & Unrealized MTM` (`open_mtm`) are strictly separate views — switching to `Open & Unrealized MTM` disables grouping pills (`Roll Campaigns | By Strategy | By Ticker | Executions`) so open MTM is never commingled with realized cashflows. Headline realized/unrealized P&L is always displayed **ex-fees**, with total commissions surfaced in the sidecar `Total Fees Paid` KPI card / `Fees` column (and `After Fees:` subtext). `1W | 1M | 3M | YTD | 1Y | ALL` filters the realized timeframe, and `Include Stock Gain (Covered Calls)` explicitly toggles inclusion of stock lot realizations / assignment capital gains and open `STK` MTM.
 
 ---
 

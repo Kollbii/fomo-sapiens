@@ -78,3 +78,14 @@ storage:
   latest_dir: "data/latest"
   metadata_index_file: "data/metadata/snapshot_index.json"
   logs_dir: "data/logs"   # rotating analyzer.log lives here
+
+ledger:
+  # Keep IBKR_FLEX_TOKEN in .env only (never commit tokens to YAML or git)
+  flex_token: null
+  flex_activity_query_id: null      # 365-day full Activity Flex Query ID
+  flex_monthly_query_id: null       # Lighter 30-day/monthly Activity Flex Query placeholder for incremental sync
+  flex_trade_conf_query_id: null    # Optional intraday Trade Confirmation Flex Query ID
+  gateway_sync_enabled: false       # Explicit opt-in read-only Gateway reqExecutions/reqPositions sync
+  gateway_include_stock: true       # Include STK fills & positions when Gateway ledger sync runs
+  roll_max_gap_hours: 24.0          # Max time gap when pairing close->open option rolls
+  ledger_dir: "data/ledger"

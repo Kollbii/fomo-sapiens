@@ -4,7 +4,8 @@ description: >-
   Use for any change in src/analytics/: vectorized BSM IV/Greeks fallback, Put/Call Walls
   (OI with Volume fallback), unusual activity (Volume > OI, Volume Z-score), multi-DTE profiles,
   the Strategy Lab engine (spreads, condors, diagonals, CUSTOM legs, POP, expected move, T+n/dIV
-  payoff curves), and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).
+  payoff curves), Trade Ledger strategy classifier & multi-step FIFO roll-chain engine
+  (src/analytics/ledger/), and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).
 profile: deep-reasoning
 color: green
 tools: [read, edit, write, bash, grep, glob]
@@ -12,12 +13,14 @@ owns:
   - src/analytics/
   - tests/unit/test_bsm_and_analytics.py
   - tests/unit/test_strategies.py
+  - tests/unit/test_ledger_analytics.py
 reads:
-  - docs/DATA_SCHEMA.md (section 2 columns only)
+  - docs/DATA_SCHEMA.md (sections 2 and 5 columns only)
   - docs/ARCHITECTURE.md (section 4 only)
   - docs/reference/IMPLEMENTATION_NOTES.md (section 4 only)
   - docs/FUTURE_IMPROVEMENTS.md (only the section being implemented)
   - src/storage/schema.py
+  - src/storage/ledger_schema.py
   - src/analytics/
 forbidden:
   - src/broker/ (it imports bsm_greeks, solve_implied_volatility, compute_walls, ChainWallsReport, WallBasis — keep those signatures stable)
@@ -51,6 +54,12 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 - Presets `BULL_PUT_SPREAD`, `BULL_CALL_SPREAD`, `DIAGONAL_SPREAD`, `IRON_CONDOR`, plus `CUSTOM`. Wall-anchored auto-builder must only pick strikes that exist in the frame.
 - Pricing `Mid` / `Natural` / slippage / limit ladder; risk `max_profit`, `max_loss`, `max_loss_unbounded` (naked short calls => unbounded, never a finite number), RoR, breakevens, log-normal POP, `±1σ` move `S * IV_atm * sqrt(DTE/365)`; net Greeks x qty x 100.
 - Payoff curves `T+0`, midpoint, expiration, simulated `T+n` with `ΔIV`; diagonals price the far leg with remaining time at near expiry.
+
+## 4a. Trade Ledger & Roll-Chain Engine (`ledger/`: `models`, `classifier`, `rolls`, `engine`)
+- Pure analytics over `LedgerExecutionRow` and `LedgerPositionRow` inputs (plus optional injected `now` and `live_marks`); zero I/O or config/env access.
+- `classifier.py`: clusters fills per underlying by `ib_order_id` or `<= 2.0s` (`cluster_option_episodes`), classifies 17 `LedgerStrategyType` variants, and checks uncovered stock shares before choosing `COVERED_CALL` vs `NAKED_CALL`.
+- `rolls.py`: FIFO option/stock lot matching (never creating phantom opening lots for pre-window orphan closes), assignment/expiration/exercise handling, simultaneous + sequential roll stitching within `roll_max_gap_hours` (`24.0h`), and assignment stock-realization linkage.
+- `engine.py`: keeps `realized` (ex-fee P&L, net option premium, sidecar `fees`, daily curve) strictly separate from `open_mtm` (`LIVE_GATEWAY` -> `FLEX_MARK` -> `NONE` unrealized MTM) and honors `include_stock_gain`.
 
 ## 5. Testing
 - Validate against closed-form references (e.g. S=K=100, T=1, r=0.05, σ=0.2 → call ≈ 10.4506, put ≈ 5.5735) and put-call parity; round-trip IV(price(σ)) ≈ σ within `1e-4`.

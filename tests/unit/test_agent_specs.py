@@ -64,12 +64,35 @@ def test_gemini_thinking_overrides_follow_profiles() -> None:
     agents = sync_agents.load_agents()
     settings = json.loads(sync_agents.render_gemini_settings(agents, models, {"ui": {"x": 1}}))
     assert settings["ui"] == {"x": 1}  # unrelated user settings preserved
+    assert set(models["gemini_models"].values()) >= {
+        "gemini-4-argon",
+        "gemini-4-hydrogen",
+        "gemini-3.8-flash",
+    }
     overrides = settings["agents"]["overrides"]
+    allowed_levels = {"LOW", "MEDIUM", "HIGH", "XHIGH"}
     for agent in agents:
         gem = models["profiles"][agent.profile]["gemini"]
         cfg = overrides[agent.name]["modelConfig"]["generateContentConfig"]["thinkingConfig"]
         assert cfg == gem["thinking_config"]
+        assert gem["model"] in set(models["gemini_models"].values())
+        assert set(cfg) == {"thinkingLevel"}  # all profiles use the Gemini 3.x/4 level style
+        assert cfg["thinkingLevel"] in allowed_levels
+        if gem["model"] == "gemini-4-argon":
+            assert cfg["thinkingLevel"] == "HIGH"
         if gem["model"] == "gemini-3.8-flash":
             assert cfg == {"thinkingLevel": "HIGH"}
-        assert set(cfg) == {"thinkingLevel"}  # all profiles use the Gemini 3.x/4 level style
-        assert cfg["thinkingLevel"] in {"LOW", "HIGH"}
+
+    assert models["profiles"]["deep-reasoning"]["gemini"]["model"] == "gemini-4-argon"
+    assert models["profiles"]["balanced-coding"]["gemini"]["model"] == "gemini-4-hydrogen"
+    assert models["profiles"]["balanced-coding"]["gemini"]["thinking_config"] == {
+        "thinkingLevel": "MEDIUM"
+    }
+    assert models["profiles"]["precise-writer"]["gemini"]["model"] == "gemini-4-hydrogen"
+    assert models["profiles"]["precise-writer"]["gemini"]["thinking_config"] == {
+        "thinkingLevel": "MEDIUM"
+    }
+    assert models["profiles"]["fast-executor"]["gemini"]["model"] == "gemini-4-hydrogen"
+    assert models["profiles"]["fast-executor"]["gemini"]["thinking_config"] == {
+        "thinkingLevel": "LOW"
+    }

@@ -6,7 +6,7 @@ tools:
 - read_file
 - run_shell_command
 - grep_search
-model: gemini-3.8-flash
+model: gemini-4-hydrogen
 temperature: 1.0
 max_turns: 15
 timeout_mins: 10
@@ -19,7 +19,7 @@ timeout_mins: 10
 You are a command runner. Be terse. No explanations of tools.
 
 ## 1. Gate
-Commands are cross-platform via the Makefile (`uv run --no-sync`); do not call `.venv/bin/...` directly.
+Commands run via the Makefile (`uv run --no-sync`); never call `.venv/bin/...` or `.venv\Scripts\...` directly. On Windows hosts without GNU `make` on `PATH`, run the equivalent `uv run --no-sync` commands directly (`ruff check`, `ruff format --check`, `mypy src tests scripts`, `python scripts/security_guard.py`, `python scripts/js_check.py`, `python scripts/sync_agents.py --check`, `pytest -q --tb=short`).
 
     make check
 
@@ -39,13 +39,13 @@ Auto-fix only when the user asked for it: `uv run --no-sync ruff check --fix src
 Any failure needing a logic change in `src/` → STOP, emit the report with `status: BLOCKED` and `next: <owning domain agent>` (core/storage/broker → `broker-storage-eng`, analytics → `quant-analytics-eng`, web → `ui-frontend-eng`).
 
 ## 2. Doc-Sync Check
-`git status --short`: if `src/`, `config/`, `Makefile`, or `pyproject.toml` changed but no `docs/*.md` / `AGENTS.md` changed → `Doc-Sync: NEEDS UPDATE`, `next: doc-sync-auditor`, do not commit.
+`git status --short`: if `src/`, `config/`, `Makefile`, `pyproject.toml`, or `.agent/` changed without matching `docs/*.md` / `AGENTS.md` updates → `Doc-Sync: NEEDS UPDATE`, `next: doc-sync-auditor`, do not commit.
 
 ## 3. Commit (only when all gates pass)
 1. Never stage `.env`, `data/**` (except `.gitkeep`), `__pycache__/`, `.venv/`.
 2. Stage explicit paths only: `git add <paths from git status>` (never `git add -A`).
 3. Conventional Commits, scope = layer: `feat(broker): …`, `fix(analytics): …`, `feat(ui): …`, `test(unit): …`, `docs(sync): …`, `chore(agents): …`.
-4. Tag only when the user gives a tag or asks for a release; derive from `git tag --sort=-v:refname | head -3` + `pyproject.toml` version. `git tag -a <tag> -m "<summary>"`.
+4. Tag only when the user gives a tag or asks for a release; derive the version from recent git tags (`git tag -l --sort=-v:refname` — in PowerShell pipe to `Select-Object -First 3`) rather than `pyproject.toml` alone. `git tag -a <tag> -m "<summary>"`.
 5. Push only on explicit instruction: `git push origin HEAD --follow-tags`.
 
 ## 4. Report (<= 10 lines, then the shared HANDOFF block)
@@ -73,9 +73,9 @@ Any failure needing a logic change in `src/` → STOP, emit the report with `sta
 - docs/*.md and src/ (do not read on startup)
 - git push without explicit user instruction; force-push ever
 
-## Reasoning Mode: `fast-executor` (effort: high)
+## Reasoning Mode: `fast-executor` (effort: low)
 
-Model `gemini-3.8-flash`, thinking `thinkingLevel=HIGH`. Do not narrate deliberation. Run the prescribed commands in order, report compactly, stop on the first non-trivial failure and hand off.
+Model `gemini-4-hydrogen`, thinking `thinkingLevel=LOW`. Do not narrate deliberation. Run the prescribed commands in order, report compactly, stop on the first non-trivial failure and hand off.
 
 ## Shared Sub-Agent Protocol (all agents)
 
@@ -87,7 +87,7 @@ Model `gemini-3.8-flash`, thinking `thinkingLevel=HIGH`. Do not narrate delibera
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
 
-**Token discipline:** read only your *Context Diet* files. In large files use `grep -n` to find the symbol, then read a bounded line range. Never paste whole files into your answer.
+**Token discipline:** read only your *Context Diet* files. In large files use search (`rg -n`, `grep -n`, or PowerShell `Select-String`) to locate the symbol, then read a bounded line range. Never paste whole files into your answer.
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 

@@ -13,6 +13,7 @@ export var PANEL_VISIBILITY_KEY = "ibkr_panel_visibility_v1";
 export var TABLE_SORT_KEY = "ibkr_chain_table_sort_v1";
 export var STRATEGY_AUTO_POPULATE_KEY = "ibkr_strategy_auto_populate_v1";
 export var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
+export var LEDGER_PREFS_KEY = "ibkr_ledger_prefs_v1";
 export var DEFAULT_PANEL_VISIBILITY = {
   walls: true,
   iv_smile: false,
@@ -20,6 +21,7 @@ export var DEFAULT_PANEL_VISIBILITY = {
   greeks: false,
   corridor: true,
   strategy: true,
+  trade_ledger: true,
 };
 
 export function cloneDefaultPanelVisibility() {
@@ -30,6 +32,7 @@ export function cloneDefaultPanelVisibility() {
     greeks: DEFAULT_PANEL_VISIBILITY.greeks,
     corridor: DEFAULT_PANEL_VISIBILITY.corridor,
     strategy: DEFAULT_PANEL_VISIBILITY.strategy,
+    trade_ledger: DEFAULT_PANEL_VISIBILITY.trade_ledger,
   };
 }
 
@@ -67,6 +70,15 @@ export var state = {
   bannerFreshTimer: null,
   tableSort: { col: null, dir: null },
   tableFilters: {},
+  ledgerWindow: "1M",
+  ledgerTicker: "ALL",
+  ledgerGroupBy: "campaigns",
+  ledgerView: "realized",
+  ledgerIncludeStockGain: false,
+  ledgerSyncMode: "auto",
+  ledgerData: null,
+  ledgerExpandedIds: {},
+  ledgerBusy: false,
 };
 
 export var dom = {
@@ -154,4 +166,21 @@ export var dom = {
   corridorKpiSyncSub: document.getElementById("corridor-kpi-sync-sub"),
   corridorLadderTbody: document.getElementById("corridor-ladder-tbody"),
   corridorChartEl: document.getElementById("chart-corridor-ladder"),
+  ledgerCard: document.getElementById("trade-ledger-card"),
+  ledgerStatusBadge: document.getElementById("ledger-status-badge"),
+  ledgerWindowGroup: document.getElementById("ledger-window-group"),
+  ledgerViewGroup: document.getElementById("ledger-view-group"),
+  ledgerGroupGroup: document.getElementById("ledger-group-group"),
+  ledgerStockGainToggle: document.getElementById("ledger-stock-gain-toggle"),
+  ledgerTickerFilter: document.getElementById("ledger-ticker-filter"),
+  ledgerSyncMode: document.getElementById("ledger-sync-mode"),
+  ledgerSyncBtn: document.getElementById("btn-ledger-sync"),
+  ledgerImportFile: document.getElementById("ledger-import-file"),
+  ledgerImportBtn: document.getElementById("btn-ledger-import"),
+  ledgerMtmBtn: document.getElementById("btn-ledger-mtm"),
+  ledgerKpiStrip: document.getElementById("ledger-kpi-strip"),
+  ledgerChartEl: document.getElementById("chart-ledger"),
+  ledgerTableContainer: document.getElementById("ledger-table-container"),
+  ledgerTableHead: document.getElementById("ledger-table-head"),
+  ledgerTableBody: document.getElementById("ledger-table-body"),
 };

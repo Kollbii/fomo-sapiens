@@ -1,6 +1,6 @@
 ---
 name: quant-analytics-eng
-description: 'Use for any change in src/analytics/: vectorized BSM IV/Greeks fallback, Put/Call Walls (OI with Volume fallback), unusual activity (Volume > OI, Volume Z-score), multi-DTE profiles, the Strategy Lab engine (spreads, condors, diagonals, CUSTOM legs, POP, expected move, T+n/dIV payoff curves), and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).'
+description: 'Use for any change in src/analytics/: vectorized BSM IV/Greeks fallback, Put/Call Walls (OI with Volume fallback), unusual activity (Volume > OI, Volume Z-score), multi-DTE profiles, the Strategy Lab engine (spreads, condors, diagonals, CUSTOM legs, POP, expected move, T+n/dIV payoff curves), Trade Ledger strategy classifier & multi-step FIFO roll-chain engine (src/analytics/ledger/), and roadmap analytics (GEX, snapshot diff, 25-delta skew, max pain).'
 tools: Read, Edit, Write, Bash, Grep, Glob
 model: opus
 color: green
@@ -34,6 +34,12 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 - Pricing `Mid` / `Natural` / slippage / limit ladder; risk `max_profit`, `max_loss`, `max_loss_unbounded` (naked short calls => unbounded, never a finite number), RoR, breakevens, log-normal POP, `±1σ` move `S * IV_atm * sqrt(DTE/365)`; net Greeks x qty x 100.
 - Payoff curves `T+0`, midpoint, expiration, simulated `T+n` with `ΔIV`; diagonals price the far leg with remaining time at near expiry.
 
+## 4a. Trade Ledger & Roll-Chain Engine (`ledger/`: `models`, `classifier`, `rolls`, `engine`)
+- Pure analytics over `LedgerExecutionRow` and `LedgerPositionRow` inputs (plus optional injected `now` and `live_marks`); zero I/O or config/env access.
+- `classifier.py`: clusters fills per underlying by `ib_order_id` or `<= 2.0s` (`cluster_option_episodes`), classifies 17 `LedgerStrategyType` variants, and checks uncovered stock shares before choosing `COVERED_CALL` vs `NAKED_CALL`.
+- `rolls.py`: FIFO option/stock lot matching (never creating phantom opening lots for pre-window orphan closes), assignment/expiration/exercise handling, simultaneous + sequential roll stitching within `roll_max_gap_hours` (`24.0h`), and assignment stock-realization linkage.
+- `engine.py`: keeps `realized` (ex-fee P&L, net option premium, sidecar `fees`, daily curve) strictly separate from `open_mtm` (`LIVE_GATEWAY` -> `FLEX_MARK` -> `NONE` unrealized MTM) and honors `include_stock_gain`.
+
 ## 5. Testing
 - Validate against closed-form references (e.g. S=K=100, T=1, r=0.05, σ=0.2 → call ≈ 10.4506, put ≈ 5.5735) and put-call parity; round-trip IV(price(σ)) ≈ σ within `1e-4`.
 - Payoff tests assert exact expiry P&L at strikes and breakevens by hand computation; no snapshot-of-output tests.
@@ -45,13 +51,15 @@ silent: the UI renders them confidently. Correctness first, then vectorization, 
 - `src/analytics/`
 - `tests/unit/test_bsm_and_analytics.py`
 - `tests/unit/test_strategies.py`
+- `tests/unit/test_ledger_analytics.py`
 
 **Reads (context diet — nothing else on startup):**
-- docs/DATA_SCHEMA.md (section 2 columns only)
+- docs/DATA_SCHEMA.md (sections 2 and 5 columns only)
 - docs/ARCHITECTURE.md (section 4 only)
 - docs/reference/IMPLEMENTATION_NOTES.md (section 4 only)
 - docs/FUTURE_IMPROVEMENTS.md (only the section being implemented)
 - `src/storage/schema.py`
+- `src/storage/ledger_schema.py`
 - `src/analytics/`
 
 **Forbidden:**
@@ -74,7 +82,7 @@ Model `opus`. Think step by step before editing. Enumerate invariants and edge c
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
 
-**Token discipline:** read only your *Context Diet* files. In large files use `grep -n` to find the symbol, then read a bounded line range. Never paste whole files into your answer.
+**Token discipline:** read only your *Context Diet* files. In large files use search (`rg -n`, `grep -n`, or PowerShell `Select-String`) to locate the symbol, then read a bounded line range. Never paste whole files into your answer.
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 

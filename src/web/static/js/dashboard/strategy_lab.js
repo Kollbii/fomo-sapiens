@@ -8,11 +8,14 @@ import {
   extractApiErrorMessage,
   fmtMoney,
   fmtNum,
+  formatAutoFollowLabel,
   formatExpiryIso,
   formatStrikeShort,
   isStrategyAutoPopulateEnabled,
+  resolveStrategyTargetExpiry,
   showBanner,
   snapDteValueToExpiries,
+  sortedChainExpiries,
   themeVars,
 } from "./helpers.js";
 import {
@@ -34,20 +37,7 @@ import {
 
 // ------------------------------------------------------------------ Strategy Lab & T+n Payoff
 export function strategySortedExpiries(data) {
-  if (!data || !data.contracts || !data.contracts.length) return [];
-  var seen = {};
-  var out = [];
-  for (var i = 0; i < data.contracts.length; i++) {
-    var c = data.contracts[i];
-    if (!seen[c.expiry]) {
-      seen[c.expiry] = true;
-      out.push({ expiry: c.expiry, dte: Number(c.dte) });
-    }
-  }
-  out.sort(function (a, b) {
-    return a.dte - b.dte || String(a.expiry).localeCompare(String(b.expiry));
-  });
-  return out;
+  return sortedChainExpiries(data);
 }
 
 function strategyStrikesFor(data, expiry, right) {
@@ -115,15 +105,7 @@ export function setActiveStrategyPresetUI(kind) {
 export function buildSeedLegsFromChain(data) {
   var exps = strategySortedExpiries(data);
   if (!exps.length) return [];
-  var chosenExp = exps[0].expiry;
-  if (dom.strategyExpirySelect && dom.strategyExpirySelect.value) {
-    for (var i = 0; i < exps.length; i++) {
-      if (exps[i].expiry === dom.strategyExpirySelect.value) {
-        chosenExp = exps[i].expiry;
-        break;
-      }
-    }
-  }
+  var chosenExp = resolveStrategyTargetExpiry(data) || exps[0].expiry;
   var puts = strategyStrikesFor(data, chosenExp, "P");
   if (!puts.length) {
     var calls = strategyStrikesFor(data, chosenExp, "C");
@@ -381,7 +363,7 @@ export function syncStrategySelectors(data) {
     dom.strategyExpirySelect.innerHTML = "";
     var autoOpt = document.createElement("option");
     autoOpt.value = "";
-    autoOpt.textContent = "Auto (Front)";
+    autoOpt.textContent = formatAutoFollowLabel(data);
     dom.strategyExpirySelect.appendChild(autoOpt);
     var exps = strategySortedExpiries(data);
     var snappedExp = snapDteValueToExpiries(prev, exps, {
@@ -397,9 +379,7 @@ export function syncStrategySelectors(data) {
       }
       dom.strategyExpirySelect.appendChild(opt);
     }
-    if (snappedExp) {
-      dom.strategyExpirySelect.value = snappedExp;
-    }
+    dom.strategyExpirySelect.value = snappedExp || "";
   }
 
   if (sameTicker && data && state.strategyKind === "CUSTOM" && state.strategyLegs.length) {
@@ -802,6 +782,9 @@ function renderStrategyEvaluation(ev) {
         : "Strategy evaluated.";
   }
 
+  if (state.corridorFrame && state.corridorFrame.source === "CACHED_PREVIEW" && state.chainData) {
+    applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+  }
   if (isPanelVisible("strategy")) {
     renderStrategyPayoffChart(ev, themeVars());
   }
@@ -952,9 +935,7 @@ function strategyControlParams() {
     : 1;
   var days = dom.strategyDaysSlider ? Math.max(0, parseInt(dom.strategyDaysSlider.value, 10) || 0) : 0;
   var ivPct = dom.strategyIvSlider ? parseInt(dom.strategyIvSlider.value, 10) || 0 : 0;
-  var targetExp = dom.strategyExpirySelect && dom.strategyExpirySelect.value
-    ? dom.strategyExpirySelect.value
-    : null;
+  var targetExp = resolveStrategyTargetExpiry(state.chainData);
   return {
     qty: qty,
     daysForward: days,
@@ -1134,6 +1115,7 @@ export function addCustomStrategyLegRow() {
   var exps = strategySortedExpiries(state.chainData);
   var exp =
     (dom.strategyExpirySelect && dom.strategyExpirySelect.value) ||
+    resolveStrategyTargetExpiry(state.chainData) ||
     (state.strategyLegs.length ? state.strategyLegs[0].expiry : exps.length ? exps[0].expiry : "");
   var chosenRight = "C";
   var strikes = strategyStrikesFor(state.chainData, exp, chosenRight);

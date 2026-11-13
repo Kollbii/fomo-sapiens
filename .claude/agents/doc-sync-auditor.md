@@ -17,8 +17,8 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 ## 1. Procedure
 1. `git status --short` and `git diff --stat` (add `HEAD~N..HEAD` / `--cached` as instructed).
 2. `git diff -U2 -- <changed code paths>` — read only the hunks.
-3. Map each changed path to its docs (table), `grep -n` the affected identifier in those docs, and edit only the matching lines/sections.
-4. Verify every identifier you wrote exists in the diff or the code (`grep -rn "<identifier>" src/`). Never invent numbers, names, or defaults. `tests/unit/test_docs_consistency.py` enforces `` `#<id>` `` and `GET|POST /api/...` references automatically.
+3. Map each changed path to its docs (table), search (`rg -n`, `grep -n`, or PowerShell `Select-String`) for the affected identifier in those docs, and edit only the matching lines/sections.
+4. Verify every identifier you wrote exists in the diff or the code (search `src/` before citing). Never invent numbers, names, or defaults. `tests/unit/test_docs_consistency.py` enforces `` `#<id>` `` and `GET|POST /api/...` references automatically, and `tests/unit/test_agent_specs.py` enforces `.agent/` adapter & thinking-config sync.
 5. If an implemented feature came from `docs/FUTURE_IMPROVEMENTS.md`, move its spec into `docs/ARCHITECTURE.md` and mark `[IMPLEMENTED]`.
 
 ## 2. Code -> Documentation Map
@@ -34,7 +34,7 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 | `src/web/templates/*`, `src/web/static/*` | `docs/UI_UX_GUIDELINES.md` only when a rule, token, or row changes; element/selector/helper details and cache-buster versions -> `docs/reference/IMPLEMENTATION_NOTES.md` §5.1 |
 | `tests/*` (new test files) | `docs/CODING_STANDARDS.md` §4 |
 | any user-visible change | `CHANGELOG.md` `## [Unreleased]` |
-| new module / responsibility shift | `.agent/agents/<owner>.md` `owns:` list + `make agents-sync` |
+| `.agent/models.yaml`, `.agent/agents/*.md`, or responsibility shift | `AGENTS.md` §7, `.agent/agents/README.md`, `docs/CODING_STANDARDS.md` §4.1 (`test_agent_specs.py`), `.agent/agents/<owner>.md` `owns:`, then run `make agents-sync` |
 
 ## 3. Style Rules
 - Surgical edits; preserve existing heading numbering and tone. Prefer replacing a stale sentence over appending a new one — the docs are already long and every line costs every agent tokens.
@@ -57,7 +57,7 @@ You make docs match code — never the reverse. If the diff contradicts a doc in
 **Forbidden:**
 - `src/`
 - `tests/`
-- .claude/agents/, .gemini/agents/ (generated — regenerate with `make agents-sync`)
+- .claude/agents/, .gemini/agents/, .gemini/settings.json (generated — regenerate with `make agents-sync`)
 
 ## Reasoning Mode: `precise-writer` (effort: low)
 
@@ -73,7 +73,7 @@ Model `sonnet`. No long deliberation. Copy identifiers verbatim from the diff; n
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
 
-**Token discipline:** read only your *Context Diet* files. In large files use `grep -n` to find the symbol, then read a bounded line range. Never paste whole files into your answer.
+**Token discipline:** read only your *Context Diet* files. In large files use search (`rg -n`, `grep -n`, or PowerShell `Select-String`) to locate the symbol, then read a bounded line range. Never paste whole files into your answer.
 
 **Scope discipline:** edit only paths you *Own*. If the correct fix lies outside your scope, stop and hand off — do not patch around it.
 

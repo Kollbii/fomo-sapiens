@@ -11,6 +11,20 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.analytics.anomalies import AnomaliesReport
+from src.analytics.ledger import (
+    LedgerAnalyticsReport,
+    LedgerBreakdownRow,
+    LedgerCampaignRow,
+    LedgerChartPoint,
+    LedgerExecutionView,
+    LedgerGroupBy,
+    LedgerKPIs,
+    LedgerOpenPositionView,
+    LedgerStrategyType,
+    LedgerView,
+    LedgerWindow,
+    RollStep,
+)
 from src.analytics.strategies import (
     PresetStrategyKind,
     StrategyEvaluationResponse,
@@ -30,7 +44,27 @@ __all__ = [
     "CorridorQuotesRequest",
     "CorridorStopResponse",
     "GatewayStatusResponse",
+    "LedgerAnalyticsReport",
+    "LedgerBreakdownRow",
+    "LedgerCampaignRow",
+    "LedgerChartPoint",
+    "LedgerDashboardResponse",
+    "LedgerExecutionView",
+    "LedgerGroupBy",
+    "LedgerImportResponse",
+    "LedgerKPIs",
+    "LedgerMTMRefreshResponse",
+    "LedgerOpenPositionView",
+    "LedgerStatusSummary",
+    "LedgerStrategyType",
+    "LedgerSyncMode",
+    "LedgerSyncRequest",
+    "LedgerSyncResponse",
+    "LedgerView",
+    "LedgerWindow",
+    "MAX_LEDGER_IMPORT_BYTES",
     "RefreshRequest",
+    "RollStep",
     "SnapshotsListResponse",
     "StrategyEvaluateRequest",
     "StrategyEvaluationResponse",
@@ -66,6 +100,10 @@ class GatewayStatusResponse(BaseModel):
     available_strike_steps: list[float] = Field(default_factory=list)
     available_range_pcts: list[float] = Field(default_factory=list)
     active_capabilities_ticker: str | None = None
+    flex_configured: bool = False
+    flex_monthly_configured: bool = False
+    flex_trade_conf_configured: bool = False
+    gateway_ledger_sync_enabled: bool = False
 
 
 SystemStatusResponse = GatewayStatusResponse
@@ -197,3 +235,85 @@ class CorridorStopResponse(BaseModel):
 
     stopped_subscriptions: int
     active_streams: int
+
+
+MAX_LEDGER_IMPORT_BYTES = 20 * 1024 * 1024
+
+LedgerSyncMode = Literal["auto", "monthly", "full"]
+
+
+class LedgerSyncRequest(BaseModel):
+    """Request body for `POST /api/ledger/sync`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: LedgerSyncMode = "auto"
+    include_gateway: bool | None = None
+
+
+class LedgerStatusSummary(BaseModel):
+    """Safe non-secret configuration and sync status summary for the Trade Ledger."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    flex_configured: bool
+    flex_monthly_configured: bool
+    flex_trade_conf_configured: bool
+    gateway_sync_enabled: bool
+    recommended_sync_mode: Literal["monthly", "full"]
+    last_synced_at: str | None = None
+    last_sync_mode: str | None = None
+    execution_count: int = 0
+    open_position_count: int = 0
+
+
+class LedgerSyncResponse(BaseModel):
+    """Response body for `POST /api/ledger/sync`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode_used: str
+    queries_run: list[str]
+    gateway_synced: bool
+    gateway_note: str | None = None
+    executions_inserted: int
+    executions_updated: int
+    total_executions: int
+    open_positions_count: int
+    synced_at: str
+    notices: list[str] = Field(default_factory=list)
+
+
+class LedgerImportResponse(BaseModel):
+    """Response body for `POST /api/ledger/import`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str
+    file_format: Literal["XML", "CSV"]
+    executions_inserted: int
+    executions_updated: int
+    open_positions_imported: int
+    total_executions: int
+    notices: list[str] = Field(default_factory=list)
+
+
+class LedgerMTMRefreshResponse(BaseModel):
+    """Response body for `POST /api/ledger/mtm/refresh`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    refreshed_count: int
+    skipped_count: int
+    marks_by_conid: dict[int, float]
+    updated_at: str
+    notices: list[str] = Field(default_factory=list)
+
+
+class LedgerDashboardResponse(BaseModel):
+    """Response body for `GET /api/ledger`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    report: LedgerAnalyticsReport
+    status: LedgerStatusSummary

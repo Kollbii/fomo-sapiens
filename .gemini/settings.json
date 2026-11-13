@@ -14,7 +14,7 @@
         "modelConfig": {
           "generateContentConfig": {
             "thinkingConfig": {
-              "thinkingLevel": "HIGH"
+              "thinkingLevel": "MEDIUM"
             }
           }
         }
@@ -23,7 +23,7 @@
         "modelConfig": {
           "generateContentConfig": {
             "thinkingConfig": {
-              "thinkingLevel": "HIGH"
+              "thinkingLevel": "LOW"
             }
           }
         }
@@ -50,7 +50,7 @@
         "modelConfig": {
           "generateContentConfig": {
             "thinkingConfig": {
-              "thinkingLevel": "LOW"
+              "thinkingLevel": "MEDIUM"
             }
           }
         }

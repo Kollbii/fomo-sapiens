@@ -171,9 +171,11 @@ export function initChartResizeHandling() {
           var minGuard =
             key === "strategy-lab-card"
               ? 530
-              : key === "wall-corridor-card"
-                ? 460
-                : 0;
+              : key === "trade-ledger-card"
+                ? 500
+                : key === "wall-corridor-card"
+                  ? 460
+                  : 0;
           if (restoredH >= minGuard) {
             card.style.height = restoredH + "px";
           }

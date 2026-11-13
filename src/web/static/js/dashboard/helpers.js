@@ -7,9 +7,24 @@ import {
   dom,
   state,
 } from "./state.js";
-import {
-  matchesDteFilterValue,
-} from "./charts.js";
+
+// ------------------------------------------------------------------ DTE & Governing Expiry Helpers
+export var DTE_BUCKET_DEFS = [
+  { key: "BUCKET:30-60", label: "30\u201360d", min: 30, max: 60 },
+  { key: "BUCKET:61-90", label: "61\u201390d", min: 61, max: 90 },
+  { key: "BUCKET:91-120", label: "91\u2013120d", min: 91, max: 120 },
+];
+
+export function matchesDteFilterValue(dteVal, expiryStr, filterVal) {
+  if (!filterVal || filterVal === "ALL") return true;
+  for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
+    if (DTE_BUCKET_DEFS[b].key === filterVal) {
+      var nDte = Number(dteVal);
+      return !isNaN(nDte) && nDte >= DTE_BUCKET_DEFS[b].min && nDte <= DTE_BUCKET_DEFS[b].max;
+    }
+  }
+  return String(expiryStr) === String(filterVal);
+}
 
 // ------------------------------------------------------------------ Helpers
 export function extractApiErrorMessage(body, fallback) {
@@ -209,6 +224,148 @@ export function snapDteValueToExpiries(previousVal, expiries, options) {
     }
   }
   return bestExpiry || emptyValue;
+}
+
+export function sortedChainExpiries(data) {
+  var seen = {};
+  var out = [];
+  if (data && data.contracts && data.contracts.length) {
+    for (var i = 0; i < data.contracts.length; i++) {
+      var c = data.contracts[i];
+      if (!seen[c.expiry]) {
+        seen[c.expiry] = true;
+        out.push({ expiry: String(c.expiry), dte: Number(c.dte) });
+      }
+    }
+  } else if (data && data.profiles && data.profiles.expiries && data.profiles.expiries.length) {
+    for (var j = 0; j < data.profiles.expiries.length; j++) {
+      var p = data.profiles.expiries[j];
+      if (!seen[p.expiry]) {
+        seen[p.expiry] = true;
+        out.push({ expiry: String(p.expiry), dte: Number(p.dte) });
+      }
+    }
+  }
+  out.sort(function (a, b) {
+    return a.dte - b.dte || String(a.expiry).localeCompare(String(b.expiry));
+  });
+  return out;
+}
+
+function bucketAnchorDte(bucketKey, pool) {
+  for (var b = 0; b < DTE_BUCKET_DEFS.length; b++) {
+    var def = DTE_BUCKET_DEFS[b];
+    if (def.key === bucketKey) {
+      return def.key === "BUCKET:30-60" ? 38 : (def.min + def.max) / 2;
+    }
+  }
+  var m = /^BUCKET:(\d+)-(\d+)$/.exec(String(bucketKey || ""));
+  if (m) {
+    return (Number(m[1]) + Number(m[2])) / 2;
+  }
+  return pool && pool.length ? pool[0].dte : 38;
+}
+
+function pickAnchorExpiryFromPool(pool, anchorDte) {
+  if (!pool || !pool.length) return null;
+  var best = pool[0];
+  var bestDiff = Math.abs(best.dte - anchorDte);
+  for (var i = 1; i < pool.length; i++) {
+    var cand = pool[i];
+    var diff = Math.abs(cand.dte - anchorDte);
+    if (
+      diff < bestDiff - 1e-9 ||
+      (Math.abs(diff - bestDiff) <= 1e-9 &&
+        (cand.dte < best.dte ||
+          (cand.dte === best.dte && String(cand.expiry).localeCompare(String(best.expiry)) < 0)))
+    ) {
+      best = cand;
+      bestDiff = diff;
+    }
+  }
+  return { expiry: best.expiry, dte: best.dte };
+}
+
+export function resolveGoverningExpiryInfo(data, wallsDteVal) {
+  var exps = sortedChainExpiries(data);
+  if (!exps.length) return null;
+  var raw =
+    wallsDteVal !== undefined && wallsDteVal !== null
+      ? wallsDteVal
+      : dom.wallsDteSelect
+        ? dom.wallsDteSelect.value
+        : "ALL";
+  var val = String(raw || "ALL").trim() || "ALL";
+
+  if (val !== "ALL" && val.indexOf("BUCKET:") !== 0) {
+    for (var i = 0; i < exps.length; i++) {
+      if (exps[i].expiry === val) {
+        return { expiry: exps[i].expiry, dte: exps[i].dte };
+      }
+    }
+    var snapped = snapDteValueToExpiries(val, exps, { allowBuckets: false, emptyValue: "" });
+    if (snapped) {
+      for (var j = 0; j < exps.length; j++) {
+        if (exps[j].expiry === snapped) {
+          return { expiry: exps[j].expiry, dte: exps[j].dte };
+        }
+      }
+    }
+    return pickAnchorExpiryFromPool(exps, 38);
+  }
+
+  if (val.indexOf("BUCKET:") === 0) {
+    var pool = exps.filter(function (e) {
+      return matchesDteFilterValue(e.dte, e.expiry, val);
+    });
+    if (!pool.length) pool = exps;
+    return pickAnchorExpiryFromPool(pool, bucketAnchorDte(val, pool));
+  }
+
+  return pickAnchorExpiryFromPool(exps, 38);
+}
+
+export function resolveGoverningExpiry(data, wallsDteVal) {
+  var info = resolveGoverningExpiryInfo(data, wallsDteVal);
+  return info ? info.expiry : null;
+}
+
+function resolveTileTargetExpiry(selectEl, data) {
+  var exps = sortedChainExpiries(data);
+  if (!exps.length) return null;
+  var explicit = selectEl && selectEl.value ? String(selectEl.value).trim() : "";
+  if (explicit) {
+    for (var i = 0; i < exps.length; i++) {
+      if (exps[i].expiry === explicit) return exps[i].expiry;
+    }
+  }
+  return resolveGoverningExpiry(data);
+}
+
+export function resolveCorridorTargetExpiry(data) {
+  return resolveTileTargetExpiry(dom.corridorExpirySelect, data);
+}
+
+export function resolveStrategyTargetExpiry(data) {
+  return resolveTileTargetExpiry(dom.strategyExpirySelect, data);
+}
+
+export function formatAutoFollowLabel(data) {
+  var info = resolveGoverningExpiryInfo(data);
+  return info ? "Auto (Follow Walls \u2022 " + info.dte + "d)" : "Auto (Follow Walls)";
+}
+
+export function syncAutoFollowOptionLabels(data) {
+  var labelText = formatAutoFollowLabel(data);
+  [dom.corridorExpirySelect, dom.strategyExpirySelect].forEach(function (sel) {
+    if (!sel || !sel.options) return;
+    for (var i = 0; i < sel.options.length; i++) {
+      if (sel.options[i].value === "") {
+        sel.options[i].textContent = labelText;
+        break;
+      }
+    }
+  });
 }
 
 export function buildActivePullScopeText() {

@@ -11,7 +11,8 @@
 #   - Claude Code: model tier (opus > sonnet > haiku) + `reasoning_guidance` in the agent prompt.
 #   - Gemini CLI : `gemini.thinking_config` is passed verbatim as
 #                  generateContentConfig.thinkingConfig (agent frontmatter cannot carry it — its
-#                  schema is strict). Gemini 3.x / 4 accept `thinkingLevel: LOW | HIGH`;
+#                  schema is strict). Gemini 4 models accept `thinkingLevel: LOW | MEDIUM | HIGH`
+#                  (plus `XHIGH` on `gemini-4-hydrogen`); Gemini 3.x accepted `LOW | HIGH`;
 #                  Gemini 2.5 used `thinkingBudget` (-1 = dynamic, max 32768 on 2.5 Pro).
 #   - Gemini 3.x+: Google recommends temperature 1.0 (lower values can cause looping / degraded
 #                  reasoning), so all Gemini profiles keep temperature 1.0.
@@ -21,13 +22,16 @@
 # the newest model of each family; Gemini uses explicit model ids.
 
 # ---- Gemini model ids (edit here only) -------------------------------------------------------
-# `gemini-3.8-flash` = LATEST_GEMINI_FLASH_MODEL in @google/gemini-cli 0.68.0.
-# `gemini-4-argon` ("Argon 4") is not in that CLI's built-in model registry; the CLI passes unknown
-# ids through unchanged, and thinkingConfig is set explicitly per agent (settings.json overrides),
-# so no CLI-side model-family detection is needed.
+# `gemini-4-hydrogen` is the primary Gemini 4 workhorse for coding, doc sync, and runner tasks
+# (supports thinkingLevel: LOW | MEDIUM | HIGH | XHIGH). `gemini-4-argon` ("Argon 4") remains
+# the heavy frontier baseline for correctness-critical deep reasoning (`HIGH`). `gemini-3.8-flash`
+# (`LATEST_GEMINI_FLASH_MODEL` in @google/gemini-cli 0.68.0) is kept as a legacy fallback. Unknown
+# model ids pass through unchanged, and thinkingConfig is injected explicitly per agent via
+# `.gemini/settings.json` overrides, so no CLI-side model-family detection is needed.
 gemini_models:
-  pro: &gemini_pro gemini-4-argon      # "Argon 4"
-  flash: &gemini_flash gemini-3.8-flash
+  argon: &gemini_argon gemini-4-argon         # "Argon 4" frontier reasoning baseline
+  hydrogen: &gemini_hydrogen gemini-4-hydrogen  # Fast frontier-grade Gemini 4 workhorse
+  flash: &gemini_flash gemini-3.8-flash       # Legacy fallback if Hydrogen quota is constrained
 
 profiles:
   deep-reasoning:
@@ -43,27 +47,28 @@ profiles:
     claude:
       model: opus
     gemini:
-      model: *gemini_pro
+      model: *gemini_argon
       temperature: 1.0
-      thinking_config: { thinkingLevel: HIGH }
+      thinking_config: { thinkingLevel: HIGH }     # alt: *gemini_hydrogen with thinkingLevel: XHIGH
       max_turns: 40
       timeout_mins: 20
 
   balanced-coding:
     purpose: >-
       Large-surface implementation with moderate logical depth: FastAPI routes, Jinja2 templates,
-      CSS tokens, 7k-line dashboard.js, Plotly lifecycle. Needs strong code-gen + long context,
-      not deep math.
+      per-row CSS tokens, ES modules (`src/web/static/js/dashboard/*.js`), Plotly lifecycle.
+      Needs strong multi-file code-gen + long context without burning frontier Argon quota.
     reasoning: medium
     reasoning_guidance: >-
-      Plan briefly (which functions/selectors change), then edit surgically. Navigate large files
-      with grep + offset reads instead of loading them whole.
+      Plan briefly (which modules/functions/selectors change), then edit surgically. Locate symbols
+      with search (`rg -n` / `grep -n` / PowerShell `Select-String`) + bounded line reads instead
+      of loading whole files.
     claude:
       model: sonnet
     gemini:
-      model: *gemini_pro
+      model: *gemini_hydrogen
       temperature: 1.0
-      thinking_config: { thinkingLevel: LOW }      # large-surface coding; HIGH if UI logic gets hairy
+      thinking_config: { thinkingLevel: MEDIUM }   # alt if local Gemini CLI rejects MEDIUM: HIGH
       max_turns: 40
       timeout_mins: 20
 
@@ -78,9 +83,9 @@ profiles:
     claude:
       model: sonnet
     gemini:
-      model: *gemini_flash
+      model: *gemini_hydrogen
       temperature: 1.0
-      thinking_config: { thinkingLevel: HIGH }     # Flash always on HIGH (cheap, fewer bad edits)
+      thinking_config: { thinkingLevel: MEDIUM }   # alt if local Gemini CLI rejects MEDIUM: HIGH
       max_turns: 20
       timeout_mins: 10
 
@@ -95,9 +100,9 @@ profiles:
     claude:
       model: haiku
     gemini:
-      model: *gemini_flash
+      model: *gemini_hydrogen
       temperature: 1.0
-      thinking_config: { thinkingLevel: HIGH }     # Flash always on HIGH
+      thinking_config: { thinkingLevel: LOW }      # Fast Hydrogen tier for deterministic runner tasks
       max_turns: 15
       timeout_mins: 10
 

@@ -71,7 +71,8 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     ├── data/
     │   ├── snapshots/
     │   ├── latest/
-    │   └── metadata/
+    │   ├── metadata/
+    │   └── ledger/               # executions.csv, open_positions.csv, sync_state.json, imports/
     ├── src/
     │   ├── __init__.py
     │   ├── main.py
@@ -86,22 +87,28 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── contracts.py
     │   │   ├── corridor/         # models, quotes, selection (pure), service (subscriptions)
     │   │   ├── fetcher.py
+    │   │   ├── flex.py           # Flex Web Service v3 client & XML/CSV statement parser
+    │   │   ├── ledger_sync.py    # opt-in Gateway execution/position sync & <= 60 MTM marks
     │   │   └── parser.py
     │   ├── storage/
     │   │   ├── __init__.py
     │   │   ├── schema.py
-    │   │   └── csv_repository.py
+    │   │   ├── csv_repository.py
+    │   │   ├── ledger_schema.py      # 23-col execution & 15-col open position contracts
+    │   │   └── ledger_repository.py  # atomic data/ledger/ archive & Gateway -> Flex upgrade
     │   ├── analytics/
     │   │   ├── __init__.py
     │   │   ├── bsm_fallback.py
     │   │   ├── walls.py
     │   │   ├── anomalies.py
     │   │   ├── term_greeks.py
-    │   │   └── strategies/       # models, chain, builders (wall presets), engine (evaluate)
+    │   │   ├── strategies/       # models, chain, builders (wall presets), engine (evaluate)
+    │   │   └── ledger/           # models, classifier, rolls (FIFO + roll chains), engine
     │   ├── services/
     │   │   ├── __init__.py
     │   │   ├── analyzer.py       # AnalyzerService: refresh, chain analytics, Strategy Lab, corridor
     │   │   ├── corridor.py       # WallAnchors / BSM GreeksFallback glue, live-quote overlay cache
+    │   │   ├── ledger.py         # LedgerService: Flex/Gateway sync, XML/CSV import, MTM overlay
     │   │   └── schemas.py        # request/response models (public API contract)
     │   └── web/
     │       ├── __init__.py
@@ -112,10 +119,10 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │       │   └── index.html
     │       └── static/
     │           ├── css/          # tokens, layout, controls, charts, corridor, strategy_lab,
-    │           │                 # chain_table, responsive (cascade order = base.html)
+    │           │                 # ledger, chain_table, responsive (cascade order = base.html)
     │           └── js/dashboard/ # native ES modules: main.js entry + state, helpers, badges,
     │                             # charts, panels, chain_table, snapshots, strategy_lab,
-    │                             # corridor, network, events, ai_prompt, grid_layout
+    │                             # corridor, ledger, network, events, ai_prompt, grid_layout
     └── tests/
         ├── conftest.py          # fixtures_dir, fixture_repo
         ├── support/             # aio.py (run_coro, run_virtual_loop, noop_sleep), ib_fakes.py
@@ -128,11 +135,11 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 ## 3. Core Component Responsibilities
 
 ### 3.0 Layering & Service Layer
-`src/web/` is a thin HTTP adapter over `src/services/AnalyzerService`, which is the only component composing broker, storage, and analytics (full dependency rules in `docs/CODING_STANDARDS.md` §1). The broker never imports analytics: the service derives `WallAnchors` from `compute_walls()` and injects the vectorized BSM `GreeksFallback` into `CorridorQuoteService`. Services raise domain exceptions only; `src/web/errors.py` maps them to structured JSON (`InvalidRequestError` -> `422 INVALID_REQUEST`, also echoed as `detail`).
+`src/web/` is a thin HTTP adapter over `src/services/AnalyzerService` (and its composed `LedgerService` in `src/services/ledger.py`), which is the only layer composing broker, storage, and analytics (full dependency rules in `docs/CODING_STANDARDS.md` §1). The broker never imports analytics: `AnalyzerService` derives `WallAnchors` from `compute_walls()` and injects the vectorized BSM `GreeksFallback` into `CorridorQuoteService`. Services raise domain exceptions only; `src/web/errors.py` maps them to structured JSON (`InvalidRequestError` -> `422 INVALID_REQUEST`, `ConfigurationError` -> `422 CONFIGURATION_ERROR`, `FlexServiceError` -> `502 FLEX_SERVICE_ERROR`, echoed as `detail`).
 
 ### 3.1 FastAPI Lifespan & Shared Event Loop (`src/main.py`, `src/broker/client.py`)
 - `ib-async` requires an active `asyncio` event loop. FastAPI's `lifespan` context manager initializes a singleton `IBKRBrokerClient` bound to the Uvicorn event loop.
-- **Storage Layout Ownership:** The lifespan calls `CSVRepository.ensure_layout()` before loading the snapshot index, so `data/snapshots/`, `data/latest/`, and `data/metadata/` are created by the application itself (the `Makefile` no longer pre-creates them; `data/logs/` is created by `configure_logging()`).
+- **Storage Layout Ownership:** The lifespan calls `CSVRepository.ensure_layout()` and `LedgerService.ensure_layout()` before loading cached indexes, so `data/snapshots/`, `data/latest/`, `data/metadata/`, and `data/ledger/{imports/}` are created by the application itself (the `Makefile` no longer pre-creates them; `data/logs/` is created by `configure_logging()`).
 - **Offline-First Boot Policy:** If IBKR Gateway is closed at startup, the server still boots cleanly in **Offline Cache Mode**, serving data from `data/latest/` and `data/snapshots/`.
 - When the user clicks **Refresh**, `IBKRBrokerClient.ensure_connected()` connects to `IBKR_HOST:IBKR_PORT` (default `127.0.0.1:4001` locally, `host.docker.internal:4001` in Docker) with a dedicated read-only `clientId` (default `77`).
 
@@ -169,6 +176,22 @@ Every manual refresh executes a bounded **5-Stage Pipeline** to stay well below 
      - **`DELAYED` Collector (`_fetch_page_delayed`):** Calls `reqMktData(contract, genericTickList="100,101,106", snapshot=False, regulatorySnapshot=False)` for the page of `<= 80` contracts, polls every `0.25s` up to `2.25s`, cascades to `fallback_market_data_type` (`4`) when `>80%` quotes remain empty, cancels subscriptions (`cancelMktData`) in `finally:`, and waits `0.35s` before the next page.
      - **`LIVE_OPRA` Collector (`_fetch_page_live_opra`):** Requests live OPRA generic ticks `"100,101,104,106"` under configured live primary/fallback (`1 -> 2`) and waits for both `modelGreeks` and `callOpenInterest`/`putOpenInterest` (tick `101`) confirmation; if `Error 10089`/`354` triggers during collection, seamlessly delegates to `_fetch_page_delayed`.
 
+### 3.4 Hybrid Trade Ledger Acquisition (`src/broker/flex.py`, `src/broker/ledger_sync.py`, `src/services/ledger.py`)
+Trade Ledger data is ingested from up to three complementary read-only channels (`POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`):
+
+1. **IBKR Flex Web Service v3 (`FlexWebServiceClient` in `src/broker/flex.py`):**
+   - Performs non-blocking HTTPS `SendRequest` -> polled `GetStatement` calls (via `asyncio.to_thread` strictly against `https://ndcdyn.interactivebrokers.com/`, retrying transient `1018`/`1019` codes) using `IBKR_FLEX_TOKEN`.
+   - `select_flex_query_ids(settings, mode, has_existing_history)` chooses between:
+     - **Full 365-day Activity Flex Query** (`IBKR_FLEX_ACTIVITY_QUERY_ID` -> `FLEX_ACTIVITY_365`),
+     - **Monthly Incremental Placeholder** (`IBKR_FLEX_MONTHLY_QUERY_ID` -> `FLEX_MONTHLY`), selected automatically in `mode="auto"` once `LedgerRepository.has_existing_history()` is `True` (and required explicitly when `mode="monthly"`, else raising `ConfigurationError`), and
+     - **Optional Intraday Trade Confirmation Query** (`IBKR_FLEX_TRADE_CONF_QUERY_ID` -> `FLEX_TRADE_CONF`), appended when configured for same-day fills not yet settled in the daily Activity statement.
+   - `parse_flex_xml()` and `parse_activity_csv()` also power manual file imports (`POST /api/ledger/import`, bounded `file.read(MAX_LEDGER_IMPORT_BYTES + 1)` + `finally: file.close()`, POSIX/`\` separator stripping, `.xml`/`.csv` check, NUL-byte/`StorageSchemaError` validation) supporting Flex XML (`Trade`, `TradeConfirm`, `OptionEAE`, `OpenPosition`), Activity Statement CSV, multi-section `BOF`/`HEADER`/`DATA` Flex CSV, and flat Flex CSV exports. Parsers infer omitted `assetCategory` (`OPT` via option attrs/symbol, `STK` while skipping FX pairs/`AFX` rows and preserving dotted stocks), extract `Ep`/`A`/`Ex` lifecycle codes from `notes`/`code` while suppressing duplicate `<OptionEAE>` rows, and recover missing `<OpenPosition>` quantities from `positionValue / (markPrice * multiplier)` (`docs/DATA_SCHEMA.md` §5.2–5.4); all IBKR tokens (`t=...`) and XML/quoted/unquoted account identifiers (`acctId`, `accountId`, `acctCode`, `account`, `ClientAccountID`) are stripped/redacted via `redact_flex_secrets()`.
+2. **Opt-In Gateway Session & Open-Position Sync (`fetch_gateway_ledger` in `src/broker/ledger_sync.py`):**
+   - Disabled by default (`ENABLE_GATEWAY_LEDGER_SYNC=false`, raising `ConfigurationError` if requested while disabled).
+   - When explicitly enabled, uses `scripts/security_guard.py`'s `SCOPED_ALLOWLIST` permitting ONLY `reqExecutionsAsync` (`OPT`, plus optional `STK` via `GATEWAY_LEDGER_INCLUDE_STOCK`) and `reqPositionsAsync` inside `src/broker/ledger_sync.py`. Account attributes are discarded immediately; Gateway executions persist with `source="GATEWAY_LIVE"` and auto-upgrade in place when authoritative Flex statements arrive (`docs/DATA_SCHEMA.md` §5.3).
+3. **Bounded Open-Position Live MTM (`refresh_open_option_marks`, `POST /api/ledger/mtm`):**
+   - Explicit click-only snapshot poll capped at `MAX_MARK_CONTRACTS = 60` open option positions (reusing `conid` when present, yielding every 20 subscriptions, applying `1 -> 3 -> 4` / `LIVE 1->2` / `DELAYED 3->4` fallback, and isolating pacing-sleep `CancelledError` inside `finally:` so 100% of subscriptions call `cancelMktData`). Live quotes populate an in-memory mark overlay on `LedgerService` (`_live_marks`) without modifying `data/ledger/*.csv`.
+
 ---
 
 ## 4. Quantitative Analytics & BSM Fallback Engine (`src/analytics/`)
@@ -191,6 +214,12 @@ Under IBKR **Type 3 (15-min Delayed)** data without an OPRA subscription, IBKR o
 3. **Multi-DTE Comparative Structure (`src/analytics/term_greeks.py`):**
    - Aligns option chains across all weekly expirations in `[30, 120]` DTE over a unified strike and moneyness axis for Plotly overlays (IV Smile overlay, Delta/Gamma/Theta/Vega profile by DTE, Volume/OI concentration).
 
+### 4.3 Trade Ledger Analytics & Roll-Chain Engine (`src/analytics/ledger/`)
+Pure, deterministic quantitative P&L and campaign reconstruction over normalized `LedgerExecutionRow` and `LedgerPositionRow` data (`models.py`, `classifier.py`, `rolls.py`, `engine.py`):
+- **Order/Time Leg Clustering & Strategy Classification (`classifier.py`):** `cluster_option_episodes()` groups same-underlying fills sharing non-empty `ib_order_id` (preserving multi-second partial fills on one order) plus unlinked fills within `<= 2.0s`, then merges adjacent chronological episodes within `<= 2.0s` that share the same uniform lifecycle kind (`TRADE` vs `EXPIRED`/`ASSIGNED`/`EXERCISED`) so simultaneous multi-leg fills with distinct `ib_order_id` values cluster into one spread/combo episode without mixing trades and lifecycle events. Classifies 17 strategy types (`BULL_PUT_SPREAD`, `BEAR_CALL_SPREAD`, `BULL_CALL_SPREAD`, `BEAR_PUT_SPREAD`, `IRON_CONDOR`, `IRON_BUTTERFLY`, `DIAGONAL_SPREAD`, `CALENDAR_SPREAD`, `STRANGLE`, `STRADDLE`, `COVERED_CALL`, `NAKED_CALL`, `SHORT_PUT`, `LONG_CALL`, `LONG_PUT`, `CUSTOM_COMBO`, `STOCK_LOT`), verifying uncovered stock inventory before labeling short calls as `COVERED_CALL` vs `NAKED_CALL`.
+- **FIFO Lot Accounting & Roll Stitching (`rolls.py`):** Matches closing, expiring, assigned, and exercised option/stock fills (`TRADE`, `EXPIRED`, `ASSIGNED`, `EXERCISED`) via FIFO lots (sorting same-second opens before closes) without fabricating opening lots for pre-window orphan closes; orphan closes classify against their implied opening orientation (`_invert_legs_for_classification`) while keeping actual `BTC`/`STC`/`Expired`/`Assigned`/`Exercised` `RollStep` labels. Stitches both simultaneous close+open rolls and sequential rolls within `LEDGER_ROLL_MAX_GAP_HOURS` (default `24.0h`) into multi-step roll campaigns (`RollStep`, `LedgerCampaignRow`, e.g. `Roll Up & Out`, `Roll Down & Out`), and links assignment-driven stock realizations (`_link_stock_realizations_to_assignments`) when `include_stock_gain=True`.
+- **Strict View & Fee Separation (`engine.py`):** Builds `realized` view (`1W|1M|3M|YTD|1Y|ALL` window over closed/rolled realized ex-fee P&L, net option premium, sidecar `fees`, and cumulative P&L curve across `campaigns | strategy | ticker | executions` groupings) cleanly separated from `open_mtm` view (open option/stock lots plus unmatched `open_positions.csv` rows priced via `LIVE_GATEWAY` live mark overlay -> `FLEX_MARK` -> `NONE` unrealized MTM).
+
 ---
 
 ## 5. Resilience & Error Handling Matrix
@@ -203,6 +232,8 @@ Under IBKR **Type 3 (15-min Delayed)** data without an OPRA subscription, IBKR o
 | **Invalid Custom Ticker** | Caught in `TickerValidator` or empty `qualifyContractsAsync` result. | Rejects request with HTTP `422 Unprocessable Entity` and descriptive error banner before touching option chains or disk. |
 | **API Pacing Warning (`Error 100 / 162`)** | Intercepted in `ib.errorEvent`. | Paged fetcher increases inter-page cooldown (`0.35s -> 1.0s`) and retries the page once. |
 | **Mid-Batch Gateway Drop / HTTP Timeout / Post-Refresh Render Fault** | `IBKRBrokerClient.run_stage` / `handle_stage_error` catches socket drops (`OSError`, `ConnectionError`, `DISCONNECT_CODES`: `502/504/1100/1300/2110`) during discovery/collection; frontend `apiJson` enforces `timeoutMs: 120000` (`AbortController`) + captures non-JSON `textSnippet`; `refreshFromIBKR` separates Stage 1 HTTP pull from Stage 2 UI render. | Socket drops surface structured `503 GatewayConnectionError` with stage context (while always running `cancelMktData` cleanup). Stage 2 chart/DOM warnings preserve the archived CSV and display `Snapshot saved, UI render warning` (`UI_RENDER`) in a dismissible `.is-fresh` alert banner instead of blaming gateway/network connectivity. |
+| **Flex Web Service Failure / Malformed Upload** | `FlexWebServiceClient` catches HTTP/network errors (`http.client.HTTPException`, `URLError`, retries `1018`/`1019`); `parse_flex_xml`/`parse_activity_csv` reject NUL bytes or `(ValueError, csv.Error)` payloads; `api_ledger_import` enforces `MAX_LEDGER_IMPORT_BYTES` and `.xml`/`.csv`. | Flex errors raise `FlexServiceError` (`502 FLEX_SERVICE_ERROR`); malformed uploads raise `StorageSchemaError` (`422 STORAGE_SCHEMA_ERROR`) or `InvalidRequestError` (`422`), with `redact_flex_secrets()` stripping tokens and account IDs; existing `data/ledger/` archives stay intact offline. |
+| **Unconfigured Flex / Monthly / Gateway Sync** | `LedgerService.sync_ledger` or `select_flex_query_ids` detects missing token/query ID or `ENABLE_GATEWAY_LEDGER_SYNC=false`. | Raises `ConfigurationError` (`422 CONFIGURATION_ERROR`) surfaced in `#alert-banner`; `GET /api/ledger` still serves persisted local executions and open positions offline. |
 
 
 ---

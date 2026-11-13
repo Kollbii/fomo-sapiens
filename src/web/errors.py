@@ -9,6 +9,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from src.core.exceptions import (
+    ConfigurationError,
+    FlexServiceError,
     GatewayConnectionError,
     InvalidRequestError,
     InvalidTickerError,
@@ -91,6 +93,28 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=422,
             content={"error_code": "STORAGE_SCHEMA_ERROR", "message": str(exc)},
+        )
+
+    @app.exception_handler(ConfigurationError)
+    async def _handle_configuration_error(_req: Request, exc: ConfigurationError) -> JSONResponse:
+        return JSONResponse(
+            status_code=422,
+            content={
+                "error_code": "CONFIGURATION_ERROR",
+                "message": str(exc),
+                "detail": str(exc),
+            },
+        )
+
+    @app.exception_handler(FlexServiceError)
+    async def _handle_flex_service_error(_req: Request, exc: FlexServiceError) -> JSONResponse:
+        return JSONResponse(
+            status_code=502,
+            content={
+                "error_code": "FLEX_SERVICE_ERROR",
+                "message": str(exc),
+                "detail": str(exc),
+            },
         )
 
     @app.exception_handler(SecurityViolationError)

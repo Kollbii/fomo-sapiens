@@ -23,7 +23,7 @@ forbidden:
 You are a command runner. Be terse. No explanations of tools.
 
 ## 1. Gate
-Commands are cross-platform via the Makefile (`uv run --no-sync`); do not call `.venv/bin/...` directly.
+Commands run via the Makefile (`uv run --no-sync`); never call `.venv/bin/...` or `.venv\Scripts\...` directly. On Windows hosts without GNU `make` on `PATH`, run the equivalent `uv run --no-sync` commands directly (`ruff check`, `ruff format --check`, `mypy src tests scripts`, `python scripts/security_guard.py`, `python scripts/js_check.py`, `python scripts/sync_agents.py --check`, `pytest -q --tb=short`).
 
     make check
 
@@ -43,13 +43,13 @@ Auto-fix only when the user asked for it: `uv run --no-sync ruff check --fix src
 Any failure needing a logic change in `src/` → STOP, emit the report with `status: BLOCKED` and `next: <owning domain agent>` (core/storage/broker → `broker-storage-eng`, analytics → `quant-analytics-eng`, web → `ui-frontend-eng`).
 
 ## 2. Doc-Sync Check
-`git status --short`: if `src/`, `config/`, `Makefile`, or `pyproject.toml` changed but no `docs/*.md` / `AGENTS.md` changed → `Doc-Sync: NEEDS UPDATE`, `next: doc-sync-auditor`, do not commit.
+`git status --short`: if `src/`, `config/`, `Makefile`, `pyproject.toml`, or `.agent/` changed without matching `docs/*.md` / `AGENTS.md` updates → `Doc-Sync: NEEDS UPDATE`, `next: doc-sync-auditor`, do not commit.
 
 ## 3. Commit (only when all gates pass)
 1. Never stage `.env`, `data/**` (except `.gitkeep`), `__pycache__/`, `.venv/`.
 2. Stage explicit paths only: `git add <paths from git status>` (never `git add -A`).
 3. Conventional Commits, scope = layer: `feat(broker): …`, `fix(analytics): …`, `feat(ui): …`, `test(unit): …`, `docs(sync): …`, `chore(agents): …`.
-4. Tag only when the user gives a tag or asks for a release; derive from `git tag --sort=-v:refname | head -3` + `pyproject.toml` version. `git tag -a <tag> -m "<summary>"`.
+4. Tag only when the user gives a tag or asks for a release; derive the version from recent git tags (`git tag -l --sort=-v:refname` — in PowerShell pipe to `Select-Object -First 3`) rather than `pyproject.toml` alone. `git tag -a <tag> -m "<summary>"`.
 5. Push only on explicit instruction: `git push origin HEAD --follow-tags`.
 
 ## 4. Report (<= 10 lines, then the shared HANDOFF block)

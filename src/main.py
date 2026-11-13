@@ -18,6 +18,7 @@ from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
 from src.services.analyzer import AnalyzerService
+from src.services.ledger import LedgerService
 from src.storage.csv_repository import CSVRepository
 from src.web.api import get_web_service, router
 from src.web.errors import register_exception_handlers
@@ -57,6 +58,7 @@ def create_app(
     repo: CSVRepository | None = None,
     broker_client: IBKRBrokerClient | None = None,
     fetcher: PagedOptionChainFetcher | None = None,
+    ledger_service: LedgerService | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application in Offline-First mode."""
     cfg = settings or get_settings()
@@ -65,12 +67,13 @@ def create_app(
         repo=repo,
         broker_client=broker_client,
         fetcher=fetcher,
+        ledger_service=ledger_service,
     )
 
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         app_instance.state.service = service
-        service.repo.ensure_layout()
+        service.ensure_layout()
         try:
             service.repo.load_index()
         except Exception:  # pragma: no cover - defensive

@@ -4,9 +4,11 @@ import logging
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from src.core.config import (
     DEFAULT_YAML_PATH,
+    LedgerSettings,
     Settings,
     configure_logging,
     get_settings,
@@ -25,6 +27,14 @@ ENV_VARS = (
     "LOG_LEVEL",
     "APP_HOST",
     "APP_PORT",
+    "IBKR_FLEX_TOKEN",
+    "IBKR_FLEX_ACTIVITY_QUERY_ID",
+    "IBKR_FLEX_MONTHLY_QUERY_ID",
+    "IBKR_FLEX_TRADE_CONF_QUERY_ID",
+    "ENABLE_GATEWAY_LEDGER_SYNC",
+    "GATEWAY_LEDGER_INCLUDE_STOCK",
+    "LEDGER_ROLL_MAX_GAP_HOURS",
+    "LEDGER_DIR",
 )
 
 
@@ -157,3 +167,65 @@ def test_env_market_data_reconciliation_and_mismatch(tmp_path: Path) -> None:
     env_bad.write_text("MARKET_DATA_MODE=DELAYED\nDEFAULT_MARKET_DATA_TYPE=1\n", encoding="utf-8")
     with pytest.raises(ConfigurationError):
         load_settings(DEFAULT_YAML_PATH, env_bad)
+
+
+def test_ledger_settings_defaults_env_overrides_and_secret_redaction(tmp_path: Path) -> None:
+    defaults = load_settings(DEFAULT_YAML_PATH, tmp_path / "missing.env")
+    assert defaults.ledger.flex_token is None
+    assert defaults.ledger.flex_activity_query_id is None
+    assert defaults.ledger.flex_monthly_query_id is None
+    assert defaults.ledger.flex_trade_conf_query_id is None
+    assert defaults.ledger.gateway_sync_enabled is False
+    assert defaults.ledger.gateway_include_stock is True
+    assert defaults.ledger.roll_max_gap_hours == 24.0
+    assert defaults.ledger.ledger_dir == "data/ledger"
+
+    # Blank placeholders in `.env` cleanly resolve to None / defaults
+    blank_env = tmp_path / "blank.env"
+    blank_env.write_text(
+        "IBKR_FLEX_TOKEN=\n"
+        "IBKR_FLEX_ACTIVITY_QUERY_ID=   \n"
+        "IBKR_FLEX_MONTHLY_QUERY_ID=\n"
+        "IBKR_FLEX_TRADE_CONF_QUERY_ID=\n"
+        "ENABLE_GATEWAY_LEDGER_SYNC=\n"
+        "LEDGER_DIR=\n",
+        encoding="utf-8",
+    )
+    blank_loaded = load_settings(DEFAULT_YAML_PATH, blank_env)
+    assert blank_loaded.ledger == LedgerSettings()
+
+    # Full overrides (including monthly placeholder & opt-in Gateway sync)
+    env = tmp_path / "ledger.env"
+    env.write_text(
+        "IBKR_FLEX_TOKEN=super-secret-flex-token\n"
+        "IBKR_FLEX_ACTIVITY_QUERY_ID=111222\n"
+        "IBKR_FLEX_MONTHLY_QUERY_ID=333444\n"
+        "IBKR_FLEX_TRADE_CONF_QUERY_ID=555666\n"
+        "ENABLE_GATEWAY_LEDGER_SYNC=true\n"
+        "GATEWAY_LEDGER_INCLUDE_STOCK=false\n"
+        "LEDGER_ROLL_MAX_GAP_HOURS=36.5\n"
+        "LEDGER_DIR=data/custom_ledger\n",
+        encoding="utf-8",
+    )
+    s = load_settings(DEFAULT_YAML_PATH, env)
+    assert s.ledger.flex_token == "super-secret-flex-token"
+    assert s.ledger.flex_activity_query_id == "111222"
+    assert s.ledger.flex_monthly_query_id == "333444"
+    assert s.ledger.flex_trade_conf_query_id == "555666"
+    assert s.ledger.gateway_sync_enabled is True
+    assert s.ledger.gateway_include_stock is False
+    assert s.ledger.roll_max_gap_hours == 36.5
+    assert s.ledger.ledger_dir == "data/custom_ledger"
+
+    # Never expose raw Flex token via repr()
+    assert "super-secret-flex-token" not in repr(s.ledger)
+    assert "super-secret-flex-token" not in repr(s)
+
+    # Frozen immutability & validation bounds
+    with pytest.raises(ValidationError):
+        s.ledger.gateway_sync_enabled = False
+
+    bad_env = tmp_path / "bad_ledger.env"
+    bad_env.write_text("LEDGER_ROLL_MAX_GAP_HOURS=0\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError):
+        load_settings(DEFAULT_YAML_PATH, bad_env)

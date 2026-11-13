@@ -56,6 +56,26 @@
   .chart-canvas--strategy {
     min-height: 300px;
   }
+  .panel-card--ledger {
+    height: auto;
+    min-height: 760px;
+  }
+  .ledger-kpi-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .ledger-split {
+    grid-template-columns: 1fr;
+  }
+  .ledger-chart-pane {
+    height: 320px;
+    min-height: 280px;
+  }
+  .chart-canvas--ledger {
+    min-height: 280px;
+  }
+  .ledger-timeline-step {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 680px) {
@@ -65,6 +85,7 @@
   .kpi-strip,
   .corridor-kpi-strip,
   .strategy-kpi-grid,
+  .ledger-kpi-strip,
   .strategy-sim-bar {
     grid-template-columns: 1fr;
   }

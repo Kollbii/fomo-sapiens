@@ -26,6 +26,10 @@ import {
   loadChain,
 } from "./network.js";
 import {
+  loadLedger,
+  restoreLedgerPreferences,
+} from "./ledger.js";
+import {
   bindEvents,
 } from "./events.js";
 import {
@@ -36,6 +40,7 @@ import {
 function init() {
   updateThemeToggleLabel();
   restoreWallsPreferences();
+  restoreLedgerPreferences();
   syncStrategyAutoPopulateUI();
   applyTickerPullPrefsToControls(state.ticker);
   state.tableSort = readTableSortPref();
@@ -46,6 +51,7 @@ function init() {
   initChartResizeHandling();
   fetchStatus();
   loadChain(state.ticker, "");
+  loadLedger();
 }
 
 if (document.readyState === "loading") {

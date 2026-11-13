@@ -10,11 +10,11 @@ import {
   fmtInt,
   fmtNum,
   formatExpiryIso,
+  matchesDteFilterValue,
   snapDteValueToExpiries,
 } from "./helpers.js";
 import {
   appendDteBucketOptions,
-  matchesDteFilterValue,
 } from "./charts.js";
 
 // ------------------------------------------------------------------ Option Chain Table

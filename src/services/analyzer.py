@@ -42,12 +42,17 @@ from src.services.corridor import (
     make_bsm_greeks_fallback,
     wall_anchors_from_report,
 )
+from src.services.ledger import LedgerService
 from src.services.schemas import (
     ChainAnalyticsResponse,
     ChainMetadataPayload,
     CorridorQuotesRequest,
     CorridorStopResponse,
     GatewayStatusResponse,
+    LedgerDashboardResponse,
+    LedgerImportResponse,
+    LedgerMTMRefreshResponse,
+    LedgerSyncResponse,
     RefreshRequest,
     SnapshotsListResponse,
     StrategyEvaluateRequest,
@@ -55,6 +60,7 @@ from src.services.schemas import (
     StrategySuggestResponse,
 )
 from src.storage.csv_repository import CSVRepository
+from src.storage.ledger_repository import LedgerRepository
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, infer_chain_step_and_range
 
 
@@ -72,6 +78,7 @@ class AnalyzerService:
         broker_client: IBKRBrokerClient | None = None,
         fetcher: PagedOptionChainFetcher | None = None,
         corridor: CorridorQuoteService | None = None,
+        ledger_service: LedgerService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
@@ -84,12 +91,25 @@ class AnalyzerService:
             sleep=self.fetcher.sleep,
             greeks_fallback=make_bsm_greeks_fallback(self.settings.analytics.risk_free_rate),
         )
+        ledger_repo = LedgerRepository(self.settings.ledger.ledger_dir, root=self.repo.root)
+        self.ledger = ledger_service or LedgerService(
+            settings=self.settings,
+            repo=ledger_repo,
+            broker_client=self.broker_client,
+            sleep=self.fetcher.sleep,
+        )
+        self.ledger.ensure_layout()
         self.validator = TickerValidator(
             watchlist=self.settings.watchlist.hardcoded_tickers,
             allow_custom=self.settings.watchlist.allow_custom_ticker,
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
         self.corridor_cache = CorridorQuoteCache()
+
+    def ensure_layout(self) -> None:
+        """Ensure chain CSV and ledger archive directories exist."""
+        self.repo.ensure_layout()
+        self.ledger.ensure_layout()
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -112,6 +132,7 @@ class AnalyzerService:
         caps = self._ticker_capabilities.get(cap_sym) if cap_sym else None
         avail_steps = list(caps[0]) if caps else list(oc.allowed_strike_steps)
         avail_ranges = list(caps[1]) if caps else list(oc.allowed_range_pcts)
+        ledger_status = self.ledger.get_ledger_status()
         return GatewayStatusResponse(
             connected=self.broker_client.is_connected,
             host=ibkr.host,
@@ -136,6 +157,10 @@ class AnalyzerService:
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
             active_capabilities_ticker=cap_sym if caps else None,
+            flex_configured=ledger_status.flex_configured,
+            flex_monthly_configured=ledger_status.flex_monthly_configured,
+            flex_trade_conf_configured=ledger_status.flex_trade_conf_configured,
+            gateway_ledger_sync_enabled=ledger_status.gateway_sync_enabled,
         )
 
     def list_snapshots(self, raw_ticker: str) -> SnapshotsListResponse:
@@ -536,3 +561,38 @@ class AnalyzerService:
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
         )
+
+    def get_ledger_dashboard(
+        self,
+        *,
+        window: str = "1M",
+        ticker: str = "ALL",
+        group_by: str = "campaigns",
+        view: str = "realized",
+        include_stock_gain: bool = False,
+    ) -> LedgerDashboardResponse:
+        """Return filtered ledger analytics report and sync status."""
+        return self.ledger.get_ledger_dashboard(
+            window=window,
+            ticker=ticker,
+            group_by=group_by,
+            view=view,
+            include_stock_gain=include_stock_gain,
+        )
+
+    async def sync_ledger(
+        self,
+        *,
+        mode: str = "auto",
+        include_gateway: bool | None = None,
+    ) -> LedgerSyncResponse:
+        """Synchronize the trade ledger via Flex Web Service and/or Gateway."""
+        return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+
+    def import_ledger_file(self, filename: str, raw_bytes: bytes) -> LedgerImportResponse:
+        """Import a manual IBKR Flex XML or Activity CSV file into the trade ledger."""
+        return self.ledger.import_ledger_file(filename, raw_bytes)
+
+    async def refresh_open_ledger_mtm(self) -> LedgerMTMRefreshResponse:
+        """Refresh live mark-to-market quotes for open ledger positions."""
+        return await self.ledger.refresh_open_mtm()

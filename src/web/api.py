@@ -7,18 +7,32 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from src.core.exceptions import GatewayConnectionError, OptionChainFetchError, PacingViolationError
+from src.core.exceptions import (
+    GatewayConnectionError,
+    InvalidRequestError,
+    OptionChainFetchError,
+    PacingViolationError,
+)
 from src.services.analyzer import AnalyzerService
 from src.services.schemas import (
+    MAX_LEDGER_IMPORT_BYTES,
     ChainAnalyticsResponse,
     CorridorLegRef,
     CorridorQuoteFrame,
     CorridorQuotesRequest,
     CorridorStopResponse,
     GatewayStatusResponse,
+    LedgerDashboardResponse,
+    LedgerGroupBy,
+    LedgerImportResponse,
+    LedgerMTMRefreshResponse,
+    LedgerSyncRequest,
+    LedgerSyncResponse,
+    LedgerView,
+    LedgerWindow,
     RefreshRequest,
     SnapshotsListResponse,
     StrategyEvaluateRequest,
@@ -219,3 +233,56 @@ async def api_corridor_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/ledger", response_model=LedgerDashboardResponse)
+async def api_ledger(
+    window: LedgerWindow = "1M",
+    ticker: str = "ALL",
+    group_by: LedgerGroupBy = "campaigns",
+    view: LedgerView = "realized",
+    include_stock_gain: bool = False,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> LedgerDashboardResponse:
+    return svc.get_ledger_dashboard(
+        window=window,
+        ticker=ticker,
+        group_by=group_by,
+        view=view,
+        include_stock_gain=include_stock_gain,
+    )
+
+
+@router.post("/ledger/sync", response_model=LedgerSyncResponse)
+async def api_ledger_sync(
+    payload: LedgerSyncRequest = Body(default_factory=LedgerSyncRequest),  # noqa: B008
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> LedgerSyncResponse:
+    return await svc.sync_ledger(
+        mode=payload.mode,
+        include_gateway=payload.include_gateway,
+    )
+
+
+@router.post("/ledger/import", response_model=LedgerImportResponse)
+async def api_ledger_import(
+    file: UploadFile = File(...),  # noqa: B008
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> LedgerImportResponse:
+    try:
+        raw_bytes = await file.read(MAX_LEDGER_IMPORT_BYTES + 1)
+    finally:
+        await file.close()
+    if len(raw_bytes) > MAX_LEDGER_IMPORT_BYTES:
+        raise InvalidRequestError("Uploaded ledger file exceeds 20 MB limit.")
+    try:
+        return svc.import_ledger_file(file.filename or "upload.csv", raw_bytes)
+    except UnicodeDecodeError as exc:
+        raise InvalidRequestError("Uploaded ledger file is not valid UTF-8 text.") from exc
+
+
+@router.post("/ledger/mtm", response_model=LedgerMTMRefreshResponse)
+async def api_ledger_mtm(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> LedgerMTMRefreshResponse:
+    return await svc.refresh_open_ledger_mtm()

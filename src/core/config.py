@@ -173,6 +173,45 @@ class StorageSettings(_StrictModel):
     logs_dir: str = "data/logs"
 
 
+class LedgerSettings(_StrictModel):
+    flex_token: str | None = Field(default=None, repr=False)
+    flex_activity_query_id: str | None = None
+    flex_monthly_query_id: str | None = None
+    flex_trade_conf_query_id: str | None = None
+    gateway_sync_enabled: bool = False
+    gateway_include_stock: bool = True
+    roll_max_gap_hours: float = Field(default=24.0, gt=0.0)
+    ledger_dir: str = Field(default="data/ledger", min_length=1)
+
+    @field_validator(
+        "flex_token",
+        "flex_activity_query_id",
+        "flex_monthly_query_id",
+        "flex_trade_conf_query_id",
+        mode="before",
+    )
+    @classmethod
+    def _strip_optional_id(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            raise ValueError("expected string or null, got bool")
+        if isinstance(value, (int, str)):
+            stripped = str(value).strip()
+            return stripped or None
+        raise ValueError(f"expected string or null, got {type(value).__name__}")
+
+    @field_validator("ledger_dir", mode="before")
+    @classmethod
+    def _strip_ledger_dir(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("ledger_dir must be a non-empty string")
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("ledger_dir must not be empty")
+        return stripped
+
+
 class Settings(_StrictModel):
     app: AppSettings = AppSettings()
     ibkr: IBKRSettings = IBKRSettings()
@@ -181,6 +220,7 @@ class Settings(_StrictModel):
     analytics: AnalyticsSettings = AnalyticsSettings()
     corridor: CorridorSettings = CorridorSettings()
     storage: StorageSettings = StorageSettings()
+    ledger: LedgerSettings = Field(default_factory=LedgerSettings)
 
 
 class _EnvOverrides(BaseSettings):
@@ -198,6 +238,32 @@ class _EnvOverrides(BaseSettings):
     log_level: str | None = None
     app_host: str | None = None
     app_port: int | None = None
+    ibkr_flex_token: str | None = Field(default=None, repr=False)
+    ibkr_flex_activity_query_id: str | None = None
+    ibkr_flex_monthly_query_id: str | None = None
+    ibkr_flex_trade_conf_query_id: str | None = None
+    enable_gateway_ledger_sync: bool | None = None
+    gateway_ledger_include_stock: bool | None = None
+    ledger_roll_max_gap_hours: float | None = None
+    ledger_dir: str | None = None
+
+    @field_validator(
+        "ibkr_flex_token",
+        "ibkr_flex_activity_query_id",
+        "ibkr_flex_monthly_query_id",
+        "ibkr_flex_trade_conf_query_id",
+        "enable_gateway_ledger_sync",
+        "gateway_ledger_include_stock",
+        "ledger_roll_max_gap_hours",
+        "ledger_dir",
+        mode="before",
+    )
+    @classmethod
+    def _blank_ledger_env_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
 
 
 # (env field, section, key)
@@ -212,6 +278,14 @@ _ENV_MAP: tuple[tuple[str, str, str], ...] = (
     ("log_level", "app", "log_level"),
     ("app_host", "app", "host"),
     ("app_port", "app", "port"),
+    ("ibkr_flex_token", "ledger", "flex_token"),
+    ("ibkr_flex_activity_query_id", "ledger", "flex_activity_query_id"),
+    ("ibkr_flex_monthly_query_id", "ledger", "flex_monthly_query_id"),
+    ("ibkr_flex_trade_conf_query_id", "ledger", "flex_trade_conf_query_id"),
+    ("enable_gateway_ledger_sync", "ledger", "gateway_sync_enabled"),
+    ("gateway_ledger_include_stock", "ledger", "gateway_include_stock"),
+    ("ledger_roll_max_gap_hours", "ledger", "roll_max_gap_hours"),
+    ("ledger_dir", "ledger", "ledger_dir"),
 )
 
 

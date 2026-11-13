@@ -111,5 +111,73 @@ If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()
 
 ---
 
-## 5. Implementation Notes
+## 5. Hybrid Trade Ledger Storage Contract (`data/ledger/`)
+
+The Trade Ledger persists normalized execution fills and current open positions under `LEDGER_DIR` (default `data/ledger/`, excluded by `.gitignore`). `LedgerRepository.ensure_layout()` (`src/storage/ledger_repository.py`) provisions `data/ledger/` and `data/ledger/imports/` idempotently on startup, and writes `executions.csv`, `open_positions.csv`, and `sync_state.json` atomically via `.tmp` + `os.replace()`.
+
+### 5.1 Executions Archive (`data/ledger/executions.csv`, `LedgerExecutionRow`)
+Sorted by `(executed_at, exec_id)` with 23 columns (`LEDGER_EXECUTION_COLUMNS`, `LEDGER_EXECUTION_POLARS_SCHEMA` in `src/storage/ledger_schema.py`):
+
+| # | Column | Polars Type | Null? | Validation & Semantics |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | `exec_id` | `pl.Utf8` | No | IBKR `ibExecID`/`execID`/`execId`/`transactionID`/`tradeID`, or deterministic `sha256:{24hex}` via `synthesize_exec_id(...)` when absent. |
+| 2 | `ib_order_id` | `pl.Utf8` | Yes | Optional IBKR order ID used for multi-leg order clustering. |
+| 3 | `conid` | `pl.Int64` | Yes | Option/stock IBKR `conId` (`> 0` and `< 2147483647`, sanitized via `sanitize_optional_conid`). |
+| 4 | `underlying_conid` | `pl.Int64` | Yes | Underlying stock `conId`. |
+| 5 | `symbol` | `pl.Utf8` | No | Contract/OSI symbol string. |
+| 6 | `underlying` | `pl.Utf8` | No | Normalized uppercase underlying ticker (`TickerValidator` / ASCII alnum fallback via `normalize_underlying`). |
+| 7 | `asset_class` | `pl.Utf8` | No | `"OPT"` or `"STK"`. |
+| 8 | `expiry` | `pl.Utf8` | Yes | Normalized `YYYYMMDD` (required for `OPT`, forbidden for `STK`). |
+| 9 | `strike` | `pl.Float64` | Yes | Positive strike price (`> 0` required for `OPT`, `None` for `STK`). |
+| 10 | `right` | `pl.Utf8` | Yes | `"C"` or `"P"` for `OPT`; `None` for `STK`. |
+| 11 | `multiplier` | `pl.Int64` | No | Contract multiplier (`> 0`; defaults to `100` for `OPT`, `1` for `STK`). |
+| 12 | `side` | `pl.Utf8` | No | `"BOT"` or `"SLD"` (`BUY`/`SELL` normalized on ingress). |
+| 13 | `quantity` | `pl.Float64` | No | Absolute fill quantity (`> 0.0`). |
+| 14 | `price` | `pl.Float64` | No | Execution unit price (`>= 0.0`). |
+| 15 | `proceeds` | `pl.Float64` | No | Signed ex-fee cashflow (`-quantity * price * multiplier` for `BOT`, `+quantity * price * multiplier` for `SLD` via `compute_signed_proceeds`). |
+| 16 | `commission` | `pl.Float64` | No | Positive cost convention (`abs(commission) >= 0.0`, default `0.0`); always stored non-negative so ex-fee and after-fee math never double-subtracts fees. |
+| 17 | `realized_pnl_ib` | `pl.Float64` | Yes | Optional IBKR-reported realized P&L from Flex statements. |
+| 18 | `open_close` | `pl.Utf8` | Yes | `"O"`, `"C"`, or `None`. |
+| 19 | `event_code` | `pl.Utf8` | No | `"TRADE"`, `"EXPIRED"`, `"ASSIGNED"`, or `"EXERCISED"` (default `"TRADE"`). |
+| 20 | `currency` | `pl.Utf8` | No | Settlement currency code (default `"USD"`). |
+| 21 | `fx_rate_to_base` | `pl.Float64` | No | FX conversion rate to base currency (`> 0.0`, default `1.0`). |
+| 22 | `executed_at` | `pl.Utf8` | No | Normalized UTC ISO-8601 timestamp `YYYY-MM-DDTHH:MM:SSZ` (`normalize_utc_timestamp`). |
+| 23 | `source` | `pl.Utf8` | No | `"FLEX_ACTIVITY_365"`, `"FLEX_MONTHLY"`, `"FLEX_TRADE_CONF"`, `"FLEX_IMPORT"`, or `"GATEWAY_LIVE"`. |
+
+### 5.2 Open Positions Snapshot (`data/ledger/open_positions.csv`, `LedgerPositionRow`)
+Atomically replaced via `LedgerRepository.replace_positions()`, sorted by `(underlying, asset_class, expiry, strike, right, symbol)` with 15 columns (`LEDGER_POSITION_COLUMNS`, `LEDGER_POSITION_POLARS_SCHEMA`):
+
+| # | Column | Polars Type | Null? | Validation & Semantics |
+| :--- | :--- | :--- | :--- | :--- |
+| 1 | `conid` | `pl.Int64` | Yes | Sanitized contract `conId` (`> 0` and `< 2147483647`). |
+| 2 | `symbol` | `pl.Utf8` | No | Contract/OSI symbol string. |
+| 3 | `underlying` | `pl.Utf8` | No | Normalized uppercase underlying ticker. |
+| 4 | `asset_class` | `pl.Utf8` | No | `"OPT"` or `"STK"`. |
+| 5 | `expiry` | `pl.Utf8` | Yes | Normalized `YYYYMMDD` for `OPT`; `None` for `STK`. |
+| 6 | `strike` | `pl.Float64` | Yes | Positive strike (`> 0`) for `OPT`; `None` for `STK`. |
+| 7 | `right` | `pl.Utf8` | Yes | `"C"` or `"P"` for `OPT`; `None` for `STK`. |
+| 8 | `multiplier` | `pl.Int64` | No | Positive contract multiplier (`100` `OPT` / `1` `STK`). |
+| 9 | `position` | `pl.Float64` | No | Signed open quantity (`> 0` long, `< 0` short); when omitted in Flex `OpenPosition`, recovered as `round(market_value / (mark_price * multiplier), 6)` with `side="Short"` negation (zero/dust `<= 1e-6` skipped). |
+| 10 | `avg_cost` | `pl.Float64` | No | Average position cost basis (default `0.0`; falls back from `costBasisPrice` to `abs(costBasisMoney / (position * multiplier))`). |
+| 11 | `mark_price` | `pl.Float64` | Yes | Statement mark price (`>= 0.0` or `None`). |
+| 12 | `market_value` | `pl.Float64` | Yes | Reported mark market value. |
+| 13 | `unrealized_pnl` | `pl.Float64` | Yes | Statement unrealized P&L. |
+| 14 | `source` | `pl.Utf8` | No | Same source enum as `executions.csv`. |
+| 15 | `updated_at` | `pl.Utf8` | No | Normalized UTC ISO-8601 timestamp `YYYY-MM-DDTHH:MM:SSZ`. |
+
+### 5.3 Sync Metadata (`data/ledger/sync_state.json`) & Deduplication Rules
+- `sync_state.json` (`LedgerSyncState`) records `last_sync_at`, `last_sync_mode`, `source_counts`, `total_executions`, `open_positions_count`, and `recommended_incremental_mode` (`"full"` | `"monthly"`). Credentials and IBKR account identifiers are never written.
+- **Deduplication & Authoritative Flex Upgrade (`LedgerRepository.upsert_executions`):**
+  1. Authoritative `FLEX_SOURCES` (`FLEX_ACTIVITY_365`, `FLEX_MONTHLY`, `FLEX_TRADE_CONF`, `FLEX_IMPORT`) take precedence over provisional `GATEWAY_LIVE` fills.
+  2. Matching primary key `exec_id` updates metadata cleanly without ever letting `GATEWAY_LIVE` overwrite an existing Flex row.
+  3. Incoming `FLEX_*` rows matching an existing provisional `GATEWAY_LIVE` row via `_matches_secondary()` (same `underlying`, `asset_class`, `expiry`, `right`, `side`, `strike`, `quantity`, `price` within tolerance, and same UTC minute or `_exec_id_suffix_match` length `>= 8`) upgrade/replace the `GATEWAY_LIVE` row with the authoritative Flex row while backfilling any missing `ib_order_id`, `conid`, `underlying_conid`, `realized_pnl_ib`, or `open_close` (`_merge_execution_metadata`). Conversely, incoming `GATEWAY_LIVE` fills matching an existing Flex record are skipped.
+  4. **Lifecycle Self-Healing (`_lifecycle_key`):** For lifecycle events (`EXPIRED`, `ASSIGNED`, `EXERCISED`) matched on `(underlying, asset_class, expiry, round(strike, 6), right, side, round(quantity, 4), executed_at[:10], event_code)`, an incoming non-`sha256:` `FLEX_*` row replaces any stale `sha256:` synthetic row (preserving/backfilling `ib_order_id`, `conid`, `underlying_conid`, `realized_pnl_ib`, `open_close` via `_merge_execution_metadata`); conversely, an incoming `sha256:` lifecycle row backfills null metadata onto an existing non-`sha256:` row without duplicating it (across upserts or within the same batch).
+
+### 5.4 Flex XML/CSV Normalization & Filtering (`src/broker/flex.py`)
+- **Asset-Class Inference & FX Filtering (`_resolve_asset_class`):** Explicit `assetCategory`/`assetClass` maps `OPT` or `STK` (skipping `CASH`, `FUT`, `BOND`, `FUND`, etc.). When omitted, `_has_option_attrs()` (`putCall`, `right`, `expiry`, `lastTradeDateOrContractMonth`, or `strike > 0`) or `parse_option_symbol()` infers `OPT`; FX pairs (`_FX_PAIR_RE`, e.g., `USD.PLN`, `eur.usd`, `GBP.USD`) with blank/`FX`/currency-matching `underlyingSymbol` and `AFX` rows (`code`/`notes`) without an equity underlying are skipped, while dotted stocks (`BRK.B`, `BF.B`) resolve to `STK`.
+- **`notes`/`Code` Lifecycle Parsing & `<OptionEAE>` Deduplication:** `_parse_open_close_and_codes()` inspects `openCloseIndicator` plus `code`/`notes`/`Notes`/`Notes/Codes`/`transactionType` (`O`/`OPEN`, `C`/`CLOSE`, `Ep`/`EXPIR`, `A`/`ASSIGN`, `EX`/`EXERCIS`), ignoring non-lifecycle Flex tokens (`IA`, `FP`, `RP`, `P`) and defaulting lifecycle events to `open_close="C"`. `parse_flex_xml()` skips `_SUMMARY_DETAIL_LEVELS` and `ORDER` rows when `EXECUTION` detail exists, and records `_trade_lifecycle_sig` across `<Trade>`/`<TradeConfirm>` lifecycle rows to suppress duplicate `<OptionEAE>` entries while keeping standalone `<OptionEAE>` rows.
+
+---
+
+## 6. Implementation Notes
 Repository/schema implementation details live in `docs/reference/IMPLEMENTATION_NOTES.md` §2.

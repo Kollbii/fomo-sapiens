@@ -26,6 +26,9 @@ import {
   renderCorridorChart,
   stopCorridorStream,
 } from "./corridor.js";
+import {
+  renderLedgerChart,
+} from "./ledger.js";
 
 // ------------------------------------------------------------------ Panel Visibility
 export function readPanelVisibility() {
@@ -156,7 +159,11 @@ export function applyPanelVisibility(nextVis, options) {
           '.chart-grid .panel-card[data-panel-id="' + pid + '"]'
         );
         if (card && card.classList.contains("is-hidden")) continue;
-        if (state.chainData) {
+        if (pid === "trade_ledger") {
+          if (state.ledgerData && state.ledgerData.report) {
+            renderLedgerChart(state.ledgerData.report, t);
+          }
+        } else if (state.chainData) {
           renderPanelChartById(pid, state.chainData, t);
         }
         var canvasEl = card ? card.querySelector(".chart-canvas") : null;

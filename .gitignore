@@ -221,4 +221,6 @@ __marimo__/
 
 # Local IBKR option chain snapshots, latest cache, metadata & runtime data
 data/
+# Hybrid Trade Ledger CSVs, sync state & manual Flex imports (never commit personal trades)
+data/ledger/
 

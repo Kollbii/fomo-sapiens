@@ -10,11 +10,14 @@ import {
   fmtInt,
   fmtMoney,
   fmtNum,
+  formatAutoFollowLabel,
   formatExpiryIso,
   formatStrikeShort,
   gatewayAddressLabel,
+  resolveCorridorTargetExpiry,
   showBanner,
   snapDteValueToExpiries,
+  sortedChainExpiries,
   themeVars,
 } from "./helpers.js";
 import {
@@ -31,7 +34,6 @@ import {
 import {
   evaluateStrategyRequest,
   refreshStrategyLegsQuotesOnly,
-  strategySortedExpiries,
 } from "./strategy_lab.js";
 import {
   apiJson,
@@ -91,15 +93,12 @@ function corridorWallsForExpiry(data, targetExp) {
 
 export function buildLocalCorridorPreview(data) {
   if (!data || !data.contracts || !data.contracts.length) return null;
-  var exps = strategySortedExpiries(data);
+  var exps = sortedChainExpiries(data);
   if (!exps.length) return null;
   var win = dom.corridorWindowSelect ? Math.max(1, parseInt(dom.corridorWindowSelect.value, 10) || 5) : 5;
   state.corridorWindow = win;
   var maxCap = 56;
-  var chosenExp =
-    dom.corridorExpirySelect && dom.corridorExpirySelect.value
-      ? dom.corridorExpirySelect.value
-      : exps[0].expiry;
+  var chosenExp = resolveCorridorTargetExpiry(data) || exps[0].expiry;
   var chosenDte = exps[0].dte;
   var foundExp = false;
   for (var i = 0; i < exps.length; i++) {
@@ -772,28 +771,23 @@ export function syncCorridorFromChain(data) {
   if (dom.corridorExpirySelect) {
     var prev = dom.corridorExpirySelect.value;
     dom.corridorExpirySelect.innerHTML = "";
-    var exps = strategySortedExpiries(data);
-    if (!exps.length) {
-      var opt0 = document.createElement("option");
-      opt0.value = "";
-      opt0.textContent = "Front DTE";
-      dom.corridorExpirySelect.appendChild(opt0);
-    } else {
-      var snappedCorridorExp = snapDteValueToExpiries(prev, exps, {
-        allowBuckets: false,
-        emptyValue: exps[0].expiry,
-      });
-      for (var i = 0; i < exps.length; i++) {
-        var opt = document.createElement("option");
-        opt.value = exps[i].expiry;
-        opt.textContent = formatExpiryIso(exps[i].expiry) + " (" + exps[i].dte + "d)";
-        if (snappedCorridorExp && snappedCorridorExp === exps[i].expiry) opt.selected = true;
-        dom.corridorExpirySelect.appendChild(opt);
-      }
-      if (snappedCorridorExp) {
-        dom.corridorExpirySelect.value = snappedCorridorExp;
-      }
+    var autoOpt = document.createElement("option");
+    autoOpt.value = "";
+    autoOpt.textContent = formatAutoFollowLabel(data);
+    dom.corridorExpirySelect.appendChild(autoOpt);
+    var exps = sortedChainExpiries(data);
+    var snappedCorridorExp = snapDteValueToExpiries(prev, exps, {
+      allowBuckets: false,
+      emptyValue: "",
+    });
+    for (var i = 0; i < exps.length; i++) {
+      var opt = document.createElement("option");
+      opt.value = exps[i].expiry;
+      opt.textContent = formatExpiryIso(exps[i].expiry) + " (" + exps[i].dte + "d)";
+      if (snappedCorridorExp && snappedCorridorExp === exps[i].expiry) opt.selected = true;
+      dom.corridorExpirySelect.appendChild(opt);
     }
+    dom.corridorExpirySelect.value = snappedCorridorExp || "";
   }
 
   var preview = buildLocalCorridorPreview(data);
@@ -813,7 +807,7 @@ export async function refreshCorridorQuotesOneShot() {
     dom.corridorRefreshBtn.textContent = "FETCHING CORRIDOR...";
   }
   var winVal = dom.corridorWindowSelect ? parseInt(dom.corridorWindowSelect.value, 10) || 5 : 5;
-  var expVal = dom.corridorExpirySelect && dom.corridorExpirySelect.value ? dom.corridorExpirySelect.value : null;
+  var expVal = resolveCorridorTargetExpiry(state.chainData);
   try {
     var res = await apiJson("/api/corridor/quotes", {
       method: "POST",
@@ -913,7 +907,7 @@ export function startCorridorStream() {
   stopCorridorStream({ silent: true });
 
   var winVal = dom.corridorWindowSelect ? parseInt(dom.corridorWindowSelect.value, 10) || 5 : 5;
-  var expVal = dom.corridorExpirySelect && dom.corridorExpirySelect.value ? dom.corridorExpirySelect.value : "";
+  var expVal = resolveCorridorTargetExpiry(state.chainData) || "";
   var params = new URLSearchParams();
   if (state.snapshotId) params.set("snapshot_id", state.snapshotId);
   if (expVal) params.set("target_expiry", expVal);
