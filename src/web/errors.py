@@ -17,6 +17,7 @@ from src.core.exceptions import (
     DuplicatePaperTradeError,
     FlexServiceError,
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidRequestError,
     InvalidTickerError,
     OptionChainFetchError,
@@ -32,6 +33,7 @@ from src.core.exceptions import (
     WatchlistCapError,
 )
 from src.services.analyzer import AnalyzerService
+from src.services.error_messages import describe_error
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -83,6 +85,15 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=404,
             content={"error_code": "SNAPSHOT_NOT_FOUND", "message": str(exc)},
+        )
+
+    @app.exception_handler(GatewayTimeoutError)
+    async def _handle_gateway_timeout(req: Request, exc: GatewayTimeoutError) -> JSONResponse:
+        svc: AnalyzerService | None = getattr(req.app.state, "service", None)
+        safe = describe_error(exc, ibkr=svc.settings.ibkr if svc is not None else None)
+        return JSONResponse(
+            status_code=503,
+            content={"error_code": safe.code, "message": safe.message},
         )
 
     @app.exception_handler(GatewayConnectionError)

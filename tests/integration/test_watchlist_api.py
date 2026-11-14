@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 
 from src.core.config import WatchlistSettings
-from src.core.exceptions import GatewayConnectionError
+from src.core.exceptions import GatewayConnectionError, GatewayTimeoutError
 from src.main import create_app
 from src.services.analyzer import AnalyzerService
 from src.services.batch_refresh import BatchRefreshService
@@ -244,6 +244,30 @@ def test_batch_validation_and_sanitized_failure(tmp_path: Path) -> None:
             assert items["CRDO"]["partial"] is True  # its finished page was archived
             assert "SUPERSECRET" not in str(final)
             assert "Traceback" not in str(final)
+
+    run_virtual_loop(_scenario())
+
+
+def test_single_refresh_gateway_timeout_vs_offline_codes(tmp_path: Path) -> None:
+    app, _svc, _batch = _app(
+        tmp_path,
+        pause_sec=0.0,
+        failures={
+            "NVDA": GatewayTimeoutError("IBKR Gateway did not answer during chain_fetch"),
+            "AVGO": GatewayConnectionError("Lost during chain_fetch"),
+        },
+    )
+
+    async def _scenario() -> None:
+        async with _client(app) as client:
+            r = await client.post("/api/refresh", json={"ticker": "NVDA"})
+            assert r.status_code == 503
+            assert r.json()["error_code"] == "GATEWAY_TIMEOUT"
+            assert "not answering" in r.json()["message"]
+            r2 = await client.post("/api/refresh", json={"ticker": "AVGO"})
+            assert r2.status_code == 503
+            assert r2.json()["error_code"] == "GATEWAY_OFFLINE"
+            assert "unreachable" in r2.json()["message"]
 
     run_virtual_loop(_scenario())
 

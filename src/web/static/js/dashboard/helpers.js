@@ -199,6 +199,13 @@ export function themeVars() {
   };
 }
 
+export function partialReasonLabel(reason) {
+  if (reason === "cancelled") return "cancelled";
+  if (reason === "timeout") return "Gateway time-out";
+  if (reason === "connection_lost") return "Gateway connection lost";
+  return reason ? String(reason) : "interrupted";
+}
+
 export function readPref(key, fallback) {
   try {
     var val = window.localStorage.getItem(key);

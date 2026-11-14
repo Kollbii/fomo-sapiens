@@ -27,10 +27,10 @@ var BATCH_POLL_MS = 1500;
 var BATCH_POLL_WARN_AFTER = 3;
 var lastNoticeShown = "";
 
-var SYM_FRESH = "●";
-var SYM_NONE = "○";
-var SYM_PENDING = "◐";
-var SYM_FAILED = "✕";
+var SYM_FRESH = "\u25CF";
+var SYM_NONE = "\u25CB";
+var SYM_PENDING = "\u25D0";
+var SYM_FAILED = "\u2715";
 
 // ------------------------------------------------------------------ Helpers
 function isLiveBatch(batch) {
@@ -44,6 +44,17 @@ function batchItem(sym) {
     if (batch.items[i].ticker === sym) return batch.items[i];
   }
   return null;
+}
+
+function retryTickers(batch) {
+  if (!batch || !batch.items) return [];
+  return batch.items
+    .filter(function (it) {
+      return it.state !== "done";
+    })
+    .map(function (it) {
+      return it.ticker;
+    });
 }
 
 function isChecked(sym) {
@@ -83,10 +94,10 @@ function markerFor(sym) {
   var live = isLiveBatch(state.watchlistBatch);
   if (item) {
     if (item.state === "queued") {
-      return { cls: "is-pending", sym: SYM_PENDING, text: "queued…", sr: "queued for batch load" };
+      return { cls: "is-pending", sym: SYM_PENDING, text: "queued\u2026", sr: "queued for batch load" };
     }
     if (item.state === "running") {
-      return { cls: "is-pending", sym: SYM_PENDING, text: "loading…", sr: "loading from IBKR" };
+      return { cls: "is-pending", sym: SYM_PENDING, text: "loading\u2026", sr: "loading from IBKR" };
     }
     if (item.state === "failed") {
       var why = item.error || "load failed";
@@ -94,8 +105,21 @@ function markerFor(sym) {
         cls: "is-failed",
         sym: SYM_FAILED,
         text: "failed",
-        sr: "failed: " + why,
+        sr: "failed: " + why + (item.partial ? " (partial snapshot saved)" : ""),
         title: why,
+        partial: Boolean(item.partial),
+      };
+    }
+    if (item.state === "not_started") {
+      return { cls: "is-none", sym: SYM_NONE, text: "not started", sr: "not started" };
+    }
+    if (item.state === "cancelled") {
+      return {
+        cls: "is-none",
+        sym: "\u2014",
+        text: "cancelled",
+        sr: item.partial ? "cancelled, partial snapshot saved" : "cancelled",
+        partial: Boolean(item.partial),
       };
     }
     if (item.state === "done" && live) {
@@ -108,7 +132,7 @@ function markerFor(sym) {
     var when = et ? et.time : "today";
     return { cls: "is-fresh", sym: SYM_FRESH, text: when, sr: "latest snapshot today at " + when };
   }
-  return { cls: "is-none", sym: SYM_NONE, text: "—", sr: "no snapshot today" };
+  return { cls: "is-none", sym: SYM_NONE, text: "\u2014", sr: "no snapshot today" };
 }
 
 // ------------------------------------------------------------------ Rendering
@@ -138,10 +162,16 @@ function buildRow(sym) {
   var text = document.createElement("span");
   text.className = "wl-row__text";
   text.setAttribute("aria-hidden", "true");
+  var part = document.createElement("span");
+  part.className = "wl-row__partial";
+  part.setAttribute("aria-hidden", "true");
+  part.hidden = true;
+  part.textContent = "\u25D1 partial";
   var sr = document.createElement("span");
   sr.className = "sr-only";
   status.appendChild(mark);
   status.appendChild(text);
+  status.appendChild(part);
   status.appendChild(sr);
 
   var rm = document.createElement("button");
@@ -149,7 +179,7 @@ function buildRow(sym) {
   rm.className = "wl-row__remove";
   rm.setAttribute("data-wl-remove", sym);
   rm.setAttribute("aria-label", "Remove " + sym + " from watchlist");
-  rm.textContent = "×";
+  rm.textContent = "\u00D7";
 
   li.appendChild(check);
   li.appendChild(symBtn);
@@ -170,6 +200,11 @@ function updateRows() {
     status.title = m.title || "";
     li.querySelector(".wl-row__mark").textContent = m.sym;
     li.querySelector(".wl-row__text").textContent = m.text;
+    var partEl = li.querySelector(".wl-row__partial");
+    partEl.hidden = !m.partial;
+    partEl.title = m.partial
+      ? "Partial snapshot: only finished pages were saved; needs a complete re-fetch."
+      : "";
     li.querySelector(".sr-only").textContent = m.sr;
     li.querySelector("[data-wl-check]").checked = isChecked(sym);
     var item = batchItem(sym);
@@ -233,16 +268,25 @@ function renderProgress() {
     if (dom.watchlistProgressText) {
       dom.watchlistProgressText.textContent =
         b.state === "cancelling"
-          ? "Cancelling" + (cur ? " after " + cur : "") + "…"
-          : finished + "/" + total + " · " + (cur ? cur + "…" : "starting…");
+          ? "Stopping\u2026"
+          : finished + "/" + total + " \u00B7 " + (cur ? cur + "\u2026" : "starting\u2026");
     }
     if (dom.watchlistCancel) dom.watchlistCancel.disabled = b.state === "cancelling";
     return;
   }
   var text = (b.done_count || 0) + " loaded, " + (b.failed_count || 0) + " failed";
+  if (b.not_started_count) text += ", " + b.not_started_count + " not started";
+  var partialCount = (b.items || []).filter(function (it) {
+    return it.partial;
+  }).length;
+  if (partialCount) text += ", " + partialCount + " partial";
   if (b.cancelled_count) text += ", " + b.cancelled_count + " cancelled";
   if (dom.watchlistSummaryText) dom.watchlistSummaryText.textContent = text;
-  if (dom.watchlistRetry) dom.watchlistRetry.hidden = !(b.failed_count > 0);
+  var retryN = retryTickers(b).length;
+  if (dom.watchlistRetry) {
+    dom.watchlistRetry.hidden = retryN === 0;
+    dom.watchlistRetry.textContent = "Retry (" + retryN + ")";
+  }
 }
 
 // ------------------------------------------------------------------ Watchlist data
@@ -353,11 +397,28 @@ async function onBatchFinished(batch) {
       }
       return;
     }
-    if (item && item.state === "failed") {
-      showBanner("error", item.error || "Load failed for " + follow.ticker + ".", {
+  }
+  if (batch.state === "aborted" && batch.notices && batch.notices.length) {
+    showBanner("warn", batch.notices[batch.notices.length - 1], { phase: "BATCH_LOAD" });
+    return;
+  }
+  if (follow) {
+    var fItem = null;
+    for (var j = 0; j < batch.items.length; j++) {
+      if (batch.items[j].ticker === follow.ticker) fItem = batch.items[j];
+    }
+    if (fItem && fItem.state === "failed") {
+      showBanner("error", fItem.error || "Load failed for " + follow.ticker + ".", {
         ticker: follow.ticker,
         phase: "BATCH_LOAD",
-        errorCode: item.error_code,
+        errorCode: fItem.error_code,
+      });
+      return;
+    }
+    if (fItem && (fItem.state === "cancelled" || fItem.state === "not_started")) {
+      showBanner("info", "Load of " + follow.ticker + " was cancelled.", {
+        ticker: follow.ticker,
+        phase: "BATCH_LOAD",
       });
       return;
     }
@@ -398,7 +459,7 @@ async function pollBatch() {
   }
   state.watchlistPollFailures += 1;
   if (state.watchlistPollFailures === BATCH_POLL_WARN_AFTER) {
-    showBanner("warn", "Lost contact with the batch status endpoint; retrying…", {
+    showBanner("warn", "Lost contact with the batch status endpoint; retrying\u2026", {
       phase: "BATCH_LOAD",
     });
   }
@@ -482,6 +543,7 @@ async function cancelBatch() {
   var batch = state.watchlistBatch;
   if (!isLiveBatch(batch)) return;
   if (dom.watchlistCancel) dom.watchlistCancel.disabled = true;
+  if (dom.watchlistProgressText) dom.watchlistProgressText.textContent = "Stopping\u2026";
   try {
     var res = await apiJson("/api/refresh/batch/" + encodeURIComponent(batch.batch_id) + "/cancel", {
       method: "POST",
@@ -671,16 +733,7 @@ export function wireWatchlist() {
   }
   if (dom.watchlistRetry) {
     dom.watchlistRetry.addEventListener("click", function () {
-      var b = state.watchlistBatch;
-      if (!b || !b.items) return;
-      var failed = b.items
-        .filter(function (it) {
-          return it.state === "failed";
-        })
-        .map(function (it) {
-          return it.ticker;
-        });
-      startBatch(failed, null);
+      startBatch(retryTickers(state.watchlistBatch), null);
     });
   }
   if (dom.watchlistSummaryDismiss) {

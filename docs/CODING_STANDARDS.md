@@ -97,7 +97,7 @@ Every feature phase requires automated tests in `pytest`:
 21. **`tests/unit/test_analyzer_concurrency.py`, `test_paper_trades_service.py`, `test_backtest_service.py`:**
    - Verifies `AnalyzerService.refresh_lock` (`RefreshBusyError` on overlapping refreshes/corridor/MTM/SSE), pre-refresh `stop_all_streams()`, `fetch_exact_contracts` / `PaperTradeService` follow-up quoting, and `services/backtest.py` entry listing + `SYSTEMATIC`/`SINGLE_TRADE` orchestration.
 22. **`tests/unit/test_watchlist_service.py` & `test_batch_refresh_service.py`:**
-   - Verify `WatchlistService` (non-blocking `runner`, freshness via one `CSVRepository.latest_snapshots` read, domain errors propagate) and `BatchRefreshService` (sequential single batch, `refresh_lock` held for the whole batch with `batch_owner` labels, sanitized per-ticker errors, cooperative cancel, `aclose()` shutdown, `BatchNotFoundError`).
+   - Verify `WatchlistService` (non-blocking `runner`, freshness via one `CSVRepository.latest_snapshots` read, domain errors propagate) and `BatchRefreshService` (sequential single batch, `refresh_lock` held for the whole batch with `batch_owner` labels, sanitized per-ticker errors, immediate cancel with partial save, `aclose()` shutdown, `BatchNotFoundError`).
 23. **`tests/unit/test_watchlist_store.py`:**
    - Verifies `WatchlistStore` lazy seed, add/remove, dedupe/order, `watchlist.max_size` cap (`WatchlistCapError`), `allow_custom_ticker` guard, corrupt-file notice + `watchlist.corrupt.json` backup, empty-list persistence, and atomic writes.
 24. **`tests/integration/test_watchlist_api.py`:**

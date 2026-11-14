@@ -648,3 +648,13 @@ html[data-theme="print"] .panel-toggle-pill[aria-pressed="true"] {
   color: var(--accent-put);
 }
 
+
+.wl-row__partial {
+  color: var(--accent-warn);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.wl-row__partial[hidden] {
+  display: none;
+}

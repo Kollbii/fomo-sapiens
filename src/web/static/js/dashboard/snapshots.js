@@ -2,6 +2,7 @@
 
 import {
   formatRangeShort,
+  partialReasonLabel,
   formatStepShort,
   updateExportLink,
 } from "./helpers.js";
@@ -49,8 +50,12 @@ export function snapshotEtParts(tsUtc) {
 
 var SNAPSHOT_OFF_HOURS_TITLE = "Outside the US regular session (09:30\u201316:00 ET, Mon\u2013Fri)";
 
+var latestSnapshotId = "";
+
 function snapshotMetaText(snap) {
   var metaBits = ["T" + snap.market_data_type];
+  if (snap.partial) metaBits.push("PARTIAL");
+  if (latestSnapshotId && snap.snapshot_id === latestSnapshotId) metaBits.push("LATEST");
   if (snap.range_pct !== null && snap.range_pct !== undefined) {
     metaBits.push(formatRangeShort(snap.range_pct));
   }
@@ -86,6 +91,7 @@ function groupSnapshotsByDay(items) {
 export function renderSnapshotSelect(payload) {
   if (!dom.snapshotSelect) return;
   var items = (payload && payload.snapshots) || [];
+  latestSnapshotId = (payload && payload.latest_snapshot_id) || "";
   state.snapshots = items;
   dom.snapshotSelect.innerHTML = "";
   if (!items.length) {
@@ -99,7 +105,7 @@ export function renderSnapshotSelect(payload) {
     return;
   }
 
-  var selectedId = state.snapshotId || items[0].snapshot_id;
+  var selectedId = state.snapshotId || latestSnapshotId || items[0].snapshot_id;
   var groups = groupSnapshotsByDay(items);
   for (var g = 0; g < groups.length; g++) {
     var optgroup = document.createElement("optgroup");
@@ -116,7 +122,7 @@ export function renderSnapshotSelect(payload) {
     dom.snapshotSelect.appendChild(optgroup);
   }
   if (!state.snapshotId && items.length) {
-    state.snapshotId = items[0].snapshot_id;
+    state.snapshotId = selectedId;
   }
   renderSnapshotPicker(groups, selectedId);
   updateExportLink();
@@ -195,7 +201,12 @@ function renderSnapshotPicker(groups, selectedId) {
       optBtn.setAttribute("role", "option");
       optBtn.setAttribute("aria-selected", isSelected ? "true" : "false");
       optBtn.setAttribute("data-snapshot-id", entry.snap.snapshot_id);
-      optBtn.title = entry.snap.snapshot_id + (off ? " \u2014 " + SNAPSHOT_OFF_HOURS_TITLE : "");
+      optBtn.title =
+        entry.snap.snapshot_id +
+        (entry.snap.partial
+          ? " \u2014 PARTIAL snapshot (" + partialReasonLabel(entry.snap.partial_reason) + ")"
+          : "") +
+        (off ? " \u2014 " + SNAPSHOT_OFF_HOURS_TITLE : "");
       if (off) optBtn.appendChild(makeOffHoursDot());
       var timeEl = document.createElement("span");
       timeEl.className = "snap-picker__time";

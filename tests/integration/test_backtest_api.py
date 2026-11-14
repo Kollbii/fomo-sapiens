@@ -585,7 +585,7 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert 'data-bt-chart-view="TRADE"' in html
                 assert "Trade &amp; Legs History" in html
                 assert "Daily Mark-to-Market Step History" in html
-                assert "?v=20261114b" in html
+                assert "?v=20261114c" in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200

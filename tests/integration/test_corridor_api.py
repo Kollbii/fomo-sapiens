@@ -488,3 +488,49 @@ def test_corridor_stream_refuses_when_lock_taken_before_first_read(tmp_path: Pat
     assert events[0][1]["error_code"] == "REFRESH_BUSY"
     assert events[0][1]["status"] == 409
     assert "market-data line budget" in events[0][1]["message"]
+
+
+def test_corridor_stream_gateway_timeout_emits_gateway_timeout_error() -> None:
+    from collections.abc import AsyncIterator
+
+    from src.core.exceptions import GatewayConnectionError, GatewayTimeoutError
+
+    class _FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def _gen(exc: Exception) -> AsyncIterator[Any]:
+        raise exc
+        yield  # pragma: no cover
+
+    class _Svc:
+        settings = Settings()
+
+        def __init__(self, exc: Exception) -> None:
+            self.exc = exc
+
+        async def open_corridor_stream(self, *_a: Any, **_k: Any) -> AsyncIterator[Any]:
+            return _gen(self.exc)
+
+    async def _events(exc: Exception) -> dict[str, Any]:
+        resp = await api_corridor_stream(
+            request=_FakeRequest(),  # type: ignore[arg-type]
+            ticker="NVDA",
+            snapshot_id=None,
+            target_expiry=None,
+            window_strikes=2,
+            max_contracts=30,
+            priority_legs=None,
+            max_frames=None,
+            svc=_Svc(exc),  # type: ignore[arg-type]
+        )
+        chunks = [c async for c in resp.body_iterator]
+        raw = chunks[0].decode("utf-8") if isinstance(chunks[0], bytes) else str(chunks[0])
+        return _parse_sse_block(raw)[1]
+
+    timeout = run_coro(_events(GatewayTimeoutError("IBKR Gateway did not answer during chain")))
+    assert timeout["error_code"] == "GATEWAY_TIMEOUT"
+    assert timeout["status"] == 503
+    assert "not answering" in timeout["message"]
+    offline = run_coro(_events(GatewayConnectionError("lost")))
+    assert offline["error_code"] == "GATEWAY_OFFLINE"

@@ -15,6 +15,7 @@ import {
   extractApiErrorMessage,
   gatewayAddressLabel,
   parseDashboardDteWindow,
+  partialReasonLabel,
   resetControlCapabilities,
   setActiveTickerUI,
   showBanner,
@@ -212,7 +213,18 @@ export async function loadChain(ticker, snapshotId) {
       renderTable(res.body);
       maybeAutoPopulateStrategy(res.body);
 
-      if (res.body.meta.notices && res.body.meta.notices.length) {
+      if (res.body.partial) {
+        showBanner(
+          "warn",
+          "Partial snapshot (" +
+            partialReasonLabel(res.body.partial_reason) +
+            "): only contracts from finished pages were saved. Not used by the Backtest." +
+            (res.body.meta.notices && res.body.meta.notices.length
+              ? " " + res.body.meta.notices.join(" ")
+              : ""),
+          { ticker: ticker, phase: "CHAIN_LOAD", elapsedMs: res.elapsedMs }
+        );
+      } else if (res.body.meta.notices && res.body.meta.notices.length) {
         showBanner("info", res.body.meta.notices.join(" "), {
           ticker: ticker,
           phase: "CHAIN_LOAD",

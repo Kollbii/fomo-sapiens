@@ -13,12 +13,14 @@ from fastapi.responses import FileResponse, StreamingResponse
 from src.core.exceptions import (
     CorridorBusyError,
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidRequestError,
     OptionChainFetchError,
     PacingViolationError,
 )
 from src.services.analyzer import AnalyzerService
 from src.services.batch_refresh import BATCH_ID_PATTERN, BatchRefreshService
+from src.services.error_messages import describe_error
 from src.services.schemas import (
     MAX_LEDGER_IMPORT_BYTES,
     BatchRefreshRequest,
@@ -272,6 +274,12 @@ async def api_corridor_stream(
         try:
             async for frame in gen:
                 yield _format_sse_event("frame", frame.model_dump())
+        except GatewayTimeoutError as exc:
+            safe = describe_error(exc, ibkr=svc.settings.ibkr)
+            yield _format_sse_event(
+                "error",
+                {"error_code": safe.code, "status": 503, "message": safe.message},
+            )
         except GatewayConnectionError as exc:
             yield _format_sse_event(
                 "error",
