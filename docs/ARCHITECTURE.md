@@ -262,6 +262,7 @@ Under IBKR **Type 3 (15-min Delayed)** data without an OPRA subscription, IBKR o
    - Aligns option chains across all weekly expirations in `[30, 120]` DTE over a unified strike and moneyness axis for Plotly overlays (IV Smile overlay, Delta/Gamma/Theta/Vega profile by DTE, Volume/OI concentration).
 4. **Strategy Lab (`src/analytics/strategies/`):**
    - Six wall-anchored presets (`BULL_PUT_SPREAD`, `BULL_CALL_SPREAD`, `DIAGONAL_SPREAD`, `IRON_CONDOR`, `BEAR_CALL_SPREAD`, `BEAR_PUT_SPREAD`) plus `CUSTOM`. Bear Call is a credit call spread with the short call at/above the Call Wall (honours min credit / min RoR floors; skip reason `NO_OTM_CALL_CANDIDATES`); Bear Put is a debit put spread (long put near ATM, short put toward the Put Wall; ignores the floors like Bull Call).
+   - Missing contracts raise `StrategyFilterError` instead of a raw Python error: `NO_CALL_CONTRACTS` / `NO_PUT_CONTRACTS` (Iron Condor expiry lacks that side), `EMPTY_CHAIN` (neither side, or no Put/Call rows at all); the Strategy Lab 422 shows the message and the backtest records the skip code.
    - `StrategyRiskMetrics` adds `expected_return_on_risk_pct` (EV/risk %) and `nearest_breakeven_distance_pct` (`min |BE - spot| / spot x 100`), both `None` when not computable.
    - `repick.py` (`repick_strategy_legs`) is a pure metrics-only helper: each leg moves -1/0/+1 strike inside the window, structure and expiries stay valid, strictly higher reported RoR wins (ties: fewer moved legs, then higher POP), otherwise the current legs are kept with a `RepickKeepReason`.
 

@@ -31,6 +31,7 @@ from src.analytics.strategies import (
     suggest_strategy_legs_from_walls,
     try_suggest_strategy_legs_from_walls,
 )
+from src.analytics.strategies.builders import _select_iron_condor
 from src.analytics.walls import compute_walls
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow, OptionRight
 
@@ -853,6 +854,68 @@ def test_bear_presets_mirror_bull_presets_on_reflected_chain(
         assert bear.legs is not None
         mirrored = [(leg.side, 200.0 - leg.strike) for leg in bear.legs]
         assert mirrored == [(leg.side, leg.strike) for leg in bull.legs]
+
+
+# ------------------------------------------------------------------ Missing contracts
+def _assert_missing_contracts_error(
+    exc: StrategyFilterError, *, skip_reason: str, message: str
+) -> None:
+    assert exc.skip_reason == skip_reason
+    assert str(exc) == message
+    assert "arg is an empty sequence" not in str(exc)  # no built-in min()/max() text leaks
+
+
+@pytest.mark.parametrize(
+    ("dropped_right", "skip_reason", "label"),
+    [("C", "NO_CALL_CONTRACTS", "Call"), ("P", "NO_PUT_CONTRACTS", "Put")],
+)
+def test_iron_condor_target_expiry_missing_a_right_raises_skip_reason(
+    dropped_right: OptionRight, skip_reason: str, label: str
+) -> None:
+    # The dropped right is still listed at 2027-01-16: the condor must not borrow it.
+    df = _build_synthetic_chain().filter(
+        (pl.col("expiry") != "2026-12-19") | (pl.col("right") != dropped_right)
+    )
+    message = f"No {label} contracts at 2026-12-19 for Iron Condor"
+    builds: list[Callable[[], object]] = [
+        lambda: try_suggest_strategy_legs_from_walls(df, "IRON_CONDOR"),  # default 38d pick
+        lambda: suggest_strategy_legs_from_walls(df, "IRON_CONDOR", target_expiry="2026-12-19"),
+        lambda: evaluate_strategy(df, strategy_kind="IRON_CONDOR", target_expiry="2026-12-19"),
+    ]
+    for build in builds:
+        with pytest.raises(StrategyFilterError) as exc_info:
+            build()
+        _assert_missing_contracts_error(exc_info.value, skip_reason=skip_reason, message=message)
+
+    ev = evaluate_strategy(df, strategy_kind="IRON_CONDOR", target_expiry="2027-01-16")
+    assert [(leg.side, leg.right) for leg in ev.legs] == [
+        ("BUY", "P"),
+        ("SELL", "P"),
+        ("SELL", "C"),
+        ("BUY", "C"),
+    ]
+
+
+def test_missing_put_and_call_contracts_raise_empty_chain() -> None:
+    with pytest.raises(StrategyFilterError) as exc_info:
+        _select_iron_condor([], [], 100.0, 90.0, 110.0, expiry="2026-12-19")
+    _assert_missing_contracts_error(
+        exc_info.value,
+        skip_reason="EMPTY_CHAIN",
+        message="No Put or Call contracts at 2026-12-19 for Iron Condor",
+    )
+
+    # `prepare_rows` skips non-C/P rows, so a non-empty frame can leave no rows at all:
+    # every preset reports it before picking a target expiry.
+    rightless = _build_synthetic_chain().with_columns(pl.lit("X").alias("right"))
+    for kind in PRESET_STRATEGIES:
+        with pytest.raises(StrategyFilterError) as exc_info:
+            evaluate_strategy(rightless, strategy_kind=kind)
+        _assert_missing_contracts_error(
+            exc_info.value,
+            skip_reason="EMPTY_CHAIN",
+            message="No Put or Call contracts found in snapshot for strategy preset",
+        )
 
 
 # ------------------------------------------------------------------ EV/risk & break-even distance

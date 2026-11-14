@@ -15,6 +15,7 @@ milestones in git history.
 - **Config key `watchlist.max_size`** (default `20`, `1..50`, must be `>= len(hardcoded_tickers)`): caps the persisted watchlist.
 
 ### Fixed
+- **Strategy Lab / Backtest:** Iron Condor (and any preset) on an expiry missing calls or puts now reports a clear reason (`NO_CALL_CONTRACTS`, `NO_PUT_CONTRACTS`, `EMPTY_CHAIN`) instead of a raw Python error.
 - **Cancel stops a batch immediately; interrupted tickers keep finished pages as a PARTIAL snapshot; Gateway connection loss or a 240 s per-ticker time-out stops the batch (remaining tickers "not started").** New config key `watchlist.batch_ticker_timeout_sec` (default `240`, `30..1800`). UI: Cancel shows `Stopping…`, summary reports not-started / partial / cancelled counts, `Retry (n)` re-runs every non-done ticker, `PARTIAL` snapshot tag and chain warning, an aborted batch shows a warning banner, and a Gateway time-out on a single refresh returns `503 GATEWAY_TIMEOUT`.
 - **IBKR requests now time out after 20 s and fail fast on Gateway upstream loss (a batch could hang forever).** New config key `ibkr.request_timeout_sec` (default `20`, `0 < x <= 120`); `GatewayTimeoutError` and upstream-loss notices surface as sanitized `GatewayConnectionError` messages naming the stage.
 - **Interrupted refreshes can be archived as partial snapshots** (`SnapshotMeta.partial` / `partial_reason` `cancelled|timeout|connection_lost`): a partial save never replaces an existing `data/latest/{TICKER}_latest.csv` and is excluded from the quality gate.

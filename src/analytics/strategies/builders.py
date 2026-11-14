@@ -6,6 +6,10 @@ Verticals share two right-parameterized builders:
   `min_ror_pct` entry floors with structured `skip_reason` codes;
 - debit verticals (`BULL_CALL_SPREAD` calls, `BEAR_PUT_SPREAD` puts): long leg near ATM, short
   leg toward the Call / Put Wall (entry floors are ignored, as for every non-credit preset).
+
+Missing contracts raise `StrategyFilterError`: `EMPTY_CHAIN` when the frame has no Put / Call
+rows at all, and `NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS` when the Iron Condor's target expiry
+lacks one right.
 """
 
 from __future__ import annotations
@@ -31,7 +35,11 @@ WingDirection = Literal["BELOW", "ABOVE"]
 
 
 class StrategyFilterError(ValueError):
-    """Raised when strategy auto-selection finds no candidate satisfying entry filters."""
+    """Raised when strategy auto-selection finds no buildable candidate; carries `skip_reason`.
+
+    Entry-filter rejections surface through `suggest_strategy_legs_from_walls`; missing
+    contracts (`EMPTY_CHAIN`, `NO_PUT_CONTRACTS`, `NO_CALL_CONTRACTS`) raise directly.
+    """
 
     def __init__(self, skip_reason: str, message: str) -> None:
         super().__init__(message)
@@ -85,6 +93,11 @@ def pick_target_expiry(
     for r in rows:
         if r.expiry not in exp_dte:
             exp_dte[r.expiry] = r.dte
+    if not exp_dte:
+        # `prepare_rows` drops non-C/P rows, so a non-empty frame can still yield no rows.
+        raise StrategyFilterError(
+            "EMPTY_CHAIN", "No Put or Call contracts found in snapshot for strategy preset"
+        )
     if preferred_expiry and preferred_expiry in exp_dte:
         return preferred_expiry, exp_dte[preferred_expiry]
     best_exp, best_dte = min(
@@ -502,7 +515,25 @@ def _select_iron_condor(
     spot: float,
     put_wall: float | None,
     call_wall: float | None,
+    *,
+    expiry: str,
 ) -> tuple[list[StrategyLegInput], list[str]]:
+    """Iron Condor at `expiry`: short Put / Call toward the Walls, protective wings beyond.
+
+    Both rights must be listed at `expiry`; a missing side raises `StrategyFilterError`
+    (`NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS`, or `EMPTY_CHAIN` when neither is listed).
+    """
+    if not exp_puts or not exp_calls:
+        if exp_calls:
+            skip_reason, missing = "NO_PUT_CONTRACTS", "Put"
+        elif exp_puts:
+            skip_reason, missing = "NO_CALL_CONTRACTS", "Call"
+        else:
+            skip_reason, missing = "EMPTY_CHAIN", "Put or Call"
+        raise StrategyFilterError(
+            skip_reason, f"No {missing} contracts at {expiry} for Iron Condor"
+        )
+
     put_pool = [r for r in exp_puts if r.strike < spot - 1e-6 and r.mid > 0.01] or exp_puts
     call_pool = [r for r in exp_calls if r.strike > spot + 1e-6 and r.mid > 0.01] or exp_calls
 
@@ -689,6 +720,9 @@ def try_suggest_strategy_legs_from_walls(
 
     `min_net_credit_dollars` / `min_ror_pct` drive the credit-vertical search
     (`BULL_PUT_SPREAD`, `BEAR_CALL_SPREAD`) and are ignored by the other presets.
+    Structural failures raise instead: `StrategyFilterError` for missing contracts
+    (`EMPTY_CHAIN`, Iron Condor `NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS`), otherwise a plain
+    `ValueError` (e.g. insufficient wing strikes).
     """
     _, spot, rows = prepare_rows(df)
     walls = walls_report or compute_walls(df)
@@ -725,7 +759,9 @@ def try_suggest_strategy_legs_from_walls(
     elif strategy_kind == "BEAR_PUT_SPREAD":
         legs, notes = _select_debit_vertical(exp_puts, spot, put_wall, spec=_BEAR_PUT)
     elif strategy_kind == "IRON_CONDOR":
-        legs, notes = _select_iron_condor(exp_puts, exp_calls, spot, put_wall, call_wall)
+        legs, notes = _select_iron_condor(
+            exp_puts, exp_calls, spot, put_wall, call_wall, expiry=short_exp
+        )
     elif strategy_kind == "DIAGONAL_SPREAD":
         legs, notes = _select_diagonal_spread(rows, short_exp, short_dte, spot, call_wall)
     else:
