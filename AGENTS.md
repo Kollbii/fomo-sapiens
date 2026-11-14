@@ -103,7 +103,7 @@ Delegate work to the specialized profiles to keep context windows small (full ro
 - **Agents:**
   - **`broker-storage-eng`** (`deep-reasoning`: Claude `opus` / Gemini `gemini-4-argon` `thinkingLevel: HIGH`, alt `gemini-4-hydrogen` `XHIGH`): Phases 1–3 (`src/core/` except `security.py`, `src/storage/`, `src/broker/`) and the `src/services/` orchestration layer.
   - **`quant-analytics-eng`** (`deep-reasoning`: `opus` / `gemini-4-argon` `thinkingLevel: HIGH`): Phase 4 (`src/analytics/`), pure Polars/NumPy/SciPy math and Strategy Lab.
-  - **`ui-frontend-eng`** (`balanced-coding`: `sonnet` / `gemini-4-hydrogen` `thinkingLevel: MEDIUM`): Phase 5 (`src/main.py`, `src/web/`).
+  - **`ui-frontend-eng`** (`balanced-coding`: `sonnet` / `gemini-4-hydrogen` `thinkingLevel: MEDIUM`): Phase 5 (`src/main.py`, `src/web/`), incl. the Best Option screener card (`screener.js`, `screener.css`, `/api/screener/*`).
   - **`doc-sync-auditor`** (`precise-writer`: `sonnet` / `gemini-4-hydrogen` `thinkingLevel: MEDIUM`): diff-driven sync of `AGENTS.md`, `docs/*.md`, `.agent/agents/*.md`.
   - **`safety-reviewer`** (`deep-reasoning`, read-only tools: `opus` / `gemini-4-argon` `thinkingLevel: HIGH`): APPROVE / REQUEST_CHANGES review gate for diffs touching `src/core/`, `src/broker/`, `src/storage/`, `src/services/`, `src/web/{api,backtest_api,errors}.py`, `scripts/security_guard.py`.
   - **`qa-git-runner`** (`fast-executor`: `haiku` / `gemini-4-hydrogen` `thinkingLevel: LOW`): `make check`, compact report, conventional commits; tags/pushes only on explicit request.
