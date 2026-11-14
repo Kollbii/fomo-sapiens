@@ -788,6 +788,8 @@ def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
                 "BULL_CALL_SPREAD",
                 "DIAGONAL_SPREAD",
                 "IRON_CONDOR",
+                "BEAR_CALL_SPREAD",
+                "BEAR_PUT_SPREAD",
             ]
             condor = payload["evaluations"][3]
             assert len(condor["legs"]) == 4

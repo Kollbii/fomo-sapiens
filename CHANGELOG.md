@@ -8,6 +8,7 @@ milestones in git history.
 ## [Unreleased]
 
 ### Added
+- **Strategy Lab Bear Call / Bear Put presets and new risk metrics (analytics/engine; UI pills follow):** `BEAR_CALL_SPREAD`, `BEAR_PUT_SPREAD`, `expected_return_on_risk_pct` (EV/risk), `nearest_breakeven_distance_pct`, and the pure `repick_strategy_legs` helper in `src/analytics/strategies/repick.py`.
 - **16-ticker default watchlist:** `watchlist.hardcoded_tickers` and `DEFAULT_WATCHLIST` now seed `NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`; the list is stored server-side in `data/watchlist.json`.
 - **Watchlist & batch refresh API:** `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel` (sequential multi-ticker refresh; new codes `WATCHLIST_FULL`, `STORAGE_UNAVAILABLE`, `BATCH_NOT_FOUND`).
 - **Collapsible watchlist panel with multi-ticker batch load (`#watchlist-picker`):** add/remove tickers, select All / None / Stale only, `LOAD SELECTED` with a polled progress strip (cancel, retry unfinished), replacing the fixed ticker pills and custom ticker box.
