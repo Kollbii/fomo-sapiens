@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from src.core.exceptions import InvalidTickerError, SnapshotNotFoundError, StorageSchemaError
 from src.storage.csv_repository import make_snapshot_id
@@ -215,3 +217,348 @@ def test_immutable_tracked_quote_csv_validation_and_reload(tmp_path: Path) -> No
         store.load_quotes("NVDA", "NVDA_20261111_155099")
     with pytest.raises(StorageSchemaError):
         store.load_quotes("NVDA", "bad-id")
+
+
+def test_ledger_fields_validation_and_legacy_json_compatibility(tmp_path: Path) -> None:
+    leg_default = PaperTradeLeg(side="SELL", right="P", expiry="2026-12-18", strike=130.0)
+    assert leg_default.con_id == 0
+    assert leg_default.qty_ratio == 1
+    assert leg_default.entry_price is None
+
+    leg_custom = PaperTradeLeg(
+        side="BUY",
+        right="C",
+        expiry="2026-12-18",
+        strike=145.0,
+        con_id=0,
+        qty_ratio=2,
+        entry_price=0.0,
+    )
+    assert leg_custom.qty_ratio == 2
+    assert leg_custom.entry_price == 0.0
+
+    bad_leg_cases: list[dict[str, Any]] = [
+        {"con_id": -1},
+        {"qty_ratio": 0},
+        {"qty_ratio": 101},
+        {"entry_price": -0.01},
+        {"entry_price": float("nan")},
+        {"entry_price": float("inf")},
+    ]
+    for bad_leg_kwargs in bad_leg_cases:
+        with pytest.raises(ValidationError):
+            PaperTradeLeg(
+                side="BUY",
+                right="C",
+                expiry="2026-12-18",
+                strike=145.0,
+                **bad_leg_kwargs,
+            )
+
+    ledger_trade = PaperTrade(
+        id="NVDA-LEDGER-001",
+        ticker="NVDA",
+        strategy_kind="BULL_PUT_SPREAD",
+        status="CLOSED",
+        legs=[leg_default, leg_custom],
+        qty=3,
+        underlying_conid=0,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-12T15:00:00Z",
+        market_date="2026-11-12",
+        entry_net_cash=310.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-1",
+        ledger_strategy_label="Bull Put Spread",
+    )
+    assert ledger_trade.source == "LEDGER"
+    assert ledger_trade.status == "CLOSED"
+    assert ledger_trade.underlying_conid == 0
+    assert ledger_trade.created_from_snapshot_id is None
+    assert ledger_trade.ledger_campaign_id == "camp-1"
+    assert ledger_trade.ledger_strategy_label == "Bull Put Spread"
+
+    for bad_snap in ("", "   ", "../NVDA_20261111_155004", "not-a-snapshot"):
+        with pytest.raises(ValidationError):
+            PaperTrade(
+                id="NVDA-LEDGER-BAD",
+                ticker="NVDA",
+                strategy_kind="CUSTOM",
+                legs=[leg_default],
+                created_from_snapshot_id=bad_snap,
+                created_utc="2026-11-12T15:00:00Z",
+                market_date="2026-11-12",
+                entry_net_cash=100.0,
+            )
+
+    # Legacy paper_trades.json payload lacking new fields loads with safe defaults.
+    store = PaperTradeStore(tmp_path / "metadata", tmp_path / "tracked")
+    store.metadata_dir.mkdir(parents=True, exist_ok=True)
+    legacy_payload = {
+        "trades": [
+            {
+                "id": "NVDA-20261113-b75960cb",
+                "ticker": "NVDA",
+                "strategy_kind": "BULL_PUT_SPREAD",
+                "status": "STOPPED",
+                "legs": [
+                    {
+                        "side": "SELL",
+                        "right": "P",
+                        "expiry": "2026-12-18",
+                        "strike": 200.0,
+                        "con_id": 705991494,
+                    }
+                ],
+                "qty": 1,
+                "underlying_conid": 4815747,
+                "created_from_snapshot_id": "NVDA_20261111_135531",
+                "created_utc": "2026-11-13T11:39:16Z",
+                "market_date": "2026-11-11",
+                "expiry": "2026-12-18",
+                "entry_net_cash": 507.5,
+                "status_changed_utc": "2026-11-13T16:17:58Z",
+                "last_quote_utc": None,
+            }
+        ]
+    }
+    store.registry_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+    loaded = store.load_trades()
+    assert len(loaded) == 1
+    assert loaded[0].source == "MANUAL"
+    assert loaded[0].ledger_campaign_id is None
+    assert loaded[0].ledger_strategy_label is None
+    assert loaded[0].legs[0].qty_ratio == 1
+    assert loaded[0].legs[0].entry_price is None
+
+
+def test_sync_ledger_trades_lifecycle_rolls_closing_and_manual_isolation(tmp_path: Path) -> None:
+    store = PaperTradeStore(tmp_path / "metadata", tmp_path / "tracked")
+    t0 = datetime(2026, 11, 14, 15, 0, 0, tzinfo=UTC)
+
+    old_legs = [
+        PaperTradeLeg(
+            side="SELL", right="P", expiry="2026-12-18", strike=130.0, con_id=0, entry_price=2.10
+        ),
+        PaperTradeLeg(
+            side="BUY", right="P", expiry="2026-12-18", strike=125.0, con_id=0, entry_price=1.05
+        ),
+    ]
+    manual_trade = PaperTrade(
+        id="NVDA-20261111-manual01",
+        ticker="NVDA",
+        strategy_kind="BULL_PUT_SPREAD",
+        status="ACTIVE",
+        legs=old_legs,
+        qty=1,
+        underlying_conid=4815,
+        created_from_snapshot_id="NVDA_20261111_155004",
+        created_utc="2026-11-11T15:50:04Z",
+        market_date="2026-11-11",
+        entry_net_cash=105.0,
+        source="MANUAL",
+    )
+    store.save_trades([manual_trade])
+
+    # 1. Initial sync creates two LEDGER trades (one campaign-keyed, one fallback-keyed).
+    inc_camp = PaperTrade(
+        id="NVDA-LEDGER-init1",
+        ticker="NVDA",
+        strategy_kind="BULL_PUT_SPREAD",
+        legs=old_legs,
+        qty=2,
+        underlying_conid=0,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-12T14:30:00Z",
+        market_date="2026-11-12",
+        entry_net_cash=210.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-nvda-1",
+        ledger_strategy_label="Bull Put Spread",
+    )
+    inc_fallback = PaperTrade(
+        id="AVGO-LEDGER-init2",
+        ticker="AVGO",
+        strategy_kind="CUSTOM_COMBO",
+        legs=[
+            PaperTradeLeg(
+                side="BUY",
+                right="C",
+                expiry="2026-12-25",
+                strike=180.0,
+                con_id=0,
+                qty_ratio=2,
+                entry_price=3.40,
+            )
+        ],
+        qty=1,
+        underlying_conid=0,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-13T14:30:00Z",
+        market_date="2026-11-13",
+        entry_net_cash=-680.0,
+        source="MANUAL",  # intentionally wrong; sync_ledger_trades must coerce to LEDGER
+        ledger_campaign_id=None,
+    )
+
+    created, updated, closed, all_ledger = store.sync_ledger_trades(
+        [inc_camp, inc_fallback], now_utc=t0
+    )
+    assert (created, updated, closed) == (2, 0, 0)
+    assert len(all_ledger) == 2
+    assert all(t.source == "LEDGER" for t in all_ledger)
+    assert not list(store.metadata_dir.glob("*.tmp"))
+
+    # Add a last_quote_utc timestamp on inc_camp to verify sync preserves quote metadata.
+    saved = store.load_trades()
+    saved_with_quote = [
+        t.model_copy(update={"last_quote_utc": "2026-11-14T14:55:00Z"})
+        if t.id == "NVDA-LEDGER-init1"
+        else t
+        for t in saved
+    ]
+    store.save_trades(saved_with_quote)
+
+    # 2. Idempotent re-sync (new transient IDs & duplicate incoming entries) preserves IDs.
+    t1 = t0 + timedelta(minutes=5)
+    resync_camp = inc_camp.model_copy(
+        update={"id": "NVDA-LEDGER-transient", "created_utc": "2026-11-14T15:05:00Z"}
+    )
+    resync_camp_dup = inc_camp.model_copy(
+        update={"id": "NVDA-LEDGER-dup", "created_utc": "2026-11-14T15:05:00Z"}
+    )
+    resync_fallback = inc_fallback.model_copy(
+        update={"id": "AVGO-LEDGER-transient", "created_utc": "2026-11-14T15:05:00Z"}
+    )
+    created, updated, closed, all_ledger = store.sync_ledger_trades(
+        [resync_camp, resync_camp_dup, resync_fallback], now_utc=t1
+    )
+    assert (created, updated, closed) == (0, 2, 0)
+    by_id = {t.id: t for t in all_ledger}
+    assert set(by_id) == {"NVDA-LEDGER-init1", "AVGO-LEDGER-init2"}
+    assert by_id["NVDA-LEDGER-init1"].created_utc == "2026-11-12T14:30:00Z"
+    assert by_id["NVDA-LEDGER-init1"].last_quote_utc == "2026-11-14T14:55:00Z"
+    assert by_id["AVGO-LEDGER-init2"].created_utc == "2026-11-13T14:30:00Z"
+
+    # 3. Roll camp-nvda-1 to new legs/market_date, open camp-nvda-2 at old legs, drop AVGO fallback.
+    t2 = t0 + timedelta(hours=1)
+    rolled_legs = [
+        PaperTradeLeg(
+            side="SELL", right="P", expiry="2027-01-15", strike=135.0, con_id=9101, entry_price=2.80
+        ),
+        PaperTradeLeg(
+            side="BUY", right="P", expiry="2027-01-15", strike=130.0, con_id=9102, entry_price=1.40
+        ),
+    ]
+    rolled_camp = PaperTrade(
+        id="NVDA-LEDGER-new-transient",
+        ticker="NVDA",
+        strategy_kind="ROLL_VERTICAL",
+        legs=rolled_legs,
+        qty=3,
+        underlying_conid=4815,
+        created_from_snapshot_id="NVDA_20261114_150000",
+        created_utc="2026-11-14T16:00:00Z",
+        market_date="2026-11-14",
+        entry_net_cash=420.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-nvda-1",
+        ledger_strategy_label="Rolled Bull Put",
+    )
+    new_camp = PaperTrade(
+        id="NVDA-LEDGER-camp2",
+        ticker="NVDA",
+        strategy_kind="BULL_PUT_SPREAD",
+        legs=old_legs,
+        qty=1,
+        underlying_conid=4815,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-14T16:00:00Z",
+        market_date="2026-11-14",
+        entry_net_cash=105.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-nvda-2",
+        ledger_strategy_label="Bull Put Spread",
+    )
+
+    created, updated, closed, all_ledger = store.sync_ledger_trades(
+        [new_camp, rolled_camp], now_utc=t2
+    )
+    assert (created, updated, closed) == (1, 1, 1)
+    by_id = {t.id: t for t in all_ledger}
+    rolled = by_id["NVDA-LEDGER-init1"]
+    assert rolled.created_utc == "2026-11-12T14:30:00Z"
+    assert rolled.market_date == "2026-11-14"
+    assert rolled.expiry == "2027-01-15"
+    assert rolled.legs == rolled_legs
+    assert rolled.qty == 3
+    assert rolled.entry_net_cash == 420.0
+    assert rolled.strategy_kind == "ROLL_VERTICAL"
+    assert rolled.ledger_strategy_label == "Rolled Bull Put"
+    assert rolled.underlying_conid == 4815
+    assert rolled.created_from_snapshot_id == "NVDA_20261114_150000"
+    assert rolled.last_quote_utc == "2026-11-14T14:55:00Z"
+    assert rolled.status == "ACTIVE"
+
+    closed_avgo = by_id["AVGO-LEDGER-init2"]
+    assert closed_avgo.status == "CLOSED"
+    assert closed_avgo.status_changed_utc == "2026-11-14T16:00:00Z"
+
+    assert by_id["NVDA-LEDGER-camp2"].status == "ACTIVE"
+
+    # MANUAL trade remains untouched across the entire sync lifecycle.
+    persisted = store.load_trades()
+    persisted_manual = [t for t in persisted if t.source == "MANUAL"]
+    assert persisted_manual == [manual_trade]
+
+
+def test_sync_ledger_trades_expires_past_cutoff_without_double_closing(tmp_path: Path) -> None:
+    store = PaperTradeStore(tmp_path / "metadata", tmp_path / "tracked")
+    expiring_trade = PaperTrade(
+        id="NVDA-LEDGER-exp1",
+        ticker="NVDA",
+        strategy_kind="LONG_CALL",
+        status="ACTIVE",
+        legs=[PaperTradeLeg(side="BUY", right="C", expiry="2026-11-20", strike=150.0)],
+        qty=1,
+        underlying_conid=0,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-10T15:00:00Z",
+        market_date="2026-11-10",
+        entry_net_cash=-200.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-exp-1",
+    )
+    store.save_trades([expiring_trade])
+
+    # Advance past 2026-11-20 ET and omit from incoming: expires via _expire_stale, NOT closed.
+    past_cutoff = datetime(2026, 11, 21, 16, 0, 0, tzinfo=UTC)
+    created, updated, closed, all_ledger = store.sync_ledger_trades([], now_utc=past_cutoff)
+    assert (created, updated, closed) == (0, 0, 0)
+    assert len(all_ledger) == 1
+    assert all_ledger[0].status == "EXPIRED"
+    assert all_ledger[0].status_changed_utc == "2026-11-21T16:00:00Z"
+
+    # An already-expired incoming trade resolves directly to EXPIRED.
+    expired_incoming = PaperTrade(
+        id="NVDA-LEDGER-exp2",
+        ticker="NVDA",
+        strategy_kind="LONG_CALL",
+        status="ACTIVE",
+        legs=[PaperTradeLeg(side="BUY", right="C", expiry="2026-11-20", strike=155.0)],
+        qty=1,
+        underlying_conid=0,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-10T15:00:00Z",
+        market_date="2026-11-10",
+        entry_net_cash=-150.0,
+        source="LEDGER",
+        ledger_campaign_id="camp-exp-2",
+    )
+    created2, updated2, closed2, all_ledger2 = store.sync_ledger_trades(
+        [expired_incoming], now_utc=past_cutoff
+    )
+    assert (created2, updated2, closed2) == (1, 0, 0)
+    by_id2 = {t.id: t for t in all_ledger2}
+    assert by_id2["NVDA-LEDGER-exp2"].status == "EXPIRED"
+    assert by_id2["NVDA-LEDGER-exp2"].status_changed_utc == "2026-11-21T16:00:00Z"
