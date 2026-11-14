@@ -70,7 +70,7 @@ from src.storage.paper_trade_store import (
     PaperTradeLeg,
     PaperTradeStatus,
 )
-from src.storage.schema import SnapshotMeta, SpotSource
+from src.storage.schema import PartialReason, SnapshotMeta, SpotSource
 
 __all__ = [
     "BacktestConfig",
@@ -234,7 +234,11 @@ class ChainMetadataPayload(BaseModel):
 
 
 class ChainAnalyticsResponse(BaseModel):
-    """Unified analytics payload returned by `GET /api/chain/{ticker}` and `POST /api/refresh`."""
+    """Unified analytics payload returned by `GET /api/chain/{ticker}` and `POST /api/refresh`.
+
+    `partial` / `partial_reason` mirror the loaded snapshot's index entry: True when it is a
+    partial snapshot (an interrupted refresh that archived only its finished pages).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -243,6 +247,8 @@ class ChainAnalyticsResponse(BaseModel):
     anomalies: AnomaliesReport
     profiles: MultiDTEProfilesReport
     contracts: list[dict[str, Any]]
+    partial: bool = False
+    partial_reason: PartialReason | None = None
 
 
 class RefreshRequest(BaseModel):
@@ -567,8 +573,10 @@ class BacktestRunResponse(BaseModel):
 MAX_TICKER_INPUT_CHARS = 32  # generous bound on raw input; `TickerValidator` is the authority
 
 TickerInput = Annotated[str, Field(min_length=1, max_length=MAX_TICKER_INPUT_CHARS)]
-BatchState = Literal["running", "cancelling", "completed", "cancelled"]
-BatchTickerState = Literal["queued", "running", "done", "failed", "cancelled"]
+# `aborted`: stopped by IBKR Gateway trouble (connection lost / request or per-ticker time-out).
+BatchState = Literal["running", "cancelling", "completed", "cancelled", "aborted"]
+# `not_started`: left over when the batch was aborted (Retry re-runs every non-`done` ticker).
+BatchTickerState = Literal["queued", "running", "done", "failed", "cancelled", "not_started"]
 
 
 class WatchlistEntry(BaseModel):
@@ -631,12 +639,17 @@ class BatchRefreshRequest(BaseModel):
 
 
 class BatchTickerResult(BaseModel):
-    """Per-ticker progress of a batch refresh; `error` is always a sanitized message."""
+    """Per-ticker progress of a batch refresh; `error` is always a sanitized message.
+
+    `partial=True` (state `cancelled` or `failed`): the interrupted ticker's finished pages were
+    archived as partial snapshot `snapshot_id` (`contract_count` rows; `data/latest` untouched).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     ticker: str
     state: BatchTickerState
+    partial: bool = False
     snapshot_id: str | None = None
     contract_count: int | None = None
     error_code: str | None = None
@@ -656,6 +669,7 @@ class BatchRefreshStatus(BaseModel):
     done_count: int
     failed_count: int
     cancelled_count: int
+    not_started_count: int = 0
     current_ticker: str | None = None
     started_at_utc: str
     finished_at_utc: str | None = None

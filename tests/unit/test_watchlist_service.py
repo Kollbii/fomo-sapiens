@@ -177,7 +177,7 @@ def test_corrupt_file_notice_and_freshness_failure_notice(
     svc.ensure_layout()
     svc.store.path.write_text("{not json", encoding="utf-8")
 
-    def _broken(_tickers: Any) -> Any:
+    def _broken(_tickers: Any, **_kw: Any) -> Any:
         raise StorageSchemaError("snapshot index corrupt: secret detail")
 
     monkeypatch.setattr(repo, "latest_snapshots", _broken)

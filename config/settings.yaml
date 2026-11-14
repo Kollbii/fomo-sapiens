@@ -43,6 +43,7 @@ watchlist:
   allow_custom_ticker: true
   custom_ticker_regex: "^[A-Z]{1,5}$"
   max_size: 20           # Server-persisted watchlist cap (data/watchlist.json); 1..50, >= len(hardcoded_tickers)
+  batch_ticker_timeout_sec: 240.0  # Batch per-ticker cap (s); exceeding it saves finished pages + stops the batch; 30..1800
 
 options_chain:
   dte_min: 30

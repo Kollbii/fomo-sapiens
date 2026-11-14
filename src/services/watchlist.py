@@ -2,7 +2,8 @@
 
 All store / snapshot-index I/O is synchronous and runs through the injected `runner`
 (default `asyncio.to_thread`) so the event loop never blocks. Freshness comes from ONE
-snapshot-index read (`CSVRepository.latest_snapshots`); no IBKR call is ever made.
+snapshot-index read (`CSVRepository.latest_snapshots(include_partial=False)`: the newest
+COMPLETE snapshot; partial ones never count as fresh); no IBKR call is ever made.
 """
 
 from __future__ import annotations
@@ -113,7 +114,8 @@ class WatchlistService:
 
     def _entries(self, tickers: Sequence[str], today: date) -> tuple[list[WatchlistEntry], bool]:
         try:
-            latest = self.repo.latest_snapshots(tickers)
+            # A partial snapshot (interrupted refresh) never counts as fresh.
+            latest = self.repo.latest_snapshots(tickers, include_partial=False)
         except (StorageSchemaError, OSError) as exc:
             logger.warning("watchlist freshness unavailable (%s)", type(exc).__name__)
             return [WatchlistEntry(ticker=t) for t in tickers], False

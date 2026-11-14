@@ -5,6 +5,7 @@ ticker of a batch refresh). The codes and wording mirror `src/web/errors.py`: do
 (`src/core/exceptions.py`) carry messages that are already safe for the dashboard; anything
 else (including the bare `AnalyzerError` base, which the web layer does not map either) gets
 the fixed `GENERIC_ERROR_MESSAGE` so raw exception text and stack traces never reach a client.
+`GatewayTimeoutError` (a `GatewayConnectionError` subclass) gets its own `GATEWAY_TIMEOUT` code.
 Callers log the original exception server-side.
 """
 
@@ -23,6 +24,7 @@ from src.core.exceptions import (
     DuplicatePaperTradeError,
     FlexServiceError,
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidRequestError,
     InvalidTickerError,
     OptionChainFetchError,
@@ -39,6 +41,8 @@ from src.core.exceptions import (
 )
 
 GENERIC_ERROR_CODE: Final = "INTERNAL_ERROR"
+GATEWAY_TIMEOUT_CODE: Final = "GATEWAY_TIMEOUT"
+"""`GatewayTimeoutError`: the local socket may be up while the Gateway lost its IBKR upstream."""
 GENERIC_ERROR_MESSAGE: Final = "Unexpected internal error; details were logged on the server."
 MAX_SAFE_MESSAGE_CHARS: Final = 300
 
@@ -53,6 +57,7 @@ _DOMAIN_CODES: Final[tuple[tuple[type[AnalyzerError], str], ...]] = (
     (InvalidRequestError, "INVALID_REQUEST"),
     (SnapshotNotFoundError, "SNAPSHOT_NOT_FOUND"),
     (BatchNotFoundError, "BATCH_NOT_FOUND"),
+    (GatewayTimeoutError, GATEWAY_TIMEOUT_CODE),
     (GatewayConnectionError, "GATEWAY_OFFLINE"),
     (UnderlyingPriceUnavailableError, "UNDERLYING_PRICE_UNAVAILABLE"),
     (OptionChainFetchError, "OPTION_CHAIN_FETCH_ERROR"),
@@ -89,7 +94,15 @@ def describe_error(exc: BaseException, *, ibkr: IBKRSettings | None = None) -> S
     for exc_type, code in _DOMAIN_CODES:
         if isinstance(exc, exc_type):
             message = str(exc)
-            if isinstance(exc, GatewayConnectionError):
+            if isinstance(exc, GatewayTimeoutError):
+                host = ibkr.host if ibkr is not None else "127.0.0.1"
+                port = ibkr.port if ibkr is not None else 4001
+                message = (
+                    f"{message} — IBKR Gateway on {host}:{port} is not answering "
+                    "(it may have lost its IBKR connection). "
+                    "Serving cached CSV snapshots remains available."
+                )
+            elif isinstance(exc, GatewayConnectionError):
                 host = ibkr.host if ibkr is not None else "127.0.0.1"
                 port = ibkr.port if ibkr is not None else 4001
                 message = (

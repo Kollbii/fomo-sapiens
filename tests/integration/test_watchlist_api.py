@@ -197,7 +197,10 @@ def test_batch_lifecycle_get_current_and_errors(tmp_path: Path) -> None:
             await _settle(batch)
             final = (await client.get(f"/api/refresh/batch/{BATCH_ID}")).json()
             assert final["state"] == "cancelled"
-            assert [i["state"] for i in final["items"]] == ["done", "cancelled"]
+            # Cancel stops at once: NVDA (no finished page yet) is cancelled mid-fetch.
+            assert [i["state"] for i in final["items"]] == ["cancelled", "cancelled"]
+            assert [i["partial"] for i in final["items"]] == [False, False]
+            assert final["not_started_count"] == 0
 
     run_virtual_loop(_scenario())
     assert not svc.refresh_lock.locked()
@@ -228,12 +231,17 @@ def test_batch_validation_and_sanitized_failure(tmp_path: Path) -> None:
             assert ok.status_code == 202
             await _settle(batch)
             final = (await client.get(f"/api/refresh/batch/{BATCH_ID}")).json()
-            assert final["state"] == "completed"
+            # Gateway connection loss on CRDO stops the batch: NVDA is never started.
+            assert final["state"] == "aborted"
+            assert final["not_started_count"] == 1
+            assert final["notices"][-1].startswith("Stopped: IBKR Gateway connection lost")
             items = {i["ticker"]: i for i in final["items"]}
-            assert items["NVDA"]["state"] == "done"
+            assert items["NVDA"]["state"] == "not_started"
             assert items["AVGO"]["state"] == "failed"
             assert items["AVGO"]["error_code"] == "INTERNAL_ERROR"
+            assert items["CRDO"]["state"] == "failed"
             assert items["CRDO"]["error_code"] == "GATEWAY_OFFLINE"
+            assert items["CRDO"]["partial"] is True  # its finished page was archived
             assert "SUPERSECRET" not in str(final)
             assert "Traceback" not in str(final)
 

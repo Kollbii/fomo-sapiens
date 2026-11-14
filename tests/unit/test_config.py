@@ -155,6 +155,18 @@ def test_request_timeout_sec_yaml_override_and_bounds(tmp_path: Path) -> None:
             load_settings(y, tmp_path / "x.env")
 
 
+def test_batch_ticker_timeout_sec_default_override_and_bounds(tmp_path: Path) -> None:
+    y = tmp_path / "s.yaml"
+    y.write_text("")
+    assert load_settings(y, tmp_path / "x.env").watchlist.batch_ticker_timeout_sec == 240.0
+    y.write_text("watchlist:\n  batch_ticker_timeout_sec: 600\n")
+    assert load_settings(y, tmp_path / "x.env").watchlist.batch_ticker_timeout_sec == 600.0
+    for bad in ("0", "29.9", "1801"):
+        y.write_text(f"watchlist:\n  batch_ticker_timeout_sec: {bad}\n")
+        with pytest.raises(ConfigurationError):
+            load_settings(y, tmp_path / "x.env")
+
+
 def test_get_settings_cached() -> None:
     assert get_settings() is get_settings()
 

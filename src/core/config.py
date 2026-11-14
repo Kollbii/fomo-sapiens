@@ -152,6 +152,8 @@ class WatchlistSettings(_StrictModel):
     allow_custom_ticker: bool = True
     custom_ticker_regex: str = "^[A-Z]{1,5}$"
     max_size: int = Field(default=20, ge=1, le=WATCHLIST_MAX_SIZE_LIMIT)
+    # Per-ticker wall-clock cap inside a batch refresh; exceeding it stops the batch (`aborted`).
+    batch_ticker_timeout_sec: float = Field(default=240.0, ge=30.0, le=1800.0)
 
     @model_validator(mode="after")
     def _check_seed_fits_max_size(self) -> WatchlistSettings:

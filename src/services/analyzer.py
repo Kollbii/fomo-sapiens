@@ -39,7 +39,7 @@ from src.broker.corridor import (
     CorridorSelection,
     select_wall_corridor,
 )
-from src.broker.fetcher import PagedOptionChainFetcher
+from src.broker.fetcher import ChainFetchProgress, FetchResult, PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
     InvalidRequestError,
@@ -77,6 +77,7 @@ from src.storage.ledger_repository import LedgerRepository
 from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     OPTION_CHAIN_POLARS_SCHEMA,
+    PartialReason,
     SnapshotMeta,
     SpotSource,
     infer_chain_step_and_range,
@@ -86,7 +87,11 @@ from src.storage.watchlist_store import WatchlistStore, resolve_watchlist_path
 
 @dataclass(frozen=True, slots=True)
 class TickerRefreshOutcome:
-    """Result of one locked per-ticker refresh (fetch -> enrich -> save -> paper-trade quote)."""
+    """Result of one locked per-ticker refresh (fetch -> enrich -> save -> paper-trade quote).
+
+    For a partial save (`save_partial_ticker_locked`) `partial_reason` is set and
+    `latest_updated` tells whether `data/latest/{T}_latest.csv` was (first-ever) replaced.
+    """
 
     symbol: str
     enriched: pl.DataFrame
@@ -98,6 +103,12 @@ class TickerRefreshOutcome:
     available_range_pcts: list[float]
     validated_count: int
     notices: list[str]
+    partial_reason: PartialReason | None = None
+    latest_updated: bool = True
+
+    @property
+    def partial(self) -> bool:
+        return self.partial_reason is not None
 
 
 class AnalyzerService:
@@ -294,9 +305,14 @@ class AnalyzerService:
     def list_snapshots(self, raw_ticker: str) -> SnapshotsListResponse:
         symbol = self.validate_ticker(raw_ticker)
         snaps = self.repo.list_snapshots(symbol)
+        # The id `load_latest` serves: the latest cache file (a partial snapshot never replaces
+        # it), else the newest complete archive, else the newest one.
+        latest_id = self.repo.latest_cache_snapshot_id(symbol)
+        if latest_id is None and snaps:
+            latest_id = next((m for m in snaps if not m.is_partial), snaps[0]).snapshot_id
         return SnapshotsListResponse(
             ticker=symbol,
-            latest_snapshot_id=snaps[0].snapshot_id if snaps else None,
+            latest_snapshot_id=latest_id,
             snapshots=snaps,
         )
 
@@ -327,6 +343,8 @@ class AnalyzerService:
         quoted_contract_count: int | None = None,
         quote_coverage: float | None = None,
         prior_close_only_count: int | None = None,
+        partial: bool = False,
+        partial_reason: PartialReason | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
         first = enriched.row(0, named=True)
@@ -427,6 +445,8 @@ class AnalyzerService:
             anomalies=anomalies,
             profiles=profiles,
             contracts=contracts,
+            partial=partial or partial_reason is not None,
+            partial_reason=partial_reason,
         )
 
     def _isolate_dashboard_dte(
@@ -522,6 +542,8 @@ class AnalyzerService:
             prior_close_only_count=(
                 snap_meta.prior_close_only_count if snap_meta and has_meta_quality else None
             ),
+            partial=snap_meta is not None and snap_meta.is_partial,
+            partial_reason=snap_meta.partial_reason if snap_meta else None,
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -802,18 +824,21 @@ class AnalyzerService:
         dte_min: int | None,
         dte_max: int | None,
         include_short_dte: bool,
+        progress: ChainFetchProgress | None = None,
+        on_saved: Callable[[TickerRefreshOutcome], None] | None = None,
     ) -> TickerRefreshOutcome:
         """Fetch -> BSM enrich -> save Mode 1 snapshot -> quote active paper trades for ONE ticker.
 
         The caller MUST already hold `refresh_lock` (and have stopped Corridor streams); this
         method neither acquires nor releases it, so `refresh_chain` and the batch orchestrator
         share one implementation. The fetcher's own `finally` cleanup cancels every line.
+        `progress` (optional, caller-owned) collects finished pages so an interrupted fetch can
+        be archived afterwards via `save_partial_ticker_locked`; `on_saved` is called as soon as
+        the complete snapshot is archived (before paper-trade quoting), so a caller interrupting
+        the quoting step knows the snapshot already exists.
         """
-        if not self.refresh_lock.locked():
-            raise RuntimeError("refresh_ticker_locked() requires refresh_lock to be held")
+        self._require_refresh_lock("refresh_ticker_locked")
         symbol = self.validate_ticker(raw_ticker)
-        oc = self.settings.options_chain
-        notices: list[str] = []
         fetch_res = await self.fetcher.fetch_option_chain(
             symbol,
             range_pct=range_pct,
@@ -821,7 +846,54 @@ class AnalyzerService:
             dte_min=dte_min,
             dte_max=dte_max,
             include_short_dte=include_short_dte,
+            progress=progress,
         )
+        outcome = self._save_fetch_result(symbol, fetch_res, partial_reason=None)
+        if on_saved is not None:
+            on_saved(outcome)
+        _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
+            symbol,
+            underlying_conid=outcome.plan.underlying.conid,
+        )
+        outcome.notices.extend(quote_notices)
+        return outcome
+
+    def save_partial_ticker_locked(
+        self,
+        raw_ticker: str,
+        progress: ChainFetchProgress,
+        reason: PartialReason,
+    ) -> TickerRefreshOutcome | None:
+        """Archive the FINISHED pages of an interrupted ticker refresh as a partial snapshot.
+
+        Same enrich -> save path as a complete refresh (BSM fallback, step inference), but the
+        snapshot is flagged `partial` / `reason` and never replaces `data/latest` unless the
+        ticker has none yet. No paper-trade quoting and no IBKR request. Returns `None` when no
+        page finished. The caller MUST hold `refresh_lock`.
+        """
+        self._require_refresh_lock("save_partial_ticker_locked")
+        symbol = self.validate_ticker(raw_ticker)
+        fetch_res = self.fetcher.build_partial_result(progress)
+        if fetch_res is None:
+            return None
+        if fetch_res.plan.underlying.symbol != symbol:
+            raise RuntimeError("partial fetch progress belongs to another ticker")
+        return self._save_fetch_result(symbol, fetch_res, partial_reason=reason)
+
+    def _require_refresh_lock(self, caller: str) -> None:
+        if not self.refresh_lock.locked():
+            raise RuntimeError(f"{caller}() requires refresh_lock to be held")
+
+    def _save_fetch_result(
+        self,
+        symbol: str,
+        fetch_res: FetchResult,
+        *,
+        partial_reason: PartialReason | None,
+    ) -> TickerRefreshOutcome:
+        """BSM-enrich a fetch result and archive it (complete or partial) as a Mode 1 snapshot."""
+        oc = self.settings.options_chain
+        notices: list[str] = []
         raw_df = pl.DataFrame(
             [r.model_dump() for r in fetch_res.rows],
             schema=OPTION_CHAIN_POLARS_SCHEMA,
@@ -858,24 +930,27 @@ class AnalyzerService:
             if plan.exchange_validated_strike_count > 0
             else len({float(r.strike) for r in fetch_res.rows})
         )
-        self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
-        meta = self.repo.save_snapshot(
+        if partial_reason is None:
+            # Capabilities come only from complete refreshes (a partial row set may undercount).
+            self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
+        saved = self.repo.save_snapshot_result(
             symbol,
             enriched_df.to_dicts(),
             range_pct=plan.range_pct,
             strike_step=actual_step,
             requested_strike_step=req_step,
             spot_source=plan.underlying.spot_source,
+            partial_reason=partial_reason,
         )
-        _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
-            symbol,
-            underlying_conid=plan.underlying.conid,
-        )
-        notices.extend(quote_notices)
+        if partial_reason is not None and not saved.latest_updated:
+            notices.append(
+                f"Partial snapshot {saved.meta.snapshot_id} archived; the latest cache for "
+                f"{symbol} still holds the previous complete snapshot."
+            )
         return TickerRefreshOutcome(
             symbol=symbol,
             enriched=enriched_df,
-            meta=meta,
+            meta=saved.meta,
             plan=plan,
             actual_step=actual_step,
             requested_step=req_step,
@@ -883,6 +958,8 @@ class AnalyzerService:
             available_range_pcts=avail_ranges,
             validated_count=validated_count,
             notices=notices,
+            partial_reason=partial_reason,
+            latest_updated=saved.latest_updated,
         )
 
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
