@@ -11,6 +11,7 @@ import {
   fmtNum,
   formatExpiryIso,
   matchesDteFilterValue,
+  parseDashboardDteWindow,
   snapDteValueToExpiries,
 } from "./helpers.js";
 import {
@@ -417,12 +418,16 @@ export function resetAllTableFilters() {
 export function syncDteBucketTabs(data) {
   if (!dom.dteBucketTabs) return;
   var activeVal = dom.filterDte ? dom.filterDte.value : "ALL";
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
   var expiries =
     data && data.profiles && data.profiles.expiries ? data.profiles.expiries : [];
   var buttons = dom.dteBucketTabs.querySelectorAll("[data-dte-bucket]");
   for (var i = 0; i < buttons.length; i++) {
     var btn = buttons[i];
     var bucketVal = btn.getAttribute("data-dte-bucket") || "ALL";
+    if (bucketVal === "ALL") {
+      btn.textContent = "All (" + dteWin.label + ")";
+    }
     var hasRows = bucketVal === "ALL";
     if (!hasRows) {
       for (var e = 0; e < expiries.length; e++) {
@@ -431,6 +436,9 @@ export function syncDteBucketTabs(data) {
           break;
         }
       }
+    }
+    if (bucketVal === "BUCKET:0-29") {
+      btn.hidden = !hasRows;
     }
     btn.disabled = expiries.length > 0 && !hasRows;
     var isActive = activeVal === bucketVal;

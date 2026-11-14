@@ -8,11 +8,13 @@ import {
 import {
   applyTickerPullPrefsToControls,
   buildActivePullScopeText,
+  buildRefreshDtePayload,
   configuredDefaultMdType,
   configuredFallbackMdType,
   configuredMarketDataMode,
   extractApiErrorMessage,
   gatewayAddressLabel,
+  parseDashboardDteWindow,
   resetControlCapabilities,
   setActiveTickerUI,
   showBanner,
@@ -46,6 +48,7 @@ import {
 } from "./strategy_lab.js";
 import {
   stopCorridorStream,
+  syncCorridorDefaultsFromStatus,
   syncCorridorFromChain,
 } from "./corridor.js";
 import {
@@ -131,6 +134,7 @@ export async function fetchStatus(tickerOverride) {
     var res = await apiJson(url);
     if (res.ok && res.body) {
       renderStatusBadges(res.body);
+      syncCorridorDefaultsFromStatus();
     }
   } catch (_err) {
     renderStatusBadges({
@@ -169,10 +173,14 @@ export async function loadChain(ticker, snapshotId) {
   }
 
   await fetchSnapshots(ticker);
-  var url = "/api/chain/" + encodeURIComponent(ticker);
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
+  var chainParams = new URLSearchParams();
   if (snapshotId) {
-    url += "?snapshot_id=" + encodeURIComponent(snapshotId);
+    chainParams.set("snapshot_id", snapshotId);
   }
+  chainParams.set("dte_min", String(dteWin.min));
+  chainParams.set("dte_max", String(dteWin.max));
+  var url = "/api/chain/" + encodeURIComponent(ticker) + "?" + chainParams.toString();
 
   var res;
   try {
@@ -244,13 +252,29 @@ export async function loadChain(ticker, snapshotId) {
     syncStrategySelectors(null);
     syncCorridorFromChain(null);
     renderTable(null);
-    showBanner(
-      "info",
-      "No cached snapshot exists for " +
+    var rangeEmptyDetail =
+      res.body && typeof res.body.detail === "string"
+        ? res.body.detail
+        : res.body && typeof res.body.message === "string"
+          ? res.body.message
+          : "";
+    var isRangeEmpty = rangeEmptyDetail.indexOf("requested DTE range") !== -1;
+    var notFoundMsg = isRangeEmpty
+      ? "No contracts found in the " +
+        dteWin.label +
+        " window for " +
         ticker +
-        ". Click REFRESH FROM IBKR to pull and archive live/delayed chain data.",
-      { ticker: ticker, phase: "CHAIN_LOAD", status: 404, elapsedMs: res.elapsedMs }
-    );
+        ". Switch DTE window or click REFRESH FROM IBKR" +
+        (dteWin.isShortIncluded ? " with 0\u201329d Backtest enabled." : ".")
+      : "No cached snapshot exists for " +
+        ticker +
+        ". Click REFRESH FROM IBKR to pull and archive live/delayed chain data.";
+    showBanner("info", notFoundMsg, {
+      ticker: ticker,
+      phase: "CHAIN_LOAD",
+      status: 404,
+      elapsedMs: res.elapsedMs,
+    });
     return;
   }
 
@@ -283,7 +307,7 @@ export async function refreshFromIBKR() {
   var rangeVal = dom.rangeSelect ? Number(dom.rangeSelect.value) : 0.2;
   var stepRaw = dom.stepSelect ? dom.stepSelect.value : "auto";
   var stepVal = stepRaw === "auto" ? null : Number(stepRaw);
-  var dteMaxVal = dom.dteMaxSelect ? Number(dom.dteMaxSelect.value) : 120;
+  var dtePayload = buildRefreshDtePayload();
   var pullScope = buildActivePullScopeText();
   writeTickerPullPrefs(state.ticker);
 
@@ -294,18 +318,16 @@ export async function refreshFromIBKR() {
       res = await apiJson("/api/refresh", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        timeoutMs: 120000,
+        timeoutMs: 150000,
         body: JSON.stringify({
           ticker: state.ticker,
           range_pct: rangeVal,
           strike_step: stepVal,
-          dte_min:
-            state.status && state.status.dte_min !== null && state.status.dte_min !== undefined
-              ? Number(state.status.dte_min)
-              : bootstrap.dteMin !== null && bootstrap.dteMin !== undefined
-                ? Number(bootstrap.dteMin)
-                : 30,
-          dte_max: dteMaxVal,
+          dte_min: dtePayload.dte_min,
+          dte_max: dtePayload.dte_max,
+          include_short_dte: dtePayload.include_short_dte,
+          display_dte_min: dtePayload.display_dte_min,
+          display_dte_max: dtePayload.display_dte_max,
         }),
       });
     } catch (httpErr) {
@@ -314,7 +336,7 @@ export async function refreshFromIBKR() {
         httpErr && httpErr.message ? httpErr.message : String(httpErr || "Request aborted");
       var isTimeout = Boolean(httpErr && httpErr.timedOut);
       var bannerTitle = isTimeout
-        ? "IBKR refresh timed out after 120s. Preserving cached snapshot view."
+        ? "IBKR refresh timed out after 150s. Preserving cached snapshot view."
         : "Network or gateway interruption during refresh (" +
           rawErrMsg +
           "). Preserving cached snapshot view.";

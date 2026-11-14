@@ -12,6 +12,7 @@ import {
   formatExpiryIso,
   formatStrikeShort,
   isStrategyAutoPopulateEnabled,
+  parseDashboardDteWindow,
   resolveStrategyTargetExpiry,
   showBanner,
   snapDteValueToExpiries,
@@ -963,6 +964,7 @@ export async function autoBuildStrategy(presetKind, callOptions) {
   var kind = presetKind && presetKind !== "CUSTOM" ? presetKind : "BULL_PUT_SPREAD";
   setActiveStrategyPresetUI(kind);
   var opts = strategyControlParams();
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
   setStrategyButtonsBusy(true);
   try {
     var res = await apiJson("/api/strategy/suggest", {
@@ -973,6 +975,8 @@ export async function autoBuildStrategy(presetKind, callOptions) {
         snapshot_id: state.snapshotId || null,
         strategy_kind: kind,
         target_expiry: opts.targetExpiry,
+        dte_min: dteWin.min,
+        dte_max: Math.max(1, dteWin.max),
         days_forward: opts.daysForward,
         iv_shift: opts.ivShift,
         qty_multiplier: opts.qty,
@@ -1047,29 +1051,35 @@ export async function evaluateStrategyRequest(options) {
   }
 
   var opts = strategyControlParams();
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
+  var evalBody = {
+    ticker: state.ticker,
+    snapshot_id: state.snapshotId || null,
+    strategy_kind: state.strategyKind || "CUSTOM",
+    target_expiry: opts.targetExpiry,
+    legs: state.strategyLegs.map(function (l) {
+      return {
+        side: l.side,
+        right: l.right,
+        expiry: l.expiry,
+        strike: Number(l.strike),
+        qty: Math.max(1, Math.min(100, parseInt(l.qty, 10) || 1)),
+      };
+    }),
+    days_forward: opts.daysForward,
+    iv_shift: opts.ivShift,
+    qty_multiplier: opts.qty,
+  };
+  if (state.strategyKind && state.strategyKind !== "CUSTOM") {
+    evalBody.dte_min = dteWin.min;
+    evalBody.dte_max = Math.max(1, dteWin.max);
+  }
   setStrategyButtonsBusy(true);
   try {
     var res = await apiJson("/api/strategy/evaluate", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ticker: state.ticker,
-        snapshot_id: state.snapshotId || null,
-        strategy_kind: state.strategyKind || "CUSTOM",
-        target_expiry: opts.targetExpiry,
-        legs: state.strategyLegs.map(function (l) {
-          return {
-            side: l.side,
-            right: l.right,
-            expiry: l.expiry,
-            strike: Number(l.strike),
-            qty: Math.max(1, Math.min(100, parseInt(l.qty, 10) || 1)),
-          };
-        }),
-        days_forward: opts.daysForward,
-        iv_shift: opts.ivShift,
-        qty_multiplier: opts.qty,
-      }),
+      body: JSON.stringify(evalBody),
     });
     if (res.ok && res.body) {
       state.corridorLastRepriceAt = Date.now();

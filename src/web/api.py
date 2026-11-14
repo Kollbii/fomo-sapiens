@@ -112,7 +112,7 @@ async def api_chain(
     ticker: str,
     snapshot_id: str | None = Query(default=None),
     dte_min: int | None = Query(default=None, ge=0, le=120),
-    dte_max: int | None = Query(default=None, ge=1, le=120),
+    dte_max: int | None = Query(default=None, ge=0, le=120),
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return svc.load_chain_analytics(
@@ -178,8 +178,8 @@ async def api_corridor_stream(
     ticker: str,
     snapshot_id: str | None = Query(default=None),
     target_expiry: str | None = Query(default=None),
-    window_strikes: int = Query(default=5, ge=1, le=12),
-    max_contracts: int = Query(default=56, ge=1, le=60),
+    window_strikes: int = Query(default=10, ge=1, le=15),
+    max_contracts: int = Query(default=88, ge=1, le=90),
     priority_legs: str | None = Query(default=None),
     max_frames: int | None = Query(default=None, ge=1, le=200),
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008

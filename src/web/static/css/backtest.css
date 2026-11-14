@@ -43,6 +43,7 @@
 
 .backtest-single-controls[hidden],
 .backtest-legs-box[hidden],
+.backtest-switch-group[hidden],
 .backtest-field[hidden] {
   display: none;
 }
@@ -257,6 +258,10 @@
   gap: 4px;
 }
 
+.backtest-warnings:empty {
+  display: none;
+}
+
 .backtest-warning {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -273,7 +278,7 @@
 
 .backtest-kpis {
   display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
   gap: 8px;
 }
 
@@ -314,12 +319,36 @@
   color: var(--accent-put);
 }
 
+.backtest-kpi__value.is-warn {
+  color: var(--accent-warn);
+}
+
 .backtest-kpi__sub {
   display: block;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   font-size: 10px;
   color: var(--text-muted);
+}
+
+.backtest-chart-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.backtest-chart-caption {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.backtest-seg-group[hidden] {
+  display: none;
 }
 
 .chart-canvas--backtest {
@@ -336,7 +365,7 @@
 
 .backtest-tables-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.25fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1.15fr);
   gap: 12px;
 }
 
@@ -351,6 +380,7 @@
   display: flex;
   align-items: baseline;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -358,7 +388,7 @@
 }
 
 .backtest-table-wrap {
-  max-height: 300px;
+  max-height: 360px;
   overflow: auto;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
@@ -378,6 +408,7 @@
   text-align: right;
   white-space: nowrap;
   border-bottom: 1px solid var(--border-subtle);
+  vertical-align: middle;
 }
 
 .backtest-table th {
@@ -394,14 +425,97 @@
   text-align: left;
 }
 
+.backtest-expand-col {
+  width: 28px;
+  padding-left: 6px;
+  padding-right: 4px;
+}
+
+.backtest-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.backtest-expand-btn:hover {
+  border-color: var(--accent-focus);
+  color: var(--accent-focus);
+}
+
+.backtest-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.backtest-pill--open {
+  border-color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+  color: var(--accent-warn);
+}
+
+.backtest-pill--closed {
+  border-color: var(--accent-call);
+  background: var(--accent-call-bg);
+  color: var(--accent-call);
+}
+
+.backtest-pill--unresolved,
+.backtest-pill--missing {
+  border-color: var(--accent-put);
+  background: var(--accent-put-bg);
+  color: var(--accent-put);
+}
+
+.backtest-pill--source {
+  border-color: var(--border-subtle);
+  color: var(--text-secondary);
+}
+
+.backtest-submeta {
+  display: block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 10px;
+  color: var(--text-muted);
+  white-space: normal;
+}
+
+.backtest-legs-summary {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
 .backtest-table td.backtest-flags-cell {
   text-align: left;
   white-space: normal;
-  min-width: 160px;
+  min-width: 140px;
   color: var(--text-muted);
 }
 
-.backtest-table tbody tr:nth-child(even) {
+.backtest-table tbody tr.backtest-trade-row:nth-child(even) {
   background: var(--bg-table-stripe);
 }
 
@@ -417,6 +531,96 @@
   background: var(--bg-hover);
   outline: 1px solid var(--accent-primary);
   outline-offset: -1px;
+}
+
+.backtest-trade-detail-row > td {
+  padding: 0;
+  text-align: left;
+  white-space: normal;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-strong);
+}
+
+.backtest-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent-focus);
+  background: var(--bg-surface);
+}
+
+.backtest-drawer-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.backtest-drawer-title {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.backtest-legs-subtable {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.backtest-legs-subtable th,
+.backtest-legs-subtable td {
+  padding: 4px 7px;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.backtest-legs-subtable th {
+  position: static;
+  background: var(--bg-table-stripe);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.backtest-legs-subtable th.text-left,
+.backtest-legs-subtable td.text-left {
+  text-align: left;
+}
+
+.backtest-rationale-list {
+  margin: 0;
+  padding-left: 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.backtest-step-marks {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  white-space: normal;
+}
+
+.backtest-step-marks-head {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .backtest-pnl.is-pos {

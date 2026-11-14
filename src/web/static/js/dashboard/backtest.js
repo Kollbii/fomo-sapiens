@@ -33,6 +33,7 @@ import {
 import {
   renderBacktestResult,
   renderTradeLog,
+  toggleBacktestTradeExpand,
 } from "./backtest_tables.js";
 
 function setSegActive(groupEl, attrName, value) {
@@ -65,6 +66,9 @@ export function syncBacktestControlVisibility() {
   var everyNEl = document.querySelector("[data-bt-every-n]");
   if (everyNEl) everyNEl.hidden = isSingle || cadence !== "EVERY_N_DAYS";
 
+  var entryFiltersEl = document.querySelector("[data-bt-entry-filters]");
+  if (entryFiltersEl) entryFiltersEl.hidden = isSingle || strat !== "BULL_PUT_SPREAD";
+
   var entryWrap = document.querySelector("[data-bt-entry-wrap]");
   if (entryWrap) entryWrap.hidden = !isSingle || source === "PAPER_TRADE";
 
@@ -78,11 +82,21 @@ export function syncBacktestControlVisibility() {
     dom.backtestLegsBox.hidden = !(strat === "CUSTOM" || (isSingle && source === "LEGS"));
   }
 
+  var simMode =
+    state.backtestResult && state.backtestResult.simulation
+      ? state.backtestResult.simulation.mode
+      : null;
+  var showChartViewToggle = simMode ? simMode === "SYSTEMATIC" : !isSingle;
+  if (dom.backtestChartViewGroup) {
+    dom.backtestChartViewGroup.hidden = !showChartViewToggle;
+  }
+
   setSegActive(dom.backtestModeGroup, "data-bt-mode", state.backtestMode);
   setSegActive(dom.backtestSourceGroup, "data-bt-source", state.backtestSource);
   setSegActive(dom.backtestPriceBasisGroup, "data-bt-price-basis", state.backtestPriceBasis);
   setSegActive(dom.backtestCloseModeGroup, "data-bt-close-mode", state.backtestCloseMode);
   setSegActive(dom.backtestTpSlBasisGroup, "data-bt-tpsl-basis", state.backtestTpSlBasis);
+  setSegActive(dom.backtestChartViewGroup, "data-bt-chart-view", state.backtestChartView);
 }
 
 function renderEntrySelectOptions(entries) {
@@ -151,6 +165,11 @@ function optionalNumberInput(el, isInt) {
   return Number.isNaN(n) ? null : n;
 }
 
+function optionalFilterNumberInput(el) {
+  var n = optionalNumberInput(el, false);
+  return n === null || n === 0 ? null : n;
+}
+
 function serializeLegsForRequest() {
   return readCustomLegsFromUI().map(function (leg) {
     return {
@@ -185,6 +204,10 @@ function buildBacktestPayload() {
     profit_target_pct: optionalNumberInput(dom.backtestTpPct, false),
     stop_loss_pct: optionalNumberInput(dom.backtestSlPct, false),
     exit_dte: optionalNumberInput(dom.backtestExitDte, true),
+    min_entry_credit_dollars:
+      mode === "SYSTEMATIC" ? optionalFilterNumberInput(dom.backtestMinCredit) : null,
+    min_entry_ror_pct:
+      mode === "SYSTEMATIC" ? optionalFilterNumberInput(dom.backtestMinRor) : null,
   };
   if (Number.isNaN(cfg.entry_weekday)) cfg.entry_weekday = 4;
   if (Number.isNaN(cfg.commission_per_contract)) cfg.commission_per_contract = 0.65;
@@ -242,7 +265,9 @@ export async function runBacktestStudy() {
       return;
     }
     state.backtestSelectedTradeId = "";
+    state.backtestExpandedTradeIds = {};
     renderBacktestResult(res.body);
+    syncBacktestControlVisibility();
   } finally {
     state.backtestBusy = false;
     if (dom.backtestRunBtn) dom.backtestRunBtn.disabled = false;
@@ -312,15 +337,37 @@ export function bindBacktestEvents() {
       }
     });
   }
+  if (dom.backtestChartViewGroup) {
+    dom.backtestChartViewGroup.addEventListener("click", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest("[data-bt-chart-view]") : null;
+      if (!btn) return;
+      state.backtestChartView = btn.getAttribute("data-bt-chart-view") || "EQUITY";
+      syncBacktestControlVisibility();
+      if (state.backtestResult && state.backtestResult.simulation) {
+        renderBacktestChart(state.backtestResult, themeVars());
+      }
+    });
+  }
   if (dom.backtestTradesBody) {
     dom.backtestTradesBody.addEventListener("click", function (ev) {
-      var row = ev.target && ev.target.closest ? ev.target.closest("[data-trade-id]") : null;
+      var target = ev.target;
+      if (!target || !target.closest) return;
+      var toggleBtn = target.closest("[data-bt-trade-toggle]");
+      if (toggleBtn) {
+        ev.stopPropagation();
+        var toggleId = toggleBtn.getAttribute("data-bt-trade-toggle") || "";
+        if (toggleId && state.backtestResult && state.backtestResult.simulation) {
+          toggleBacktestTradeExpand(toggleId);
+          renderTradeLog(state.backtestResult.simulation);
+        }
+        return;
+      }
+      if (target.closest(".backtest-trade-detail-row")) return;
+      var row = target.closest("tr.backtest-trade-row[data-trade-id]");
       if (!row || !state.backtestResult || !state.backtestResult.simulation) return;
       state.backtestSelectedTradeId = row.getAttribute("data-trade-id") || "";
       renderTradeLog(state.backtestResult.simulation);
-      if (state.backtestResult.simulation.mode === "SINGLE_TRADE") {
-        renderBacktestChart(state.backtestResult, themeVars());
-      }
+      renderBacktestChart(state.backtestResult, themeVars());
     });
   }
 }

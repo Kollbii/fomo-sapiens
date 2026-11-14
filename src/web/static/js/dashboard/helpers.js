@@ -10,10 +10,127 @@ import {
 
 // ------------------------------------------------------------------ DTE & Governing Expiry Helpers
 export var DTE_BUCKET_DEFS = [
+  { key: "BUCKET:0-29", label: "0\u201329d", min: 0, max: 29 },
   { key: "BUCKET:30-60", label: "30\u201360d", min: 30, max: 60 },
   { key: "BUCKET:61-90", label: "61\u201390d", min: 61, max: 90 },
   { key: "BUCKET:91-120", label: "91\u2013120d", min: 91, max: 120 },
 ];
+
+export function defaultPrimaryDteMin() {
+  if (state.status && state.status.dte_min !== null && state.status.dte_min !== undefined) {
+    return Number(state.status.dte_min);
+  }
+  if (bootstrap.dteMin !== null && bootstrap.dteMin !== undefined) {
+    return Number(bootstrap.dteMin);
+  }
+  return 30;
+}
+
+export function defaultPrimaryDteMax() {
+  if (state.status && state.status.dte_max !== null && state.status.dte_max !== undefined) {
+    return Number(state.status.dte_max);
+  }
+  if (bootstrap.dteMax !== null && bootstrap.dteMax !== undefined) {
+    return Number(bootstrap.dteMax);
+  }
+  return 120;
+}
+
+export function defaultIncludeShortDte() {
+  if (state.status && typeof state.status.include_short_dte_for_backtest === "boolean") {
+    return state.status.include_short_dte_for_backtest;
+  }
+  if (typeof bootstrap.includeShortDteForBacktest === "boolean") {
+    return bootstrap.includeShortDteForBacktest;
+  }
+  return true;
+}
+
+export function parseDashboardDteWindow(rawVal) {
+  var primaryMin = defaultPrimaryDteMin();
+  var primaryMax = defaultPrimaryDteMax();
+  var str = String(rawVal === null || rawVal === undefined ? "" : rawVal).trim();
+  if (!str) {
+    return {
+      min: primaryMin,
+      max: primaryMax,
+      label: primaryMin + "\u2013" + primaryMax + "d",
+      isShortIncluded: false,
+    };
+  }
+  var rangeMatch = str.match(/^(\d+)\s*[:\-]\s*(\d+)$/);
+  if (rangeMatch) {
+    var lo = parseInt(rangeMatch[1], 10);
+    var hi = parseInt(rangeMatch[2], 10);
+    if (!Number.isNaN(lo) && !Number.isNaN(hi)) {
+      if (lo > hi) {
+        var tmp = lo;
+        lo = hi;
+        hi = tmp;
+      }
+      lo = Math.max(0, Math.min(120, lo));
+      hi = Math.max(0, Math.min(120, hi));
+      return {
+        min: lo,
+        max: hi,
+        label: lo + "\u2013" + hi + "d",
+        isShortIncluded: lo < primaryMin,
+      };
+    }
+  }
+  var num = parseInt(str, 10);
+  if (!Number.isNaN(num)) {
+    var clampedHi = Math.max(0, Math.min(120, num));
+    var effLo = Math.min(primaryMin, clampedHi);
+    return {
+      min: effLo,
+      max: clampedHi,
+      label: effLo + "\u2013" + clampedHi + "d",
+      isShortIncluded: effLo < primaryMin,
+    };
+  }
+  return {
+    min: primaryMin,
+    max: primaryMax,
+    label: primaryMin + "\u2013" + primaryMax + "d",
+    isShortIncluded: false,
+  };
+}
+
+export function buildRefreshDtePayload() {
+  var primaryMin = defaultPrimaryDteMin();
+  var primaryMax = defaultPrimaryDteMax();
+  var win = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : String(primaryMax));
+  var includeShort = dom.includeShortDteToggle
+    ? Boolean(dom.includeShortDteToggle.checked)
+    : defaultIncludeShortDte();
+
+  if (win.min >= primaryMin) {
+    return {
+      dte_min: win.min,
+      dte_max: win.max,
+      include_short_dte: includeShort,
+      display_dte_min: win.min,
+      display_dte_max: win.max,
+    };
+  }
+  if (includeShort) {
+    return {
+      dte_min: primaryMin,
+      dte_max: Math.max(primaryMax, win.max),
+      include_short_dte: true,
+      display_dte_min: win.min,
+      display_dte_max: win.max,
+    };
+  }
+  return {
+    dte_min: win.min,
+    dte_max: win.max,
+    include_short_dte: false,
+    display_dte_min: win.min,
+    display_dte_max: win.max,
+  };
+}
 
 export function matchesDteFilterValue(dteVal, expiryStr, filterVal) {
   if (!filterVal || filterVal === "ALL") return true;
@@ -122,7 +239,7 @@ function readPullPrefsMap() {
   }
 }
 
-function readTickerPullPrefs(ticker) {
+export function readTickerPullPrefs(ticker) {
   var key = String(ticker || "").trim().toUpperCase();
   if (!key) return null;
   var map = readPullPrefsMap();
@@ -137,6 +254,9 @@ export function writeTickerPullPrefs(ticker) {
     range_pct: dom.rangeSelect ? String(dom.rangeSelect.value || "0.20") : "0.20",
     strike_step: dom.stepSelect ? String(dom.stepSelect.value || "auto") : "auto",
     dte_max: dom.dteMaxSelect ? String(dom.dteMaxSelect.value || "120") : "120",
+    include_short_dte: dom.includeShortDteToggle
+      ? Boolean(dom.includeShortDteToggle.checked)
+      : defaultIncludeShortDte(),
   };
   try {
     window.localStorage.setItem(PULL_PREFS_KEY, JSON.stringify(map));
@@ -158,7 +278,12 @@ function selectHasEnabledOption(selectEl, targetVal) {
 
 export function applyTickerPullPrefsToControls(ticker) {
   var prefs = readTickerPullPrefs(ticker);
-  if (!prefs) return false;
+  if (!prefs) {
+    if (dom.includeShortDteToggle) {
+      dom.includeShortDteToggle.checked = defaultIncludeShortDte();
+    }
+    return false;
+  }
   var applied = false;
   if (dom.rangeSelect && prefs.range_pct && selectHasEnabledOption(dom.rangeSelect, prefs.range_pct)) {
     dom.rangeSelect.value = String(prefs.range_pct);
@@ -171,6 +296,14 @@ export function applyTickerPullPrefsToControls(ticker) {
   if (dom.dteMaxSelect && prefs.dte_max && selectHasEnabledOption(dom.dteMaxSelect, prefs.dte_max)) {
     dom.dteMaxSelect.value = String(prefs.dte_max);
     applied = true;
+  }
+  if (dom.includeShortDteToggle) {
+    if (typeof prefs.include_short_dte === "boolean") {
+      dom.includeShortDteToggle.checked = prefs.include_short_dte;
+      applied = true;
+    } else {
+      dom.includeShortDteToggle.checked = defaultIncludeShortDte();
+    }
   }
   return applied;
 }
@@ -376,8 +509,12 @@ export function buildActivePullScopeText() {
         ? formatStepShort(Number(dom.stepSelect.value))
         : "Auto";
   var rangeTxt = dom.rangeSelect ? formatRangeShort(Number(dom.rangeSelect.value || 0.2)) : "\u00B120%";
-  var dteTxt = dom.dteMaxSelect ? "\u2264" + dom.dteMaxSelect.value + "d" : "\u2264120d";
-  return "Step " + stepTxt + " | " + rangeTxt + " | " + dteTxt;
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
+  var shortSuffix =
+    !dteWin.isShortIncluded && dom.includeShortDteToggle && dom.includeShortDteToggle.checked
+      ? " (+0\u201329d)"
+      : "";
+  return "Step " + stepTxt + " | " + rangeTxt + " | " + dteWin.label + shortSuffix;
 }
 
 export function formatExpiryIso(rawExpiry) {
