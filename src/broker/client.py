@@ -3,16 +3,23 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import inspect
 import logging
 import math
 from collections import Counter
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Sequence
 from typing import Any, Literal, NoReturn, TypeVar
 
 from ib_async import IB
 
 from src.core.config import Settings, get_settings
-from src.core.exceptions import ConfigurationError, GatewayConnectionError, SecurityViolationError
+from src.core.exceptions import (
+    ConfigurationError,
+    GatewayConnectionError,
+    GatewayTimeoutError,
+    SecurityViolationError,
+)
 from src.core.security import ReadOnlyIBGuard
 
 logger = logging.getLogger(__name__)
@@ -26,8 +33,10 @@ INFO_CODES: frozenset[int] = frozenset({2104, 2106, 2107, 2108, 2158})
 SUBSCRIPTION_CODES: frozenset[int] = frozenset({10089, 354})
 #: Pacing warnings: the fetcher widens the inter-page cooldown.
 PACING_CODES: frozenset[int] = frozenset({100, 162})
-#: Gateway/TWS connectivity drop warnings recorded for transport diagnostics.
+#: Gateway/TWS connectivity drop warnings: recorded for diagnostics and fail pending stages fast.
 DISCONNECT_CODES: frozenset[int] = frozenset({502, 504, 1100, 1300, 2110})
+#: Connectivity restored notices (`1101` data lost / `1102` data maintained): never fail a stage.
+RESTORE_CODES: frozenset[int] = frozenset({1101, 1102})
 
 LIVE_TYPES: frozenset[int] = frozenset({1, 2})
 DELAYED_TYPES: frozenset[int] = frozenset({3, 4})
@@ -85,6 +94,27 @@ async def poll_until(
     return predicate()
 
 
+def _has_running_event_loop() -> bool:
+    """Return True when executing inside a live asyncio event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def _close_unawaited(awaitable: Awaitable[Any]) -> None:
+    """Close a coroutine that will never be awaited (avoids `never awaited` warnings)."""
+    if inspect.iscoroutine(awaitable):
+        awaitable.close()
+
+
+def _consume_task_outcome(task: asyncio.Future[Any]) -> None:
+    """Done-callback for abandoned request tasks: retrieve the outcome so nothing is logged."""
+    if not task.cancelled():
+        task.exception()
+
+
 class IBKRBrokerClient:
     """Owns the single guarded `ib_async.IB` instance. Feature modules never create `IB()`."""
 
@@ -127,6 +157,12 @@ class IBKRBrokerClient:
         self._was_connected = False
         self._last_disconnect_notice: str | None = None
         self._connect_lock = asyncio.Lock()
+        # Upstream-loss generation counter (bumped by every DISCONNECT_CODES notice), the
+        # generation at which the current link-watch scope began, and abort futures of the
+        # stages currently awaiting an IBKR answer (resolved by `_on_error`).
+        self._link_loss_seq = 0
+        self._link_scope_since: int | None = None
+        self._stage_aborts: set[asyncio.Future[None]] = set()
 
     # ------------------------------------------------------------ connection
     @property
@@ -183,16 +219,127 @@ class IBKRBrokerClient:
         ) from exc
 
     def handle_stage_error(self, exc: BaseException, *, stage: str) -> None:
-        """Translate socket/timeout errors (or lost active links) into `GatewayConnectionError`."""
+        """Translate socket/timeout errors (or lost active links) into `GatewayConnectionError`.
+
+        An existing `GatewayConnectionError` (incl. `GatewayTimeoutError`) is left untouched,
+        except that a socket that really dropped is still closed cleanly.
+        """
+        if isinstance(exc, GatewayConnectionError):
+            if self._was_connected and not self.is_connected:
+                self._safe_disconnect()
+            return
         if isinstance(exc, (OSError, ConnectionError, TimeoutError)) or (
             self._was_connected and not self.is_connected
         ):
             self.raise_transport_error(exc, stage=stage)
 
-    async def run_stage(self, stage: str, coro: Awaitable[_T]) -> _T:
-        """Await a broker I/O coroutine and translate transport interruptions cleanly."""
+    # --------------------------------------------------------- link watching
+    @property
+    def link_loss_seq(self) -> int:
+        """Generation counter bumped by every `DISCONNECT_CODES` notice."""
+        return self._link_loss_seq
+
+    @contextlib.contextmanager
+    def link_watch(self) -> Iterator[int]:
+        """Scope one IBKR operation: an upstream-loss notice inside it fails later stages.
+
+        Nested scopes reuse the outer start generation. Yields that generation.
+        """
+        if self._link_scope_since is not None:
+            yield self._link_scope_since
+            return
+        self._link_scope_since = self._link_loss_seq
         try:
-            res = await coro
+            yield self._link_scope_since
+        finally:
+            self._link_scope_since = None
+
+    def link_checkpoint(self) -> int:
+        """Generation a stage compares against: the active link-watch start, else now."""
+        if self._link_scope_since is not None:
+            return self._link_scope_since
+        return self._link_loss_seq
+
+    def link_lost_since(self, since: int) -> bool:
+        """True when a `DISCONNECT_CODES` notice arrived after generation `since`."""
+        return self._link_loss_seq != since
+
+    def ensure_link_alive(self, *, stage: str, since: int) -> None:
+        """Raise `GatewayConnectionError` if the Gateway reported upstream loss after `since`.
+
+        A dropped socket is reported (and closed) first via `ensure_still_connected`. A plain
+        upstream loss keeps the socket open so the Gateway can deliver its restore notices.
+        """
+        if not self.link_lost_since(since):
+            return
+        self.ensure_still_connected(stage=stage)
+        detail = f" ({self._last_disconnect_notice})" if self._last_disconnect_notice else ""
+        raise GatewayConnectionError(
+            f"IBKR Gateway lost its upstream connection during {stage}{detail}"
+        )
+
+    async def await_guarded(
+        self, awaitable: Awaitable[_T], *, stage: str, timeout_sec: float
+    ) -> _T:
+        """Await one IBKR request bounded by `timeout_sec` and raced against upstream loss.
+
+        Raises `GatewayTimeoutError` when the Gateway does not answer in time and
+        `GatewayConnectionError` as soon as a `DISCONNECT_CODES` notice arrives while the
+        request is pending. The request task is cancelled whenever the caller stops waiting
+        (timeout, upstream loss, or the caller's own cancellation). Without a running event
+        loop (socket-free `run_coro` tests) the awaitable is stepped directly, unbounded.
+        """
+        since = self.link_checkpoint()
+        try:
+            self.ensure_link_alive(stage=stage, since=since)
+        except BaseException:
+            _close_unawaited(awaitable)
+            raise
+        if not _has_running_event_loop():
+            res = await awaitable
+            self.ensure_link_alive(stage=stage, since=since)
+            return res
+
+        loop = asyncio.get_running_loop()
+        task: asyncio.Future[_T] = asyncio.ensure_future(awaitable)
+        abort: asyncio.Future[None] = loop.create_future()
+        self._stage_aborts.add(abort)
+        waiters: set[asyncio.Future[Any]] = {task, abort}
+        try:
+            done, _pending = await asyncio.wait(
+                waiters, timeout=timeout_sec, return_when=asyncio.FIRST_COMPLETED
+            )
+            if abort in done or self.link_lost_since(since):
+                self.ensure_link_alive(stage=stage, since=since)
+            if task in done:
+                return task.result()
+            raise GatewayTimeoutError(
+                f"IBKR Gateway did not answer during {stage} within {timeout_sec:g} s"
+            )
+        finally:
+            self._stage_aborts.discard(abort)
+            if not abort.done():
+                abort.cancel()
+            if task.done():
+                # Abort and a failed request can finish in the same wait: the link-loss error
+                # wins, so retrieve the request outcome here or asyncio logs it as unretrieved.
+                _consume_task_outcome(task)
+            else:
+                task.cancel()
+                task.add_done_callback(_consume_task_outcome)
+
+    async def run_stage(
+        self, stage: str, coro: Awaitable[_T], *, timeout_sec: float | None = None
+    ) -> _T:
+        """Await a broker I/O coroutine (bounded) and translate transport interruptions cleanly.
+
+        The wait is limited to `timeout_sec` (default `ibkr.request_timeout_sec`). A timeout
+        raises `GatewayTimeoutError` WITHOUT closing the socket (the local API link is usually
+        healthy when the Gateway's upstream is dead); a dropped socket is still closed.
+        """
+        limit = self.settings.ibkr.request_timeout_sec if timeout_sec is None else timeout_sec
+        try:
+            res = await self.await_guarded(coro, stage=stage, timeout_sec=limit)
         except Exception as exc:
             self.handle_stage_error(exc, stage=stage)
             raise
@@ -282,11 +429,23 @@ class IBKRBrokerClient:
         notice, self._subscription_fallback_notice = self._subscription_fallback_notice, None
         return notice
 
+    def _signal_link_loss(self) -> None:
+        """Bump the upstream-loss generation and wake every pending stage. Never raises."""
+        self._link_loss_seq += 1
+        for abort in list(self._stage_aborts):
+            try:
+                if not abort.done():
+                    abort.set_result(None)
+            except Exception:  # pragma: no cover - e.g. future of a closed loop
+                logger.debug("could not signal a pending IBKR stage", exc_info=True)
+
     def _on_error(self, req_id: int, code: int, message: str, contract: Any = None) -> None:
         """`ib.errorEvent` listener. Must never raise."""
         try:
             if code in INFO_CODES:
                 logger.debug("IBKR info %s: %s", code, message)
+            elif code in RESTORE_CODES:
+                logger.info("IBKR connectivity restored %s: %s", code, message)
             elif code in SUBSCRIPTION_CODES:
                 self.subscription_warning_count += 1
                 logger.info("IBKR subscription notice %s (reqId=%s): %s", code, req_id, message)
@@ -314,6 +473,7 @@ class IBKRBrokerClient:
             elif code in DISCONNECT_CODES:
                 self._last_disconnect_notice = f"IBKR {code}: {message}"
                 logger.warning("IBKR connection notice %s (reqId=%s): %s", code, req_id, message)
+                self._signal_link_loss()
             else:
                 logger.warning("IBKR error %s (reqId=%s): %s", code, req_id, message)
         except Exception:  # pragma: no cover - defensive

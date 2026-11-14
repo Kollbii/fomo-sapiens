@@ -152,6 +152,46 @@ def test_select_daily_bar_snapshots_o_window_never_opens_out_of_window_csvs(
     assert len(bar_notes) == len(notes)
 
 
+def test_select_daily_bar_snapshots_prefers_complete_over_partial_same_et_day(
+    tmp_path: Path,
+) -> None:
+    repo = CSVRepository(StorageSettings(), root=tmp_path)
+    # Nov 11: complete usable morning + newer partial (otherwise usable) -> complete wins.
+    nov11_complete = datetime(2026, 11, 11, 15, 0, 0, tzinfo=UTC)
+    nov11_partial = datetime(2026, 11, 11, 19, 0, 0, tzinfo=UTC)
+    # Nov 12: only a partial snapshot -> existing fallback picks it, flagged no-usable.
+    nov12_partial = datetime(2026, 11, 12, 16, 0, 0, tzinfo=UTC)
+
+    s_complete = repo.save_snapshot(
+        "NVDA", _make_chain_rows("NVDA", nov11_complete, "2026-11-11"), spot_source="LAST"
+    )
+    repo.save_snapshot(
+        "NVDA",
+        _make_chain_rows("NVDA", nov11_partial, "2026-11-11"),
+        spot_source="LAST",
+        partial_reason="cancelled",
+    )
+    s_nov12 = repo.save_snapshot(
+        "NVDA",
+        _make_chain_rows("NVDA", nov12_partial, "2026-11-12"),
+        spot_source="LAST",
+        partial_reason="connection_lost",
+    )
+
+    selections, notes = select_daily_bar_snapshots(
+        repo,
+        "NVDA",
+        start_date=date(2026, 11, 11),
+        end_date=date(2026, 11, 12),
+    )
+    assert notes == []
+    assert [s.snapshot_id for s in selections] == [s_complete.snapshot_id, s_nov12.snapshot_id]
+    assert selections[0].flags == ()
+    assert selections[1].flags == (NO_USABLE_DAILY_SNAPSHOT,)
+    assert selections[1].meta is not None
+    assert selections[1].meta.partial_reason == "connection_lost"
+
+
 def test_load_daily_chain_bars_attaches_latest_tracked_quotes_and_handles_corrupt_index(
     tmp_path: Path,
 ) -> None:

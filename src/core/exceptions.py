@@ -23,6 +23,14 @@ class GatewayConnectionError(AnalyzerError):
     """Raised when the IBKR Gateway cannot be reached or the connection drops."""
 
 
+class GatewayTimeoutError(GatewayConnectionError):
+    """Raised when an IBKR request is not answered within `ibkr.request_timeout_sec`.
+
+    The local API socket may still be open (e.g. the Gateway lost its IBKR upstream), so the
+    message is fixed and sanitized: it names only the stage and the limit, never raw IBKR text.
+    """
+
+
 class UnderlyingPriceUnavailableError(AnalyzerError):
     """Raised when no usable underlying spot price can be obtained."""
 

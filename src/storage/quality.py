@@ -5,8 +5,10 @@ A snapshot is *usable for history* (daily bar selection and backtests) only if a
 1. `quote_coverage >= MIN_QUOTE_COVERAGE`: share of contracts with a current quote.
 2. `spot_source` is `LAST` or `MID`: the spot was not the previous session close.
 3. `market_data_type` is `1` (live) or `3` (delayed): frozen data (`2` / `4`) is not usable.
+4. The snapshot is not `partial` (an interrupted refresh that archived only finished pages).
 
-Unknown values (older index entries without the fields) make a snapshot *not* usable.
+Unknown values (older index entries without the fields) make a snapshot *not* usable, except
+a missing `partial` flag, which reads as a complete snapshot.
 """
 
 from __future__ import annotations
@@ -67,6 +69,8 @@ class SnapshotQualityVerdict:
 def evaluate_snapshot(meta: SnapshotMeta) -> SnapshotQualityVerdict:
     """Apply the usable-snapshot rule; `reasons` lists every failed condition."""
     reasons: list[str] = []
+    if meta.is_partial:
+        reasons.append(f"partial snapshot ({meta.partial_reason or 'unknown'})")
     if meta.quote_coverage is None:
         reasons.append("quote_coverage unknown")
     elif meta.quote_coverage < MIN_QUOTE_COVERAGE:

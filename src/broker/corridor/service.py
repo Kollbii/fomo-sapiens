@@ -296,7 +296,13 @@ class CorridorQuoteService:
         candidates = [_contract_from_spec(spec) for spec in selection.specs]
         unqualified = [c for c in candidates if int(getattr(c, "conId", 0) or 0) <= 0]
         if unqualified:
-            res = list(await self.client.ib.qualifyContractsAsync(*unqualified) or [])
+            res = list(
+                await self.client.run_stage(
+                    f"corridor contract qualification ({len(unqualified)} contracts)",
+                    self.client.ib.qualifyContractsAsync(*unqualified),
+                )
+                or []
+            )
             if res and len(res) == len(unqualified):
                 res_iter = iter(res)
                 candidates = [
@@ -315,8 +321,11 @@ class CorridorQuoteService:
                 )
             else:
                 qual_spot = list(
-                    await self.client.ib.qualifyContractsAsync(
-                        Stock(selection.ticker, "SMART", "USD")
+                    await self.client.run_stage(
+                        f"corridor underlying qualification ({selection.ticker})",
+                        self.client.ib.qualifyContractsAsync(
+                            Stock(selection.ticker, "SMART", "USD")
+                        ),
                     )
                     or []
                 )

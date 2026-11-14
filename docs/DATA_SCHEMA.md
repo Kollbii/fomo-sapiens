@@ -42,7 +42,7 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
   1. Validate rows via `Pydantic` and build a strict `polars.DataFrame`.
   2. Write to temporary hidden file `data/snapshots/{TICKER}/.{TICKER}_{YYYYMMDD_HHMMSS}.csv.tmp`.
   3. Call `os.replace()` to atomically move the temporary file to `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`.
-  4. Write to `data/latest/.{TICKER}_latest.csv.tmp` and `os.replace()` to `data/latest/{TICKER}_latest.csv`.
+  4. Write to `data/latest/.{TICKER}_latest.csv.tmp` and `os.replace()` to `data/latest/{TICKER}_latest.csv` (skipped for a partial snapshot unless no latest file exists yet, see §4).
   5. Update `data/metadata/snapshot_index.json` atomically via `.tmp` + `os.replace()`.
 
 ---
@@ -115,7 +115,9 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
               "spot_source": "LAST",
               "quoted_contract_count": 118,
               "quote_coverage": 0.9833,
-              "prior_close_only_count": 2
+              "prior_close_only_count": 2,
+              "partial": false,
+              "partial_reason": null
             }
           ]
         }
@@ -124,7 +126,9 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
 
 `SnapshotMeta` defines optional quality/provenance fields alongside pull scope: `spot_source` (`SpotSource = Literal["LAST", "MID", "CLOSE"]`), `quoted_contract_count` (contracts with `bid > 0` or `ask > 0` or `last > 0`), `quote_coverage` (`quoted_contract_count / contract_count`), and `prior_close_only_count` (contracts with `close > 0` but no `bid`/`ask`/`last`). `src/storage/quality.py` uses these fields (`MIN_QUOTE_COVERAGE = 0.90`, `USABLE_SPOT_SOURCES = {"LAST", "MID"}`, `USABLE_MARKET_DATA_TYPES = {1, 3}`) to score each snapshot for daily-bar backtest selection and off-hours UI indicators.
 
-If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible, recomputing quote quality from each CSV, and preserving any prior `spot_source`).
+Partial snapshots: `CSVRepository.save_snapshot(..., partial_reason=)` / `save_snapshot_result()` (returns `SnapshotSaveResult(meta, latest_updated)`) archive an interrupted refresh (finished pages only) as a new immutable CSV (same 27-column schema) with `SnapshotMeta.partial = true` and `partial_reason` (`PartialReason = Literal["cancelled", "timeout", "connection_lost"]`; `SnapshotMeta.is_partial` is the accessor). A partial save does NOT update `data/latest/{TICKER}_latest.csv` unless none exists for the ticker. `latest_snapshot_id` names the snapshot actually held in the latest file (`CSVRepository.latest_cache_snapshot_id()`), which can therefore be older than the newest archive. Index entries written before these fields exist read as not partial. `load_latest` falls back to the newest complete archive (partial only if nothing complete is readable), and `latest_snapshots(tickers, include_partial=...)` controls whether partial entries count. `evaluate_snapshot` treats a partial snapshot as not usable (reason `partial snapshot (<reason>)`).
+
+If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible, recomputing quote quality from each CSV, and preserving any prior `spot_source`; partial flags are not recoverable from CSVs, so rebuilt entries read as complete).
 
 ---
 

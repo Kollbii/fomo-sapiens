@@ -36,6 +36,8 @@ def _meta(
     market_data_type: int = 3,
     spot_source: str | None = "LAST",
     quote_coverage: float | None = 0.95,
+    partial: bool | None = None,
+    partial_reason: str | None = None,
 ) -> SnapshotMeta:
     return SnapshotMeta(
         snapshot_id="NVDA_20261111_155004",
@@ -50,6 +52,8 @@ def _meta(
         expirations=["2026-12-18"],
         spot_source=spot_source,  # type: ignore[arg-type]
         quote_coverage=quote_coverage,
+        partial=partial,
+        partial_reason=partial_reason,  # type: ignore[arg-type]
     )
 
 
@@ -111,6 +115,26 @@ def test_evaluate_snapshot_quality_gate() -> None:
     legacy = evaluate_snapshot(_meta(spot_source=None, quote_coverage=None))
     assert not legacy.usable
     assert len(legacy.reasons) == 2
+
+
+@pytest.mark.parametrize("reason", ["cancelled", "timeout", "connection_lost"])
+def test_partial_snapshot_is_never_usable(reason: str) -> None:
+    verdict = evaluate_snapshot(_meta(partial=True, partial_reason=reason))
+    assert verdict.usable is False
+    assert verdict.reasons == (f"partial snapshot ({reason})",)
+    assert not is_usable_snapshot(_meta(partial=True, partial_reason=reason))
+
+    # Other failed rules are still listed alongside the partial reason.
+    both = evaluate_snapshot(_meta(partial=True, partial_reason=reason, market_data_type=4))
+    assert both.reasons[0] == f"partial snapshot ({reason})"
+    assert any("market_data_type" in r for r in both.reasons)
+
+
+def test_partial_flag_absent_or_false_keeps_existing_rules() -> None:
+    assert evaluate_snapshot(_meta(partial=None)).usable is True  # legacy index entry
+    assert evaluate_snapshot(_meta(partial=False)).usable is True
+    unknown = evaluate_snapshot(_meta(partial=True))
+    assert unknown.reasons == ("partial snapshot (unknown)",)
 
 
 def test_real_quote_triggers_type3_to_type4_fallback_when_close_only() -> None:

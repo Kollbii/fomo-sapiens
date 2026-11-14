@@ -77,6 +77,7 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.ibkr.default_market_data_type == 3
     assert s.ibkr.fallback_market_data_type == 4
     assert s.ibkr.market_data_mode == "DELAYED"
+    assert s.ibkr.request_timeout_sec == 20.0
     assert s.watchlist.hardcoded_tickers == SEED_WATCHLIST
     assert s.watchlist.default_ticker == "NVDA"
     assert s.watchlist.max_size == 20
@@ -142,6 +143,16 @@ def test_unknown_key_rejected(tmp_path: Path) -> None:
     y.write_text("ibkr:\n  bogus: 1\n")
     with pytest.raises(ConfigurationError):
         load_settings(y, tmp_path / "x.env")
+
+
+def test_request_timeout_sec_yaml_override_and_bounds(tmp_path: Path) -> None:
+    y = tmp_path / "s.yaml"
+    y.write_text("ibkr:\n  request_timeout_sec: 45\n")
+    assert load_settings(y, tmp_path / "x.env").ibkr.request_timeout_sec == 45.0
+    for bad in ("0", "-5", "121"):
+        y.write_text(f"ibkr:\n  request_timeout_sec: {bad}\n")
+        with pytest.raises(ConfigurationError):
+            load_settings(y, tmp_path / "x.env")
 
 
 def test_get_settings_cached() -> None:

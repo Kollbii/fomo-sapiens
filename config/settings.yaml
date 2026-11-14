@@ -10,6 +10,7 @@ ibkr:
   port: 4001             # Default to 4001 (IBKR Gateway Live Read-Only)
   client_id: 77
   connect_timeout_sec: 3.0
+  request_timeout_sec: 20.0  # Max wait per IBKR request (qualify/secdef/...); 0 < x <= 120
   read_only_enforced: true
   # Market Data Types:
   # 3 = Delayed (15-min delayed from current session - DEFAULT)

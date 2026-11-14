@@ -53,6 +53,8 @@ class IBKRSettings(_StrictModel):
     port: int = Field(default=4001, ge=1, le=65535)
     client_id: int = Field(default=77, ge=0)
     connect_timeout_sec: float = Field(default=3.0, gt=0)
+    #: Upper bound for every awaited IBKR request (`run_stage`); upstream loss fails faster.
+    request_timeout_sec: float = Field(default=20.0, gt=0, le=120)
     read_only_enforced: bool = True
     market_data_mode: Literal["DELAYED", "LIVE"] = "DELAYED"
     default_market_data_type: int = Field(default=3, ge=1, le=4)
