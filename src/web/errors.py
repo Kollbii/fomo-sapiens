@@ -20,6 +20,7 @@ from src.core.exceptions import (
     GatewayTimeoutError,
     InvalidRequestError,
     InvalidTickerError,
+    LiveStreamNotFoundError,
     OptionChainFetchError,
     PacingViolationError,
     PaperTradeCapError,
@@ -44,6 +45,16 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=422,
             content={"error_code": "INVALID_TICKER", "message": str(exc)},
+        )
+
+    @app.exception_handler(LiveStreamNotFoundError)
+    async def _handle_live_stream_not_found(
+        _req: Request, exc: LiveStreamNotFoundError
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=404,
+            content={"error_code": "LIVE_STREAM_NOT_FOUND", "message": msg, "detail": msg},
         )
 
     @app.exception_handler(InvalidRequestError)

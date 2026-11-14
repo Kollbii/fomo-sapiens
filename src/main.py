@@ -106,8 +106,17 @@ def create_app(
                     await service.stop_corridor_streams()
                 except Exception:  # pragma: no cover - defensive shutdown
                     logger.exception("error stopping corridor streams during shutdown")
+                try:
+                    await service.screener_live.stop_live_streams(reason="shutdown")
+                except Exception:  # pragma: no cover - defensive shutdown
+                    logger.exception("error stopping live screener streams during shutdown")
             finally:
                 # Runs even when shutdown is cancelled (CancelledError still propagates).
+                # Synchronous backstop: runs even when an earlier step was cancelled.
+                try:
+                    service.screener_live.stop_now(reason="shutdown")
+                except Exception:  # pragma: no cover - defensive shutdown
+                    logger.exception("error force-stopping live screener during shutdown")
                 service.broker_client.disconnect()
 
     application = FastAPI(
