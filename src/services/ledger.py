@@ -7,9 +7,10 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from src.analytics.ledger import (
+    LedgerAnalyticsReport,
     LedgerGroupBy,
     LedgerView,
     LedgerWindow,
@@ -159,6 +160,7 @@ class LedgerService:
         refresh_acquire: RefreshAcquireFn | None = None,
         refresh_release: RefreshReleaseFn | None = None,
         refresh_owner_getter: Callable[[], str | None] | None = None,
+        on_ledger_changed: Callable[[], Any] | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or LedgerRepository(self.settings.ledger.ledger_dir)
@@ -173,7 +175,16 @@ class LedgerService:
         self._refresh_acquire = refresh_acquire
         self._refresh_release = refresh_release
         self._refresh_owner_getter = refresh_owner_getter
+        self._on_ledger_changed = on_ledger_changed
         self._live_marks: dict[int, float] = {}
+
+    def _notify_ledger_changed(self) -> None:
+        if self._on_ledger_changed is None:
+            return
+        try:
+            self._on_ledger_changed()
+        except Exception as exc:
+            logger.warning("on_ledger_changed callback failed: %s", exc)
 
     async def _acquire_ib_lock(self, owner: str) -> bool:
         if self._refresh_acquire is None:
@@ -263,6 +274,21 @@ class LedgerService:
             as_of=self.now_fn(),
         )
         return LedgerDashboardResponse(report=report, status=self.get_ledger_status())
+
+    def build_full_open_report(self) -> LedgerAnalyticsReport:
+        """Build an unfiltered `open_mtm` report across all tickers and campaigns."""
+        return build_ledger_report(
+            self.repo.load_executions(),
+            self.repo.load_positions(),
+            window="ALL",
+            ticker="ALL",
+            group_by="campaigns",
+            view="open_mtm",
+            include_stock_gain=True,
+            roll_max_gap_hours=self.settings.ledger.roll_max_gap_hours,
+            live_marks=dict(self._live_marks) if self._live_marks else None,
+            as_of=self.now_fn(),
+        )
 
     async def sync_ledger(
         self,
@@ -393,6 +419,7 @@ class LedgerService:
 
         synced_at = self._utc_now_iso()
         self.repo.save_sync_state(last_sync_at=synced_at, last_sync_mode=mode_used)
+        self._notify_ledger_changed()
         total_executions = self.repo.load_executions().height
 
         return LedgerSyncResponse(
@@ -447,6 +474,7 @@ class LedgerService:
             last_sync_at=self._utc_now_iso(),
             last_sync_mode=f"import:{file_format.lower()}",
         )
+        self._notify_ledger_changed()
         total_executions = self.repo.load_executions().height
         return LedgerImportResponse(
             filename=safe_name,

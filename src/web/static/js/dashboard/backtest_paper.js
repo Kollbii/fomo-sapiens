@@ -152,7 +152,12 @@ export function formatLegsCompact(legs) {
   return legs
     .map(function (leg) {
       var sign = leg.side === "SELL" ? "-" : "+";
-      return sign + leg.strike + leg.right + " (" + formatExpiryIso(leg.expiry) + ")";
+      var ratio = leg.qty_ratio > 1 ? leg.qty_ratio + "x " : "";
+      var fill =
+        leg.entry_price !== null && leg.entry_price !== undefined
+          ? " @ $" + Number(leg.entry_price).toFixed(2)
+          : "";
+      return ratio + sign + leg.strike + leg.right + " (" + formatExpiryIso(leg.expiry) + ")" + fill;
     })
     .join(" / ");
 }
@@ -171,9 +176,19 @@ function populatePaperTradeSelect(trades) {
   for (var i = 0; i < trades.length; i++) {
     var pt = trades[i];
     var option = document.createElement("option");
+    var stratLabel = pt.ledger_strategy_label || pt.strategy_kind;
+    var ledgerTag = pt.source === "LEDGER" ? " [LEDGER]" : "";
     option.value = pt.id;
     option.textContent =
-      pt.id + " \u2022 " + pt.ticker + " \u2022 " + pt.strategy_kind + " (" + pt.status + ")";
+      pt.id +
+      " \u2022 " +
+      pt.ticker +
+      " \u2022 " +
+      stratLabel +
+      " (" +
+      pt.status +
+      ")" +
+      ledgerTag;
     if (pt.id === prev) option.selected = true;
     dom.backtestPaperSelect.appendChild(option);
   }
@@ -203,6 +218,11 @@ export function renderPaperTradesList() {
         ? "+$" + Number(pt.entry_net_cash).toFixed(2) + " cr"
         : "-$" + Math.abs(Number(pt.entry_net_cash)).toFixed(2) + " db";
     var canStop = pt.status === "ACTIVE";
+    var sourceBadge =
+      pt.source === "LEDGER"
+        ? '<span class="backtest-source-badge backtest-source-badge--ledger">LEDGER</span>'
+        : "";
+    var stratLabel = pt.ledger_strategy_label || pt.strategy_kind;
     html +=
       '<div class="backtest-paper-row" data-paper-id="' +
       escapeHtml(pt.id) +
@@ -212,7 +232,8 @@ export function renderPaperTradesList() {
       '<span class="backtest-status backtest-status--' + escapeHtml(pt.status) + '">' +
       escapeHtml(pt.status) +
       "</span>" +
-      "<span>" + escapeHtml(pt.ticker) + " \u2022 " + escapeHtml(pt.strategy_kind) + "</span>" +
+      sourceBadge +
+      "<span>" + escapeHtml(pt.ticker) + " \u2022 " + escapeHtml(stratLabel) + "</span>" +
       "<span>" + escapeHtml(formatLegsCompact(pt.legs)) + "</span>" +
       "<span>x" + escapeHtml(pt.qty) + " \u2022 " + cashStr + "</span>" +
       "<span>Exp " + escapeHtml(pt.expiry || "\u2014") + "</span>" +
@@ -226,6 +247,46 @@ export function renderPaperTradesList() {
       "</div>";
   }
   dom.backtestPaperList.innerHTML = html;
+}
+
+export async function syncPaperTradesFromLedger() {
+  if (dom.backtestPaperSyncLedgerBtn) {
+    dom.backtestPaperSyncLedgerBtn.disabled = true;
+  }
+  try {
+    var res = await apiJson("/api/backtest/paper-trades/sync-ledger", {
+      method: "POST",
+    });
+    if (!res.ok || !res.body) {
+      var msg = extractApiErrorMessage(
+        res.body,
+        "Failed to sync paper trades from Trade Ledger."
+      );
+      setBacktestNotice("error", msg);
+      return null;
+    }
+    setBacktestNotice("", "");
+    await loadPaperTrades();
+    var b = res.body;
+    showBanner(
+      "info",
+      "Synced Trade Ledger to Paper Trades: " +
+        Number(b.created_count || 0) +
+        " created, " +
+        Number(b.updated_count || 0) +
+        " updated, " +
+        Number(b.closed_count || 0) +
+        " closed (" +
+        Number(b.active_ledger_count || 0) +
+        " active ledger).",
+      { phase: "PAPER_TRADE_SYNC" }
+    );
+    return b;
+  } finally {
+    if (dom.backtestPaperSyncLedgerBtn) {
+      dom.backtestPaperSyncLedgerBtn.disabled = false;
+    }
+  }
 }
 
 export async function loadPaperTrades() {

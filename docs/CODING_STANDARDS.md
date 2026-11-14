@@ -97,7 +97,7 @@ Every feature phase requires automated tests in `pytest`:
 21. **`tests/unit/test_analyzer_concurrency.py`, `test_paper_trades_service.py`, `test_backtest_service.py`:**
    - Verifies `AnalyzerService.refresh_lock` (`RefreshBusyError` on overlapping refreshes/corridor/MTM/SSE), pre-refresh `stop_all_streams()`, `fetch_exact_contracts` / `PaperTradeService` follow-up quoting, and `services/backtest.py` entry listing + `SYSTEMATIC`/`SINGLE_TRADE` orchestration.
 22. **`tests/integration/test_backtest_api.py`:**
-   - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
+   - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, `POST /api/backtest/paper-trades/sync-ledger`, fill-anchored Ledger replay (with chain snapshots and synthetic `LEDGER_MTM` fallback), structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
 ---
 

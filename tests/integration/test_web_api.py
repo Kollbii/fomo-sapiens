@@ -431,7 +431,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261114a"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261114c"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -505,7 +505,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261114a">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261114c">' in html
             assert html.count('<option value="">Auto (Follow Walls)</option>') == 2
             assert 'id="collector-control"' not in html
             assert "Delayed Type 3/4 Feed" not in r_js.text

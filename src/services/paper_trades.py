@@ -2,34 +2,48 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import math
 import re
 import threading
 import uuid
 from collections.abc import Callable, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any, Final
 
 import polars as pl
+from pydantic import ValidationError
 
 from src.analytics.bsm_fallback import BSMFallbackEngine
+from src.analytics.ledger import (
+    LedgerAnalyticsReport,
+    LedgerCampaignRow,
+    LedgerOpenPositionView,
+    LedgerStrategyType,
+)
 from src.analytics.strategies import StrategyKind, StrategyLegInput, evaluate_strategy
 from src.broker.fetcher import ExactContractSpec, PagedOptionChainFetcher
-from src.core.calendar import et_date
+from src.core.calendar import US_EASTERN, et_date
 from src.core.config import Settings
 from src.core.exceptions import (
     AnalyzerError,
     BacktestValidationError,
     DuplicatePaperTradeError,
     InvalidRequestError,
+    InvalidTickerError,
     OptionChainFetchError,
     PaperTradeCapError,
     PaperTradeStateError,
     SnapshotNotFoundError,
 )
 from src.core.security import TickerValidator
-from src.services.schemas import PaperTradesListResponse, RegisterPaperTradeRequest
+from src.services.schemas import (
+    PaperTradesLedgerSyncResponse,
+    PaperTradesListResponse,
+    RegisterPaperTradeRequest,
+)
 from src.storage.csv_repository import CSVRepository
 from src.storage.paper_trade_store import (
     MAX_PAPER_TRADE_LEGS,
@@ -39,12 +53,69 @@ from src.storage.paper_trade_store import (
     PaperTradeStatus,
     PaperTradeStore,
 )
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SNAPSHOT_ID_RE
+from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SNAPSHOT_ID_RE, SnapshotMeta
 
 logger = logging.getLogger(__name__)
 
 PAPER_TRADE_ID_RE: Final = re.compile(r"^[A-Z]{1,5}-\d{8}-[0-9a-f]{8}$")
-_VALID_STATUSES: Final[frozenset[str]] = frozenset({"ACTIVE", "EXPIRED", "STOPPED"})
+_VALID_STATUSES: Final[frozenset[str]] = frozenset({"ACTIVE", "EXPIRED", "STOPPED", "CLOSED"})
+
+_LEDGER_STRATEGY_MAP: Final[dict[str, tuple[StrategyKind, str]]] = {
+    "BULL_PUT_SPREAD": ("BULL_PUT_SPREAD", "BULL PUT SPREAD"),
+    "BEAR_CALL_SPREAD": ("CUSTOM", "BEAR CALL SPREAD"),
+    "BULL_CALL_SPREAD": ("BULL_CALL_SPREAD", "BULL CALL SPREAD"),
+    "BEAR_PUT_SPREAD": ("CUSTOM", "BEAR PUT SPREAD"),
+    "IRON_CONDOR": ("IRON_CONDOR", "IRON CONDOR"),
+    "IRON_BUTTERFLY": ("CUSTOM", "IRON BUTTERFLY"),
+    "DIAGONAL_SPREAD": ("DIAGONAL_SPREAD", "DIAGONAL SPREAD"),
+    "CALENDAR_SPREAD": ("CUSTOM", "CALENDAR SPREAD"),
+    "STRANGLE": ("CUSTOM", "STRANGLE"),
+    "STRADDLE": ("CUSTOM", "STRADDLE"),
+    "COVERED_CALL": ("CUSTOM", "COVERED CALL"),
+    "NAKED_CALL": ("CUSTOM", "NAKED CALL"),
+    "SHORT_PUT": ("CUSTOM", "SHORT PUT"),
+    "LONG_CALL": ("CUSTOM", "LONG CALL"),
+    "LONG_PUT": ("CUSTOM", "LONG PUT"),
+    "CUSTOM_COMBO": ("CUSTOM", "CUSTOM COMBO"),
+    "STOCK_LOT": ("CUSTOM", "STOCK LOT"),
+}
+
+
+def map_ledger_strategy(strategy_type: LedgerStrategyType | str) -> tuple[StrategyKind, str]:
+    """Map `LedgerStrategyType` to `(StrategyKind, readable_label)`."""
+    mapped = _LEDGER_STRATEGY_MAP.get(strategy_type)
+    if mapped is not None:
+        return mapped
+    return "CUSTOM", strategy_type.replace("_", " ").strip() or "CUSTOM"
+
+
+def _to_iso_expiry(raw: str) -> str:
+    cleaned = raw.strip()
+    if re.fullmatch(r"\d{8}", cleaned):
+        iso = f"{cleaned[:4]}-{cleaned[4:6]}-{cleaned[6:8]}"
+        date.fromisoformat(iso)
+        return iso
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", cleaned):
+        date.fromisoformat(cleaned)
+        return cleaned
+    raise ValueError(f"Invalid option expiry {raw!r}")
+
+
+def _parse_opened_dt(raw: str | None) -> datetime | None:
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        dt_et = datetime.combine(date.fromisoformat(text), time(10, 0), tzinfo=US_EASTERN)
+        return dt_et.astimezone(UTC)
+    iso_text = f"{text[:-1]}+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.fromisoformat(iso_text)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
 
 
 def resolve_tracked_dir(repo: CSVRepository, tracked_dir: str) -> Path:
@@ -295,6 +366,167 @@ class PaperTradeService:
             trades[idx] = stopped
             self.store.save_trades(trades)
             return stopped
+
+    def _build_ledger_paper_trade(
+        self,
+        group_key: str,
+        group: Sequence[LedgerOpenPositionView],
+        *,
+        campaign: LedgerCampaignRow | None,
+        snapshots_by_symbol: dict[str, list[SnapshotMeta]],
+        now_utc: datetime,
+    ) -> PaperTrade | None:
+        if not group or len(group) > MAX_PAPER_TRADE_LEGS:
+            logger.warning(
+                "Skipping ledger group %s with %d option leg(s) (limit %d)",
+                group_key,
+                len(group),
+                MAX_PAPER_TRADE_LEGS,
+            )
+            return None
+        try:
+            symbol = TickerValidator.validate(group[0].underlying)
+            for op in group[1:]:
+                if TickerValidator.validate(op.underlying) != symbol:
+                    logger.warning(
+                        "Skipping ledger group %s spanning multiple underlyings", group_key
+                    )
+                    return None
+        except InvalidTickerError as exc:
+            logger.warning(
+                "Skipping ledger group %s with unsupported ticker %r: %s",
+                group_key,
+                group[0].underlying,
+                exc,
+            )
+            return None
+
+        leg_counts = [max(1, int(round(abs(op.quantity)))) for op in group]
+        trade_qty = max(1, math.gcd(*leg_counts))
+        trade_legs: list[PaperTradeLeg] = []
+        try:
+            for op, count_i in zip(group, leg_counts, strict=True):
+                assert op.expiry is not None and op.strike is not None and op.right is not None
+                avg_px = float(op.avg_cost_price)
+                entry_px = max(0.0, round(avg_px, 4)) if math.isfinite(avg_px) else None
+                trade_legs.append(
+                    PaperTradeLeg(
+                        side="BUY" if op.quantity > 0 else "SELL",
+                        right=op.right,
+                        expiry=_to_iso_expiry(op.expiry),
+                        strike=float(op.strike),
+                        con_id=max(0, int(op.conid or 0)),
+                        qty_ratio=max(1, count_i // trade_qty),
+                        entry_price=entry_px,
+                    )
+                )
+        except (ValueError, ValidationError) as exc:
+            logger.warning("Skipping invalid ledger group %s leg: %s", group_key, exc)
+            return None
+
+        raw_strategy = campaign.strategy_type if campaign is not None else group[0].strategy_type
+        strategy_kind, strategy_label = map_ledger_strategy(raw_strategy)
+
+        opened_dt = _parse_opened_dt(campaign.opened_at) if campaign is not None else None
+        if opened_dt is None:
+            parsed_dates = [
+                dt for op in group if (dt := _parse_opened_dt(op.opened_at)) is not None
+            ]
+            opened_dt = min(parsed_dates) if parsed_dates else now_utc
+
+        created_utc = opened_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        market_date = et_date(opened_dt).isoformat()
+
+        if symbol not in snapshots_by_symbol:
+            snapshots_by_symbol[symbol] = self.repo.list_snapshots(symbol)
+        day_snaps = [
+            meta for meta in snapshots_by_symbol[symbol] if meta.market_date == market_date
+        ]
+        created_from_snapshot_id = (
+            max(day_snaps, key=lambda m: (m.snapshot_ts_utc, m.snapshot_id)).snapshot_id
+            if day_snaps
+            else None
+        )
+        if (
+            created_from_snapshot_id is not None
+            and SNAPSHOT_ID_RE.fullmatch(created_from_snapshot_id) is None
+        ):
+            created_from_snapshot_id = None
+
+        entry_net_cash = round(-sum(float(op.cost_basis_ex_fee) for op in group), 2) or 0.0
+        digest = hashlib.sha1(f"{symbol}:{group_key}".encode()).hexdigest()[:8]
+        trade_id = f"{symbol}-{market_date.replace('-', '')}-{digest}"
+
+        try:
+            return PaperTrade(
+                id=trade_id,
+                ticker=symbol,
+                strategy_kind=strategy_kind,
+                status="ACTIVE",
+                legs=trade_legs,
+                qty=trade_qty,
+                underlying_conid=0,
+                created_from_snapshot_id=created_from_snapshot_id,
+                created_utc=created_utc,
+                market_date=market_date,
+                entry_net_cash=entry_net_cash,
+                source="LEDGER",
+                ledger_campaign_id=group_key,
+                ledger_strategy_label=strategy_label,
+            )
+        except (ValueError, ValidationError) as exc:
+            logger.warning("Skipping ledger group %s: %s", group_key, exc)
+            return None
+
+    def sync_from_ledger_report(
+        self, report: LedgerAnalyticsReport
+    ) -> PaperTradesLedgerSyncResponse:
+        """Reconcile open Trade Ledger option campaigns/positions into `paper_trades.json`."""
+        groups: dict[str, list[LedgerOpenPositionView]] = {}
+        for op in report.open_positions:
+            if op.asset_class != "OPT" or abs(op.quantity) <= 1e-6:
+                continue
+            if op.expiry is None or op.strike is None or op.right not in ("C", "P"):
+                continue
+            if not math.isfinite(op.strike) or op.strike <= 0.0:
+                continue
+            raw_cid = op.campaign_id.strip() if op.campaign_id else ""
+            group_key = raw_cid or op.position_key
+            groups.setdefault(group_key, []).append(op)
+
+        campaigns_by_id: dict[str, LedgerCampaignRow] = {c.campaign_id: c for c in report.campaigns}
+        snapshots_by_symbol: dict[str, list[SnapshotMeta]] = {}
+        now_utc = self._now_utc()
+
+        incoming: list[PaperTrade] = []
+        for group_key, group in groups.items():
+            trade = self._build_ledger_paper_trade(
+                group_key,
+                group,
+                campaign=campaigns_by_id.get(group_key),
+                snapshots_by_symbol=snapshots_by_symbol,
+                now_utc=now_utc,
+            )
+            if trade is not None:
+                incoming.append(trade)
+
+        with self._lock:
+            created_count, updated_count, closed_count, _ledger_trades = (
+                self.store.sync_ledger_trades(incoming, now_utc=now_utc)
+            )
+            trades, active_count = self.list_trades(ticker=None)
+
+        active_ledger_count = sum(
+            1 for t in trades if t.source == "LEDGER" and t.status == "ACTIVE"
+        )
+        return PaperTradesLedgerSyncResponse(
+            created_count=created_count,
+            updated_count=updated_count,
+            closed_count=closed_count,
+            active_ledger_count=active_ledger_count,
+            active_count=active_count,
+            trades=trades,
+        )
 
     async def quote_active_trades_for_refresh(
         self,

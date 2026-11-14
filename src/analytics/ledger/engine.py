@@ -392,6 +392,8 @@ def _build_open_positions(
                 unrealized_pnl_ex_fee=unrealized,
                 fees=fees,
                 campaign_id=campaign_id,
+                conid=conid,
+                opened_at=min(lot.opened_at for lot in lots),
             )
         )
 
@@ -449,6 +451,8 @@ def _build_open_positions(
                 unrealized_pnl_ex_fee=unrealized,
                 fees=0.0,
                 campaign_id=None,
+                conid=pos_row.conid,
+                opened_at=_opt_str(pos_row.updated_at),
             )
         )
 
@@ -506,6 +510,8 @@ def _build_open_positions(
                     unrealized_pnl_ex_fee=unrealized,
                     fees=fees,
                     campaign_id=cc_cid if stk_strategy == "COVERED_CALL" else None,
+                    conid=conid,
+                    opened_at=min(sl.executed_at for sl in stk_lots),
                 )
             )
 
@@ -545,6 +551,8 @@ def _build_open_positions(
                     unrealized_pnl_ex_fee=unrealized,
                     fees=0.0,
                     campaign_id=cc_cid if pos_stk_strategy == "COVERED_CALL" else None,
+                    conid=pos_row.conid,
+                    opened_at=_opt_str(pos_row.updated_at),
                 )
             )
 

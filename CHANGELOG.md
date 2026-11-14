@@ -7,6 +7,15 @@ milestones in git history.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-14
+
+### Added
+- **Trade Ledger <-> Paper Trades Synchronization & Fill-Anchored Backtest Replay (`src/storage/paper_trade_store.py`, `src/analytics/{ledger,backtest}/`, `src/services/`, `src/web/`):**
+  - **Storage & Reconciliation (`PaperTradeStore.sync_ledger_trades`):** Extended `PaperTrade` (`source`: `"MANUAL" | "LEDGER"`, `ledger_campaign_id`, `ledger_strategy_label`, optional `created_from_snapshot_id` validated via `SNAPSHOT_ID_RE`), `PaperTradeLeg` (`con_id=0`, `qty_ratio`, `entry_price`), and `PaperTradeStatus` (`"CLOSED"` for closed/exited Ledger trades) backwards-compatibly; atomic reconciliation matches by `(ticker, ledger_campaign_id)` then leg signature, keeps `MANUAL` trades untouched, and transitions absent active `LEDGER` trades to `"CLOSED"`.
+  - **Fill-Anchored Backtest Replay & Synthetic MTM Fallback (`BrokerFillAnchor`, `build_broker_fill_entry`, `resolve_broker_leg_prices`, `_prepare_anchor_bars`, `_build_synthetic_ledger_mtm_bar`):** Populated `LedgerOpenPositionView` (`conid`, `opened_at`), wired `run_single_trade_replay(..., broker_fill_anchor=..., trade_id=...)` with `FLAG_BROKER_FILL_ENTRY`, `"BROKER_FILL"` step/leg mark provenance, pre-fill intraday bar filtering (honoring `leg.qty_ratio`, proportional `entry_net_cash` scaling on `qty` overrides, and missing leg fills solved via `resolve_broker_leg_prices`), and added a synthetic `{SYMBOL}_{YYYY-MM-DD}_LEDGER_MTM` (`SYNTHETIC_LEDGER_MTM`) fallback bar when no local chain snapshots exist on or after the trade's entry date.
+  - **Service Lifecycle & API (`POST /api/backtest/paper-trades/sync-ledger`, `PaperTradesLedgerSyncResponse`):** Automatically reconciles open Ledger option campaigns/positions into Paper Trades on startup (when `open_positions.csv` is populated) and after `LedgerService.sync_ledger` / `import_ledger_file`, plus exposes manual sync via `POST /api/backtest/paper-trades/sync-ledger`.
+  - **UI (`#backtest-card`, `#trade-ledger-card`, `?v=20261114c`):** Added `[Sync from Ledger]` (`#backtest-paper-sync-ledger-btn`), `Closed (Ledger)` status filter (`#backtest-paper-filter`), `LEDGER` badges (`.backtest-source-badge--ledger`), leg ratio/fill formatting, `#backtest-qty` / date-filter synchronization on paper-trade selection & replay, and one-click `Replay` buttons (`.ledger-replay-btn`) on open option rows/campaigns in Trade Ledger that jump into `#backtest-card` and execute a `PAPER_TRADE` replay.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

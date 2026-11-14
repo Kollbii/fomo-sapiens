@@ -241,6 +241,7 @@ export var dom = {
   backtestLegsBody: document.getElementById("backtest-legs-body"),
   backtestPaperSummary: document.getElementById("backtest-paper-summary"),
   backtestPaperFilter: document.getElementById("backtest-paper-filter"),
+  backtestPaperSyncLedgerBtn: document.getElementById("backtest-paper-sync-ledger-btn"),
   backtestPaperRefreshBtn: document.getElementById("backtest-paper-refresh-btn"),
   backtestPaperList: document.getElementById("backtest-paper-list"),
   backtestWarnings: document.getElementById("backtest-warnings"),

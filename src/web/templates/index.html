@@ -1037,12 +1037,14 @@
               <option value="ACTIVE" selected>Active Only</option>
               <option value="EXPIRED">Expired</option>
               <option value="STOPPED">Stopped</option>
+              <option value="CLOSED">Closed (Ledger)</option>
             </select>
+            <button type="button" id="backtest-paper-sync-ledger-btn" class="btn btn-sm" title="Sync open option positions from Trade Ledger">Sync from Ledger</button>
             <button type="button" id="backtest-paper-refresh-btn" class="btn btn-sm">Reload</button>
           </div>
         </div>
         <p class="backtest-paper-hint">
-          Manual <strong>REFRESH FROM IBKR</strong> automatically quotes open paper trade legs &lt; 30 DTE (down to expiry) into your local archive.
+          Open Trade Ledger option positions sync automatically as Paper Trades; manual <strong>REFRESH FROM IBKR</strong> automatically quotes open paper trade legs (including &lt; 30 DTE down to expiry) into your local archive.
         </p>
         <div id="backtest-paper-list" class="backtest-paper-list"></div>
       </section>
@@ -1301,5 +1303,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261114a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261114c"></script>
 {% endblock %}

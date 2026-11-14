@@ -68,6 +68,7 @@ import {
   syncLedgerControlStates,
   syncLedgerFromUI,
   toggleCampaignExpand,
+  triggerLedgerReplay,
 } from "./ledger.js";
 import {
   copyWallsAiPrompt,
@@ -581,6 +582,20 @@ export function bindEvents() {
 
   if (dom.ledgerTableBody) {
     dom.ledgerTableBody.addEventListener("click", function (ev) {
+      var replayBtn =
+        ev.target && ev.target.closest
+          ? ev.target.closest("[data-ledger-replay-campaign], [data-ledger-replay-pos]")
+          : null;
+      if (replayBtn && !replayBtn.disabled) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        triggerLedgerReplay({
+          campaignId: replayBtn.getAttribute("data-ledger-replay-campaign") || "",
+          positionKey: replayBtn.getAttribute("data-ledger-replay-pos") || "",
+          ticker: replayBtn.getAttribute("data-ledger-replay-ticker") || "",
+        });
+        return;
+      }
       var toggleBtn =
         ev.target && ev.target.closest ? ev.target.closest("[data-campaign-toggle]") : null;
       if (toggleBtn && !toggleBtn.disabled) {

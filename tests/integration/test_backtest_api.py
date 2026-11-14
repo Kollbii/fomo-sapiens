@@ -585,12 +585,20 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert 'data-bt-chart-view="TRADE"' in html
                 assert "Trade &amp; Legs History" in html
                 assert "Daily Mark-to-Market Step History" in html
-                assert "?v=20261114a" in html
+                assert 'value="CLOSED"' in html
+                assert 'id="backtest-paper-sync-ledger-btn"' in html
+                assert "?v=20261114c" in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200
                 assert ".backtest-drawer" in r_css.text
                 assert ".backtest-pill--missing" in r_css.text
+                assert ".backtest-source-badge--ledger" in r_css.text
+                assert ".backtest-status--CLOSED" in r_css.text
+
+                r_ledger_css = await client.get("/static/css/ledger.css")
+                assert r_ledger_css.status_code == 200
+                assert ".ledger-replay-btn" in r_ledger_css.text
 
                 r_js_charts = await client.get("/static/js/dashboard/backtest_charts.js")
                 assert r_js_charts.status_code == 200
@@ -605,6 +613,29 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert "MISSING QUOTE" in r_js_tables.text
                 assert "&bull;" not in r_js_tables.text
                 assert "&mdash;" not in r_js_tables.text
+
+                r_js_paper = await client.get("/static/js/dashboard/backtest_paper.js")
+                assert r_js_paper.status_code == 200
+                assert "syncPaperTradesFromLedger" in r_js_paper.text
+                assert "formatLegsCompact" in r_js_paper.text
+                assert "&bull;" not in r_js_paper.text
+                assert "&mdash;" not in r_js_paper.text
+
+                r_js_bt = await client.get("/static/js/dashboard/backtest.js")
+                assert r_js_bt.status_code == 200
+                assert "replayLedgerTradeInBacktester" in r_js_bt.text
+                assert "syncPaperTradeQtyInput" in r_js_bt.text
+                assert "clearBacktestDateAndEndFilters" in r_js_bt.text
+                assert "replayPaperTradeFromList" in r_js_bt.text
+                assert "&bull;" not in r_js_bt.text
+                assert "&mdash;" not in r_js_bt.text
+
+                r_js_ledger = await client.get("/static/js/dashboard/ledger.js")
+                assert r_js_ledger.status_code == 200
+                assert "triggerLedgerReplay" in r_js_ledger.text
+                assert "ledger-replay-btn" in r_js_ledger.text
+                assert "&bull;" not in r_js_ledger.text
+                assert "&mdash;" not in r_js_ledger.text
 
                 # min_entry_credit_dollars=150 allows $190/$163 spreads and skips lower-credit bars.
                 r_credit_skip = await client.post(
@@ -668,5 +699,386 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                         },
                     )
                     assert r_bad.status_code == 422
+
+    run_coro(_exercise())
+
+
+def _flex_nvda_open_spread_xml(*, include_open_positions: bool = True) -> bytes:
+    """Flex XML with an open NVDA 140/135 Bull Put Spread entered on 2026-11-05."""
+    open_pos_xml = (
+        """
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY"
+                      symbol="NVDA  261218P00140000" underlyingSymbol="NVDA" conid="9003"
+                      multiplier="100" strike="140" expiry="20261218" putCall="P"
+                      position="-1" costBasisPrice="3.20" markPrice="1.20"
+                      positionValue="-120.0" fifoPnlUnrealized="200.0" reportDate="20261112" />
+        <OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY"
+                      symbol="NVDA  261218P00135000" underlyingSymbol="NVDA" conid="9002"
+                      multiplier="100" strike="135" expiry="20261218" putCall="P"
+                      position="1" costBasisPrice="2.00" markPrice="0.80"
+                      positionValue="80.0" fifoPnlUnrealized="-120.0" reportDate="20261112" />
+      </OpenPositions>"""
+        if include_open_positions
+        else """
+      <OpenPositions />"""
+    )
+    closing_trades_xml = (
+        ""
+        if include_open_positions
+        else """
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218P00140000" underlyingSymbol="NVDA" conid="9003"
+               underlyingConid="4815747" multiplier="100" strike="140" expiry="20261218"
+               putCall="P" dateTime="20261112;155900" quantity="1" tradePrice="1.20"
+               proceeds="-120.0" ibCommission="-1.00" fifoPnlRealized="198.0"
+               openCloseIndicator="C" buySell="BUY" ibOrderID="9201"
+               ibExecID="nvda-bps-close-short" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218P00135000" underlyingSymbol="NVDA" conid="9002"
+               underlyingConid="4815747" multiplier="100" strike="135" expiry="20261218"
+               putCall="P" dateTime="20261112;155905" quantity="-1" tradePrice="0.80"
+               proceeds="80.0" ibCommission="-1.00" fifoPnlRealized="-122.0"
+               openCloseIndicator="C" buySell="SELL" ibOrderID="9202"
+               ibExecID="nvda-bps-close-long" levelOfDetail="EXECUTION" />"""
+    )
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="Ledger" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" toDate="20261112">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218P00140000" underlyingSymbol="NVDA" conid="9003"
+               underlyingConid="4815747" multiplier="100" strike="140" expiry="20261218"
+               putCall="P" dateTime="20261105;143000" quantity="-1" tradePrice="3.20"
+               proceeds="320.0" ibCommission="-1.00" fifoPnlRealized="0"
+               openCloseIndicator="O" buySell="SELL" ibOrderID="9101"
+               ibExecID="nvda-bps-open-short" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218P00135000" underlyingSymbol="NVDA" conid="9002"
+               underlyingConid="4815747" multiplier="100" strike="135" expiry="20261218"
+               putCall="P" dateTime="20261105;143000" quantity="1" tradePrice="2.00"
+               proceeds="-200.0" ibCommission="-1.00" fifoPnlRealized="0"
+               openCloseIndicator="O" buySell="BUY" ibOrderID="9101"
+               ibExecID="nvda-bps-open-long" levelOfDetail="EXECUTION" />{closing_trades_xml}
+      </Trades>{open_pos_xml}
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+""".encode()
+
+
+def test_paper_trades_sync_ledger_and_replay_with_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _build_app(tmp_path, seed_history=True)
+    asgi_app = _patch_inline_threads(monkeypatch, app)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                r_imp = await client.post(
+                    "/api/ledger/import",
+                    files={
+                        "file": (
+                            "nvda_open.xml",
+                            _flex_nvda_open_spread_xml(include_open_positions=True),
+                            "application/xml",
+                        )
+                    },
+                )
+                assert r_imp.status_code == 200
+
+                # Clear PaperTrade store to exercise explicit POST /paper-trades/sync-ledger
+                app.state.service.paper_trades.store.save_trades([])
+
+                r_sync1 = await client.post("/api/backtest/paper-trades/sync-ledger")
+                assert r_sync1.status_code == 200
+                sync1 = r_sync1.json()
+                assert sync1["created_count"] == 1
+                assert sync1["updated_count"] == 0
+                assert sync1["closed_count"] == 0
+                assert sync1["active_ledger_count"] == 1
+                assert sync1["active_count"] == 1
+                assert len(sync1["trades"]) == 1
+                ledger_pt = sync1["trades"][0]
+                assert ledger_pt["source"] == "LEDGER"
+                assert ledger_pt["status"] == "ACTIVE"
+                assert ledger_pt["ticker"] == "NVDA"
+                assert ledger_pt["ledger_campaign_id"]
+                assert ledger_pt["ledger_strategy_label"]
+                assert ledger_pt["entry_net_cash"] == pytest.approx(120.0)
+                assert len(ledger_pt["legs"]) == 2
+                assert all(leg["entry_price"] is not None for leg in ledger_pt["legs"])
+
+                # Idempotent re-sync preserves existing trade without creating duplicates
+                r_sync2 = await client.post("/api/backtest/paper-trades/sync-ledger")
+                assert r_sync2.status_code == 200
+                sync2 = r_sync2.json()
+                assert sync2["created_count"] == 0
+                assert sync2["updated_count"] == 1
+                assert sync2["closed_count"] == 0
+                assert sync2["active_ledger_count"] == 1
+                assert len(sync2["trades"]) == 1
+                assert sync2["trades"][0]["id"] == ledger_pt["id"]
+
+                # Replay synced Ledger trade in Single-Trade Time Replay against snapshots
+                r_replay = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SINGLE_TRADE",
+                        "ticker": "NVDA",
+                        "source": "PAPER_TRADE",
+                        "paper_trade_id": ledger_pt["id"],
+                    },
+                )
+                assert r_replay.status_code == 200
+                replay_body = r_replay.json()
+                assert replay_body["mode"] == "SINGLE_TRADE"
+                assert replay_body["source"] == "PAPER_TRADE"
+                sim = replay_body["simulation"]
+                assert len(sim["trades"]) == 1
+                trade = sim["trades"][0]
+                assert trade["strategy_kind"] == "BULL_PUT_SPREAD"
+                assert trade["entry_cash_mid_dollars"] == pytest.approx(120.0)
+                assert len(trade["steps"]) >= 3
+
+                # Close positions in Ledger via closing Flex XML + empty positions;
+                # verify POST /paper-trades/sync-ledger transitions PaperTrade to CLOSED
+                app.state.service.ledger.repo.replace_positions([])
+                r_imp_close = await client.post(
+                    "/api/ledger/import",
+                    files={
+                        "file": (
+                            "nvda_close.xml",
+                            _flex_nvda_open_spread_xml(include_open_positions=False),
+                            "application/xml",
+                        )
+                    },
+                )
+                assert r_imp_close.status_code == 200
+
+                # Restore ACTIVE status to verify POST /paper-trades/sync-ledger closes it
+                stored = app.state.service.paper_trades.store.load_trades()
+                app.state.service.paper_trades.store.save_trades(
+                    [t.model_copy(update={"status": "ACTIVE"}) for t in stored]
+                )
+                r_sync_close = await client.post("/api/backtest/paper-trades/sync-ledger")
+                assert r_sync_close.status_code == 200
+                sync_close = r_sync_close.json()
+                assert sync_close["closed_count"] == 1
+                assert sync_close["active_ledger_count"] == 0
+
+                r_closed = await client.get(
+                    "/api/backtest/paper-trades",
+                    params={"status": "CLOSED"},
+                )
+                assert r_closed.status_code == 200
+                closed_trades = r_closed.json()["trades"]
+                assert len(closed_trades) == 1
+                assert closed_trades[0]["id"] == ledger_pt["id"]
+                assert closed_trades[0]["status"] == "CLOSED"
+
+    run_coro(_exercise())
+
+
+def test_paper_trades_ledger_replay_synthetic_mtm_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _build_app(tmp_path, seed_history=False)
+    asgi_app = _patch_inline_threads(monkeypatch, app)
+
+    msft_flex = b"""<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="Ledger" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" toDate="20261112">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="MSFT  261218P00400000" underlyingSymbol="MSFT" conid="880001"
+               underlyingConid="272093" multiplier="100" strike="400" expiry="20261218"
+               putCall="P" dateTime="20261108;150000" quantity="-1" tradePrice="4.10"
+               proceeds="410.0" ibCommission="-1.05" fifoPnlRealized="0"
+               openCloseIndicator="O" buySell="SELL" ibOrderID="9301"
+               ibExecID="msft-open-put" levelOfDetail="EXECUTION" />
+      </Trades>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY"
+                      symbol="MSFT  261218P00400000" underlyingSymbol="MSFT" conid="880001"
+                      multiplier="100" strike="400" expiry="20261218" putCall="P"
+                      position="-1" costBasisPrice="4.10" markPrice="2.10"
+                      positionValue="-210.0" fifoPnlUnrealized="200.0" reportDate="20261112" />
+      </OpenPositions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                r_imp = await client.post(
+                    "/api/ledger/import",
+                    files={"file": ("msft_open.xml", msft_flex, "application/xml")},
+                )
+                assert r_imp.status_code == 200
+
+                r_list = await client.get("/api/backtest/paper-trades")
+                assert r_list.status_code == 200
+                trades = r_list.json()["trades"]
+                assert len(trades) == 1
+                msft_pt = trades[0]
+                assert msft_pt["source"] == "LEDGER"
+                assert msft_pt["ticker"] == "MSFT"
+
+                r_replay = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SINGLE_TRADE",
+                        "ticker": "MSFT",
+                        "source": "PAPER_TRADE",
+                        "paper_trade_id": msft_pt["id"],
+                    },
+                )
+                assert r_replay.status_code == 200
+                replay_body = r_replay.json()
+                assert replay_body["daily_bar_count"] == 1
+                sim = replay_body["simulation"]
+                assert len(sim["trades"]) == 1
+                trade = sim["trades"][0]
+                assert len(trade["steps"]) == 2
+                assert trade["steps"][0]["snapshot_id"] == "MSFT_20261108_LEDGER"
+                assert "LEDGER_MTM" in trade["steps"][-1]["snapshot_id"]
+                assert trade["entry_cash_mid_dollars"] == pytest.approx(410.0)
+                assert trade["gross_pnl_dollars"] == pytest.approx(200.0)
+
+    run_coro(_exercise())
+
+
+def test_paper_trades_ledger_multilot_qty_override_scales_entry_and_pnl(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Multi-lot (qty=2) Ledger replay with config.qty=1 scales entry cash & P&L cleanly."""
+    app = _build_app(tmp_path, seed_history=True)
+    asgi_app = _patch_inline_threads(monkeypatch, app)
+
+    multilot_flex = b"""<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="Ledger" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" toDate="20261112">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="PLTR  261218P00050000" underlyingSymbol="PLTR" conid="770001"
+               underlyingConid="444857009" multiplier="100" strike="50" expiry="20261218"
+               putCall="P" dateTime="20261108;150000" quantity="-2" tradePrice="2.50"
+               proceeds="500.0" ibCommission="-2.10" fifoPnlRealized="0"
+               openCloseIndicator="O" buySell="SELL" ibOrderID="9401"
+               ibExecID="pltr-open-short-2" levelOfDetail="EXECUTION" />
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218P00140000" underlyingSymbol="NVDA" conid="9003"
+               underlyingConid="4815747" multiplier="100" strike="140" expiry="20261218"
+               putCall="P" dateTime="20261105;143000" quantity="-2" tradePrice="2.50"
+               proceeds="500.0" ibCommission="-2.10" fifoPnlRealized="0"
+               openCloseIndicator="O" buySell="SELL" ibOrderID="9402"
+               ibExecID="nvda-open-short-2" levelOfDetail="EXECUTION" />
+      </Trades>
+      <OpenPositions>
+        <OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY"
+                      symbol="PLTR  261218P00050000" underlyingSymbol="PLTR" conid="770001"
+                      multiplier="100" strike="50" expiry="20261218" putCall="P"
+                      position="-2" costBasisPrice="2.50" markPrice="1.80"
+                      positionValue="-360.0" fifoPnlUnrealized="140.0" reportDate="20261112" />
+        <OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY"
+                      symbol="NVDA  261218P00140000" underlyingSymbol="NVDA" conid="9003"
+                      multiplier="100" strike="140" expiry="20261218" putCall="P"
+                      position="-2" costBasisPrice="2.50" markPrice="1.20"
+                      positionValue="-240.0" fifoPnlUnrealized="260.0" reportDate="20261112" />
+      </OpenPositions>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                r_imp = await client.post(
+                    "/api/ledger/import",
+                    files={"file": ("multilot_open.xml", multilot_flex, "application/xml")},
+                )
+                assert r_imp.status_code == 200
+
+                r_sync = await client.post("/api/backtest/paper-trades/sync-ledger")
+                assert r_sync.status_code == 200
+                trades = r_sync.json()["trades"]
+                pltr_pt = next(t for t in trades if t["ticker"] == "PLTR")
+                nvda_pt = next(t for t in trades if t["ticker"] == "NVDA")
+                assert pltr_pt["qty"] == 2
+                assert pltr_pt["entry_net_cash"] == pytest.approx(500.0)
+                assert nvda_pt["qty"] == 2
+                assert nvda_pt["entry_net_cash"] == pytest.approx(500.0)
+
+                # 1) Synthetic MTM replay with config.qty=1 -> $250 entry cash, $0 Day-0, +$70 MTM.
+                r_pltr_one = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SINGLE_TRADE",
+                        "source": "PAPER_TRADE",
+                        "paper_trade_id": pltr_pt["id"],
+                        "config": {"qty": 1},
+                    },
+                )
+                assert r_pltr_one.status_code == 200
+                pltr_one_trade = r_pltr_one.json()["simulation"]["trades"][0]
+                assert pltr_one_trade["qty"] == 1
+                assert pltr_one_trade["entry_cash_mid_dollars"] == pytest.approx(250.0)
+                assert pltr_one_trade["steps"][0]["mark_source"] == "BROKER_FILL"
+                assert pltr_one_trade["steps"][0]["gross_pnl_dollars"] == pytest.approx(0.0)
+                assert pltr_one_trade["steps"][-1]["gross_pnl_dollars"] == pytest.approx(70.0)
+                assert pltr_one_trade["gross_pnl_dollars"] == pytest.approx(70.0)
+
+                # 2) Omitting config.qty defaults to full Ledger position (qty=2, +$140 MTM).
+                r_pltr_full = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SINGLE_TRADE",
+                        "source": "PAPER_TRADE",
+                        "paper_trade_id": pltr_pt["id"],
+                    },
+                )
+                assert r_pltr_full.status_code == 200
+                pltr_full_trade = r_pltr_full.json()["simulation"]["trades"][0]
+                assert pltr_full_trade["qty"] == 2
+                assert pltr_full_trade["entry_cash_mid_dollars"] == pytest.approx(500.0)
+                assert pltr_full_trade["steps"][0]["gross_pnl_dollars"] == pytest.approx(0.0)
+                assert pltr_full_trade["gross_pnl_dollars"] == pytest.approx(140.0)
+
+                # 3) Archived snapshot replay with config.qty=1 -> $250 entry cash, -$70 Day-0 snap.
+                r_nvda_one = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SINGLE_TRADE",
+                        "source": "PAPER_TRADE",
+                        "paper_trade_id": nvda_pt["id"],
+                        "config": {"qty": 1},
+                    },
+                )
+                assert r_nvda_one.status_code == 200
+                nvda_one_trade = r_nvda_one.json()["simulation"]["trades"][0]
+                assert nvda_one_trade["qty"] == 1
+                assert nvda_one_trade["entry_cash_mid_dollars"] == pytest.approx(250.0)
+                assert nvda_one_trade["steps"][0]["mark_source"] == "BROKER_FILL"
+                assert nvda_one_trade["steps"][0]["gross_pnl_dollars"] == pytest.approx(0.0)
+                assert nvda_one_trade["steps"][1]["gross_pnl_dollars"] == pytest.approx(-70.0)
+                assert nvda_one_trade["steps"][-1]["gross_pnl_dollars"] == pytest.approx(130.0)
+                assert nvda_one_trade["gross_pnl_dollars"] == pytest.approx(130.0)
 
     run_coro(_exercise())
