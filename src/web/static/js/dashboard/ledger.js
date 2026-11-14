@@ -26,6 +26,12 @@ import {
 import {
   schedulePlotlyResize,
 } from "./grid_layout.js";
+import {
+  loadPaperTrades,
+} from "./backtest_paper.js";
+import {
+  replayLedgerTradeInBacktester,
+} from "./backtest.js";
 
 var VALID_WINDOWS = ["1W", "1M", "3M", "YTD", "1Y", "ALL"];
 var VALID_VIEWS = ["realized", "open_mtm"];
@@ -1361,6 +1367,14 @@ function renderCampaignsTable(report, status) {
           "</span>"
         : "";
 
+    var campaignReplayHtml =
+      c.status === "OPEN" && c.strategy_type !== "STOCK_LOT"
+        ? ' <button type="button" class="btn btn-xs ledger-replay-btn" data-ledger-replay-campaign="' +
+          escapeHtml(c.campaign_id) +
+          '" data-ledger-replay-ticker="' +
+          escapeHtml(c.underlying) +
+          '" title="Replay P&L history in Backtester">Replay</button>'
+        : "";
     html +=
       '<tr class="ledger-data-row ledger-campaign-row' +
       (expanded ? " is-expanded" : "") +
@@ -1387,7 +1401,9 @@ function renderCampaignsTable(report, status) {
       escapeHtml(statusMod) +
       '">' +
       escapeHtml(c.status) +
-      "</span></td>" +
+      "</span>" +
+      campaignReplayHtml +
+      "</td>" +
       '<td class="text-left">' +
       rollsHtml +
       "</td>" +
@@ -1590,6 +1606,18 @@ function renderOpenMtmTable(report, status) {
           formatStrikeBadge(op.strike) +
           (op.right || "")
         : op.asset_class;
+    var opReplayHtml = "";
+    if (op.asset_class === "OPT") {
+      var replayTargetAttr = op.campaign_id
+        ? 'data-ledger-replay-campaign="' + escapeHtml(op.campaign_id) + '"'
+        : 'data-ledger-replay-pos="' + escapeHtml(op.position_key) + '"';
+      opReplayHtml =
+        ' <button type="button" class="btn btn-xs ledger-replay-btn" ' +
+        replayTargetAttr +
+        ' data-ledger-replay-ticker="' +
+        escapeHtml(op.underlying) +
+        '" title="Replay P&L history in Backtester">Replay</button>';
+    }
     html +=
       '<tr class="ledger-data-row">' +
       '<td class="text-left"><strong>' +
@@ -1599,7 +1627,9 @@ function renderOpenMtmTable(report, status) {
       "</span></td>" +
       '<td class="text-left"><span class="ledger-pill">' +
       escapeHtml(formatStrategyLabel(op.strategy_type)) +
-      "</span></td>" +
+      "</span>" +
+      opReplayHtml +
+      "</td>" +
       '<td class="num ' +
       pnlToneClass(op.quantity) +
       '">' +
@@ -1661,6 +1691,10 @@ export function toggleCampaignExpand(campaignId) {
   if (state.ledgerData) {
     renderLedgerTable(state.ledgerData);
   }
+}
+
+export function triggerLedgerReplay(options) {
+  return replayLedgerTradeInBacktester(options);
 }
 
 // ------------------------------------------------------------------ Rendering Bundle
@@ -1744,6 +1778,7 @@ export async function syncLedgerFromUI() {
       });
       await loadLedger();
       await fetchStatus();
+      await loadPaperTrades();
       return;
     }
     var errTone = res.status === 503 || res.status === 422 ? "warn" : "error";
@@ -1800,6 +1835,7 @@ export async function importLedgerFile(file) {
       });
       await loadLedger();
       await fetchStatus();
+      await loadPaperTrades();
       return;
     }
     var errMsg = extractApiErrorMessage(res.body, res.textSnippet || "Ledger file import failed.");

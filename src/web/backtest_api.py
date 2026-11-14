@@ -15,6 +15,7 @@ from src.services.schemas import (
     BacktestRunRequest,
     BacktestRunResponse,
     PaperTrade,
+    PaperTradesLedgerSyncResponse,
     PaperTradesListResponse,
     PaperTradeStatus,
     RegisterPaperTradeRequest,
@@ -77,3 +78,10 @@ async def api_backtest_stop_paper_trade(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> PaperTrade:
     return await _in_thread(svc.paper_trades.stop_trade, trade_id)
+
+
+@backtest_router.post("/paper-trades/sync-ledger", response_model=PaperTradesLedgerSyncResponse)
+async def api_backtest_sync_paper_trades_from_ledger(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> PaperTradesLedgerSyncResponse:
+    return await _in_thread(svc.sync_paper_trades_from_ledger)
