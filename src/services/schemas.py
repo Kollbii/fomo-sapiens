@@ -55,7 +55,13 @@ from src.analytics.strategies import (
 )
 from src.analytics.term_greeks import MultiDTEProfilesReport
 from src.analytics.walls import ChainWallsReport
-from src.broker.corridor import CorridorLegRef, CorridorQuoteFrame
+from src.broker.corridor import (
+    CORRIDOR_MAX_CONTRACTS,
+    DEFAULT_CORRIDOR_MAX_CONTRACTS,
+    DEFAULT_WINDOW_STRIKES,
+    CorridorLegRef,
+    CorridorQuoteFrame,
+)
 from src.storage.paper_trade_store import (
     MAX_PAPER_TRADE_LEGS,
     PaperQuoteRecord,
@@ -156,6 +162,7 @@ class GatewayStatusResponse(BaseModel):
     allowed_strike_steps: list[float]
     dte_min: int = 30
     dte_max: int = 120
+    include_short_dte_for_backtest: bool = True
     available_strike_steps: list[float] = Field(default_factory=list)
     available_range_pcts: list[float] = Field(default_factory=list)
     active_capabilities_ticker: str | None = None
@@ -163,6 +170,13 @@ class GatewayStatusResponse(BaseModel):
     flex_monthly_configured: bool = False
     flex_trade_conf_configured: bool = False
     gateway_ledger_sync_enabled: bool = False
+    corridor_default_window_strikes: int = Field(default=DEFAULT_WINDOW_STRIKES, ge=1, le=15)
+    corridor_default_max_contracts: int = Field(
+        default=DEFAULT_CORRIDOR_MAX_CONTRACTS, ge=1, le=CORRIDOR_MAX_CONTRACTS
+    )
+    corridor_hard_max_contracts: int = Field(
+        default=CORRIDOR_MAX_CONTRACTS, ge=1, le=CORRIDOR_MAX_CONTRACTS
+    )
 
 
 SystemStatusResponse = GatewayStatusResponse
@@ -231,41 +245,70 @@ class RefreshRequest(BaseModel):
     strike_step: float | None = Field(default=None, gt=0.0)
     dte_min: int | None = Field(default=None, ge=0, le=120)
     dte_max: int | None = Field(default=None, ge=1, le=120)
+    include_short_dte: bool | None = None
+    display_dte_min: int | None = Field(default=None, ge=0, le=120)
+    display_dte_max: int | None = Field(default=None, ge=1, le=120)
 
     @model_validator(mode="after")
     def _validate_dte_bounds(self) -> RefreshRequest:
         if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
             raise ValueError("dte_min must be <= dte_max")
+        if (
+            self.display_dte_min is not None
+            and self.display_dte_max is not None
+            and self.display_dte_min > self.display_dte_max
+        ):
+            raise ValueError("display_dte_min must be <= display_dte_max")
         return self
 
 
 class StrategySuggestRequest(BaseModel):
     """Request body for `POST /api/strategy/suggest`."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     ticker: str
     snapshot_id: str | None = None
     strategy_kind: PresetStrategyKind | None = None
     target_expiry: str | None = None
+    dte_min: int | None = Field(default=None, ge=0, le=120)
+    dte_max: int | None = Field(default=None, ge=1, le=120)
     days_forward: int = Field(default=0, ge=0, le=365)
     iv_shift: float = Field(default=0.0, ge=-0.80, le=2.00)
     qty_multiplier: int = Field(default=1, ge=1, le=100)
+    min_net_credit_dollars: float | None = Field(default=None, ge=0.0)
+    min_ror_pct: float | None = Field(default=None, ge=0.0, le=1000.0)
+
+    @model_validator(mode="after")
+    def _validate_dte_bounds(self) -> StrategySuggestRequest:
+        if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
+            raise ValueError("dte_min must be <= dte_max")
+        return self
 
 
 class StrategyEvaluateRequest(BaseModel):
     """Request body for `POST /api/strategy/evaluate`."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
     ticker: str
     snapshot_id: str | None = None
     strategy_kind: StrategyKind = "BULL_PUT_SPREAD"
     target_expiry: str | None = None
     legs: list[StrategyLegInput] | None = None
+    dte_min: int | None = Field(default=None, ge=0, le=120)
+    dte_max: int | None = Field(default=None, ge=1, le=120)
     days_forward: int = Field(default=0, ge=0, le=365)
     iv_shift: float = Field(default=0.0, ge=-0.80, le=2.00)
     qty_multiplier: int = Field(default=1, ge=1, le=100)
+    min_net_credit_dollars: float | None = Field(default=None, ge=0.0)
+    min_ror_pct: float | None = Field(default=None, ge=0.0, le=1000.0)
+
+    @model_validator(mode="after")
+    def _validate_dte_bounds(self) -> StrategyEvaluateRequest:
+        if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
+            raise ValueError("dte_min must be <= dte_max")
+        return self
 
 
 class StrategySuggestResponse(BaseModel):
@@ -286,8 +329,10 @@ class CorridorQuotesRequest(BaseModel):
     ticker: str
     snapshot_id: str | None = None
     target_expiry: str | None = None
-    window_strikes: int = Field(default=5, ge=1, le=12)
-    max_contracts: int = Field(default=56, ge=1, le=60)
+    window_strikes: int = Field(default=DEFAULT_WINDOW_STRIKES, ge=1, le=15)
+    max_contracts: int = Field(
+        default=DEFAULT_CORRIDOR_MAX_CONTRACTS, ge=1, le=CORRIDOR_MAX_CONTRACTS
+    )
     priority_legs: list[CorridorLegRef] = Field(default_factory=list)
 
 

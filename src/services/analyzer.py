@@ -7,6 +7,7 @@ it is the only module allowed to do so. It knows nothing about HTTP.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from datetime import UTC
@@ -27,6 +28,7 @@ from src.analytics.term_greeks import build_multi_dte_profiles
 from src.analytics.walls import compute_walls
 from src.broker.client import IBKRBrokerClient
 from src.broker.corridor import (
+    CORRIDOR_MAX_CONTRACTS,
     DEFAULT_CORRIDOR_MAX_CONTRACTS,
     DEFAULT_WINDOW_STRIKES,
     CorridorLegRef,
@@ -196,6 +198,7 @@ class AnalyzerService:
         ibkr = self.settings.ibkr
         wl = self.settings.watchlist
         oc = self.settings.options_chain
+        corridor = self.settings.corridor
         active_md = (
             self.broker_client.get_active_market_data_type()
             if hasattr(self.broker_client, "get_active_market_data_type")
@@ -232,6 +235,7 @@ class AnalyzerService:
             allowed_strike_steps=list(oc.allowed_strike_steps),
             dte_min=oc.dte_min,
             dte_max=oc.dte_max,
+            include_short_dte_for_backtest=oc.include_short_dte_for_backtest,
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
             active_capabilities_ticker=cap_sym if caps else None,
@@ -239,6 +243,9 @@ class AnalyzerService:
             flex_monthly_configured=ledger_status.flex_monthly_configured,
             flex_trade_conf_configured=ledger_status.flex_trade_conf_configured,
             gateway_ledger_sync_enabled=ledger_status.gateway_sync_enabled,
+            corridor_default_window_strikes=corridor.default_window_strikes,
+            corridor_default_max_contracts=corridor.default_max_contracts,
+            corridor_hard_max_contracts=corridor.hard_max_contracts,
         )
 
     def list_snapshots(self, raw_ticker: str) -> SnapshotsListResponse:
@@ -379,6 +386,47 @@ class AnalyzerService:
             contracts=contracts,
         )
 
+    def _isolate_dashboard_dte(
+        self,
+        df: pl.DataFrame,
+        *,
+        dte_min: int | None = None,
+        dte_max: int | None = None,
+        preserve_expiry: str | None = None,
+    ) -> tuple[pl.DataFrame, bool]:
+        """Filter `df` to requested DTE bounds or isolate `>= oc.dte_min` on merged snapshots.
+
+        When `dte_min` and `dte_max` are omitted, short-DTE rows (`< oc.dte_min`) are hidden
+        ONLY when the snapshot contains BOTH `< oc.dte_min` and `>= oc.dte_min` rows (and
+        `preserve_expiry` does not explicitly point to a short-DTE expiry). Synthetic
+        short-DTE-only frames are left intact.
+        """
+        if dte_min is not None and dte_max is not None and dte_min > dte_max:
+            raise InvalidRequestError("dte_min must be <= dte_max")
+        if dte_min is not None or dte_max is not None:
+            filtered = df
+            if dte_min is not None:
+                filtered = filtered.filter(pl.col("dte") >= dte_min)
+            if dte_max is not None:
+                filtered = filtered.filter(pl.col("dte") <= dte_max)
+            return filtered, True
+
+        oc = self.settings.options_chain
+        if preserve_expiry is not None:
+            target_rows = df.filter(pl.col("expiry") == preserve_expiry)
+            if target_rows.height > 0 and target_rows.filter(pl.col("dte") < oc.dte_min).height > 0:
+                return df, False
+
+        has_short = df.filter(pl.col("dte") < oc.dte_min).height > 0
+        if not has_short:
+            return df, False
+        primary = df.filter(pl.col("dte").is_between(oc.dte_min, oc.dte_max))
+        if primary.height == 0:
+            primary = df.filter(pl.col("dte") >= oc.dte_min)
+        if primary.height > 0:
+            return primary, True
+        return df, False
+
     def load_chain_analytics(
         self,
         raw_ticker: str,
@@ -395,20 +443,21 @@ class AnalyzerService:
         else:
             df = self.repo.load_latest(symbol)
         loaded_snap_id = str(df["snapshot_id"][0])
-        if dte_min is not None:
-            df = df.filter(pl.col("dte") >= dte_min)
-        if dte_max is not None:
-            df = df.filter(pl.col("dte") <= dte_max)
-        if df.height == 0:
+        df, explicit_filter = self._isolate_dashboard_dte(df, dte_min=dte_min, dte_max=dte_max)
+        if explicit_filter and df.height == 0:
             raise SnapshotNotFoundError(f"No contracts found in requested DTE range for {symbol}")
         snap_meta = next(
             (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
             None,
         )
-        has_meta_quality = snap_meta is not None and (
-            (snap_meta.quoted_contract_count or 0) > 0
-            or (snap_meta.prior_close_only_count or 0) > 0
-            or snap_meta.contract_count == 0
+        has_meta_quality = (
+            snap_meta is not None
+            and df.height == snap_meta.contract_count
+            and (
+                (snap_meta.quoted_contract_count or 0) > 0
+                or (snap_meta.prior_close_only_count or 0) > 0
+                or snap_meta.contract_count == 0
+            )
         )
         return self.build_analytics_payload(
             df,
@@ -476,12 +525,16 @@ class AnalyzerService:
         max_contracts: int,
         priority_legs: Sequence[CorridorLegRef],
     ) -> CorridorSelection:
-        walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
+        wall_df, isolated = self._isolate_dashboard_dte(enriched, preserve_expiry=target_expiry)
+        walls = compute_walls(wall_df, top_n=self.settings.analytics.top_walls_count)
+        resolved_target = target_expiry
+        if resolved_target is None and isolated and wall_df.height > 0:
+            resolved_target = str(wall_df.sort(["dte", "expiry"])["expiry"][0])
         try:
             return select_wall_corridor(
                 enriched,
                 wall_anchors=wall_anchors_from_report(walls),
-                target_expiry=target_expiry,
+                target_expiry=resolved_target,
                 window_strikes=window_strikes,
                 max_contracts=max_contracts,
                 priority_legs=priority_legs,
@@ -495,11 +548,13 @@ class AnalyzerService:
             payload.snapshot_id,
             apply_corridor_overlay=False,
         )
+        hard_cap = min(self.settings.corridor.hard_max_contracts, CORRIDOR_MAX_CONTRACTS)
+        effective_max = min(payload.max_contracts, hard_cap)
         selection = self._select_corridor(
             enriched,
             target_expiry=payload.target_expiry,
             window_strikes=payload.window_strikes,
-            max_contracts=payload.max_contracts,
+            max_contracts=effective_max,
             priority_legs=payload.priority_legs,
         )
         if not await self.acquire_refresh(f"corridor:{symbol}"):
@@ -540,11 +595,13 @@ class AnalyzerService:
             snapshot_id,
             apply_corridor_overlay=False,
         )
+        hard_cap = min(self.settings.corridor.hard_max_contracts, CORRIDOR_MAX_CONTRACTS)
+        effective_max = min(max_contracts, hard_cap)
         selection = self._select_corridor(
             enriched,
             target_expiry=target_expiry,
             window_strikes=window_strikes,
-            max_contracts=max_contracts,
+            max_contracts=effective_max,
             priority_legs=priority_legs,
         )
         await self.broker_client.ensure_connected()
@@ -570,9 +627,38 @@ class AnalyzerService:
             active_streams=self.corridor.active_stream_count,
         )
 
+    def _normalize_strategy_filters(
+        self,
+        min_net_credit_dollars: float | None,
+        min_ror_pct: float | None,
+    ) -> tuple[float | None, float | None]:
+        def _clean(field_name: str, val: float | None, upper: float | None = None) -> float | None:
+            if val is None:
+                return None
+            if not math.isfinite(val) or val < 0.0 or (upper is not None and val > upper):
+                bound = f"[0, {upper:g}]" if upper is not None else ">= 0"
+                raise InvalidRequestError(f"{field_name} must be finite and {bound} (got {val!r}).")
+            return None if val == 0.0 else val
+
+        return (
+            _clean("min_net_credit_dollars", min_net_credit_dollars),
+            _clean("min_ror_pct", min_ror_pct, upper=1000.0),
+        )
+
     def suggest_strategies(self, payload: StrategySuggestRequest) -> StrategySuggestResponse:
+        min_credit, min_ror = self._normalize_strategy_filters(
+            payload.min_net_credit_dollars, payload.min_ror_pct
+        )
         symbol, snap_id, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
-        walls = compute_walls(enriched, top_n=self.settings.analytics.top_walls_count)
+        scoped_df, explicit_filter = self._isolate_dashboard_dte(
+            enriched,
+            dte_min=payload.dte_min,
+            dte_max=payload.dte_max,
+            preserve_expiry=payload.target_expiry,
+        )
+        if explicit_filter and scoped_df.height == 0:
+            raise InvalidRequestError(f"No contracts found in requested DTE range for {symbol}")
+        walls = compute_walls(scoped_df, top_n=self.settings.analytics.top_walls_count)
         kinds: tuple[PresetStrategyKind, ...] = (
             (payload.strategy_kind,) if payload.strategy_kind is not None else PRESET_STRATEGIES
         )
@@ -582,7 +668,7 @@ class AnalyzerService:
             try:
                 evaluations.append(
                     evaluate_strategy_engine(
-                        enriched,
+                        scoped_df,
                         strategy_kind=kind,
                         target_expiry=payload.target_expiry,
                         days_forward=payload.days_forward,
@@ -590,6 +676,8 @@ class AnalyzerService:
                         qty_multiplier=payload.qty_multiplier,
                         risk_free_rate=self.settings.analytics.risk_free_rate,
                         walls_report=walls,
+                        min_net_credit_dollars=min_credit,
+                        min_ror_pct=min_ror,
                     )
                 )
             except ValueError as exc:
@@ -608,10 +696,25 @@ class AnalyzerService:
         )
 
     def evaluate_strategy(self, payload: StrategyEvaluateRequest) -> StrategyEvaluationResponse:
-        _, _, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
+        min_credit, min_ror = self._normalize_strategy_filters(
+            payload.min_net_credit_dollars, payload.min_ror_pct
+        )
+        symbol, _, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
+        if payload.dte_min is not None or payload.dte_max is not None:
+            scoped_df, _ = self._isolate_dashboard_dte(
+                enriched, dte_min=payload.dte_min, dte_max=payload.dte_max
+            )
+            if scoped_df.height == 0:
+                raise InvalidRequestError(f"No contracts found in requested DTE range for {symbol}")
+        elif payload.legs is None:
+            scoped_df, _ = self._isolate_dashboard_dte(
+                enriched, preserve_expiry=payload.target_expiry
+            )
+        else:
+            scoped_df = enriched
         try:
             return evaluate_strategy_engine(
-                enriched,
+                scoped_df,
                 strategy_kind=payload.strategy_kind,
                 target_expiry=payload.target_expiry,
                 legs=payload.legs,
@@ -619,12 +722,29 @@ class AnalyzerService:
                 iv_shift=payload.iv_shift,
                 qty_multiplier=payload.qty_multiplier,
                 risk_free_rate=self.settings.analytics.risk_free_rate,
+                min_net_credit_dollars=min_credit,
+                min_ror_pct=min_ror,
             )
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
 
     async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
         symbol = self.validate_ticker(req.ticker)
+        oc = self.settings.options_chain
+        eff_dte_min = oc.dte_min if req.dte_min is None else int(req.dte_min)
+        eff_dte_max = oc.dte_max if req.dte_max is None else int(req.dte_max)
+        if eff_dte_min > eff_dte_max:
+            raise InvalidRequestError("dte_min must be <= dte_max")
+        disp_min = eff_dte_min if req.display_dte_min is None else int(req.display_dte_min)
+        disp_max = eff_dte_max if req.display_dte_max is None else int(req.display_dte_max)
+        if disp_min > disp_max:
+            raise InvalidRequestError("display_dte_min must be <= display_dte_max")
+        include_short = (
+            oc.include_short_dte_for_backtest
+            if req.include_short_dte is None
+            else bool(req.include_short_dte)
+        )
+
         if not await self.acquire_refresh(f"refresh:{symbol}"):
             raise self._busy_error()
         try:
@@ -641,6 +761,7 @@ class AnalyzerService:
                 strike_step=req.strike_step,
                 dte_min=req.dte_min,
                 dte_max=req.dte_max,
+                include_short_dte=include_short,
             )
             raw_df = pl.DataFrame(
                 [r.model_dump() for r in fetch_res.rows],
@@ -667,12 +788,12 @@ class AnalyzerService:
             avail_steps = (
                 list(plan.available_strike_steps)
                 if plan.available_strike_steps
-                else list(self.settings.options_chain.allowed_strike_steps)
+                else list(oc.allowed_strike_steps)
             )
             avail_ranges = (
                 list(plan.available_range_pcts)
                 if plan.available_range_pcts
-                else list(self.settings.options_chain.allowed_range_pcts)
+                else list(oc.allowed_range_pcts)
             )
             validated_count = (
                 int(plan.exchange_validated_strike_count)
@@ -693,8 +814,17 @@ class AnalyzerService:
                 underlying_conid=plan.underlying.conid,
             )
             notices.extend(quote_notices)
+
+            display_df = enriched_df.filter(pl.col("dte").is_between(disp_min, disp_max))
+            if display_df.height == 0 and enriched_df.height > 0:
+                display_df = enriched_df
+                notices.append(
+                    f"No contracts in display DTE window [{disp_min}, {disp_max}]; "
+                    f"showing all {enriched_df.height} archived contract(s)."
+                )
+            same_slice = display_df.height == enriched_df.height
             return self.build_analytics_payload(
-                enriched_df,
+                display_df,
                 source="LIVE_REFRESH",
                 notices=notices,
                 range_pct=plan.range_pct,
@@ -705,9 +835,9 @@ class AnalyzerService:
                 available_strike_steps=avail_steps,
                 available_range_pcts=avail_ranges,
                 spot_source=meta.spot_source,
-                quoted_contract_count=meta.quoted_contract_count,
-                quote_coverage=meta.quote_coverage,
-                prior_close_only_count=meta.prior_close_only_count,
+                quoted_contract_count=meta.quoted_contract_count if same_slice else None,
+                quote_coverage=meta.quote_coverage if same_slice else None,
+                prior_close_only_count=meta.prior_close_only_count if same_slice else None,
             )
         finally:
             self.release_refresh()

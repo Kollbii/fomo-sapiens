@@ -14,12 +14,17 @@ from src.analytics.strategies import StrategyLegInput
 from src.core.config import PaperTrackerSettings, Settings
 from src.core.exceptions import (
     BacktestValidationError,
+    InvalidRequestError,
     InvalidTickerError,
     SnapshotNotFoundError,
 )
 from src.services.analyzer import AnalyzerService
 from src.services.backtest import list_backtest_entries, run_backtest
-from src.services.schemas import BacktestRunRequest
+from src.services.schemas import (
+    BacktestRunRequest,
+    StrategyEvaluateRequest,
+    StrategySuggestRequest,
+)
 from src.storage.csv_repository import CSVRepository
 from src.storage.schema import OptionContractRow, SpotSource
 
@@ -436,3 +441,231 @@ def test_run_backtest_validation_errors(tmp_path: Path) -> None:
 
     with pytest.raises(InvalidTickerError):
         run_backtest(svc, BacktestRunRequest(mode="SYSTEMATIC", ticker="BAD!"))
+
+
+def _seed_entry_filter_history(svc: AnalyzerService) -> dict[str, str]:
+    """Seed Wed Nov 4..Fri Nov 6 2026 (same ISO week 45) with varying spread credits."""
+    # Day 1 (Wed Nov 4): 140/135 credit=$20 (RoR ~4.17%), 140/130 credit=$90 (RoR ~9.89%),
+    #                    135/130 credit=$70 (RoR ~16.28%) -> all < $100 and < 20% RoR.
+    # Day 2 (Thu Nov 5): 140/135 credit=$140 (max loss $360, RoR ~38.89%).
+    # Day 3 (Fri Nov 6): 140/135 credit=$80.
+    schedule = [
+        ("NVDA_20261104_190000", "2026-11-04T19:00:00Z", "2026-11-04", 145.0, 2.20, 2.00),
+        ("NVDA_20261105_190000", "2026-11-05T19:00:00Z", "2026-11-05", 145.0, 3.40, 2.00),
+        ("NVDA_20261106_190000", "2026-11-06T19:00:00Z", "2026-11-06", 146.0, 2.80, 2.00),
+    ]
+    ids: dict[str, str] = {}
+    for snap_id, ts_utc, mkt_date, spot, sp_mid, lp_mid in schedule:
+        svc.repo.save_snapshot(
+            "NVDA",
+            _chain_for_day(
+                snapshot_id=snap_id,
+                ts_utc=ts_utc,
+                market_date=mkt_date,
+                spot=spot,
+                short_put_mid=sp_mid,
+                long_put_mid=lp_mid,
+                market_data_type=3,
+                include_quotes=True,
+            ),
+            spot_source="MID",
+        )
+        ids[mkt_date] = snap_id
+    return ids
+
+
+def test_run_backtest_entry_filters_next_day_retry_and_disable_caps(tmp_path: Path) -> None:
+    svc = _make_svc(tmp_path)
+    ids = _seed_entry_filter_history(svc)
+
+    # Default config: min_entry_credit_dollars=100.0, min_entry_ror_pct=None.
+    default_req = BacktestRunRequest(mode="SYSTEMATIC", ticker="NVDA")
+    assert default_req.config.min_entry_credit_dollars == 100.0
+    assert default_req.config.min_entry_ror_pct is None
+
+    # Wed Nov 4 ($60/$70 < $100 even with qty=5) is skipped and retried next day Thu Nov 5 ($140).
+    retry_req = BacktestRunRequest.model_validate(
+        {
+            "mode": "SYSTEMATIC",
+            "ticker": "NVDA",
+            "entry_cadence": "WEEKLY_DAY",
+            "entry_weekday": 2,  # Wednesday
+            "qty": 5,
+            "target_dte_min": 20,
+            "target_dte_max": 60,
+            "profit_target_pct": None,
+            "stop_loss_pct": None,
+        }
+    )
+    retry_res = run_backtest(svc, retry_req)
+    assert retry_res.simulation.summary.skipped_entries_count == 1
+    assert retry_res.simulation.summary.skipped_by_reason == {"BELOW_MIN_CREDIT": 1}
+    assert retry_res.simulation.summary.trade_count == 1
+    assert retry_res.simulation.trades[0].entry_date == "2026-11-05"
+    assert retry_res.simulation.trades[0].entry_snapshot_id == ids["2026-11-05"]
+
+    # High min_entry_ror_pct filters Wed Nov 4 and enters Thu Nov 5 (~38.89% RoR).
+    ror_req = BacktestRunRequest.model_validate(
+        {
+            "mode": "SYSTEMATIC",
+            "ticker": "NVDA",
+            "entry_cadence": "WEEKLY_DAY",
+            "entry_weekday": 2,
+            "target_dte_min": 20,
+            "target_dte_max": 60,
+            "min_entry_credit_dollars": 0.0,
+            "min_entry_ror_pct": 25.0,
+        }
+    )
+    ror_res = run_backtest(svc, ror_req)
+    assert ror_res.simulation.summary.skipped_entries_count == 1
+    assert ror_res.simulation.summary.skipped_by_reason == {"BELOW_MIN_ROR": 1}
+    assert len(ror_res.simulation.trades) == 1
+    assert ror_res.simulation.trades[0].entry_date == "2026-11-05"
+
+    # Disabling caps via 0.0 or None lets Wed Nov 4 enter immediately with zero skips.
+    for disabled_cfg in (
+        BacktestConfig(
+            entry_cadence="WEEKLY_DAY",
+            entry_weekday=2,
+            target_dte_min=20,
+            target_dte_max=60,
+            min_entry_credit_dollars=0.0,
+            min_entry_ror_pct=0.0,
+        ),
+        BacktestConfig(
+            entry_cadence="WEEKLY_DAY",
+            entry_weekday=2,
+            target_dte_min=20,
+            target_dte_max=60,
+            min_entry_credit_dollars=None,
+            min_entry_ror_pct=None,
+        ),
+    ):
+        dis_res = run_backtest(
+            svc, BacktestRunRequest(mode="SYSTEMATIC", ticker="NVDA", config=disabled_cfg)
+        )
+        assert dis_res.simulation.summary.skipped_entries_count == 0
+        assert dis_res.simulation.summary.skipped_by_reason == {}
+        assert dis_res.simulation.trades[0].entry_date == "2026-11-04"
+
+    # SINGLE_TRADE AUTO_BUILD raises BacktestValidationError (HTTP 422) when entry fails cap.
+    with pytest.raises(BacktestValidationError, match="min|credit|RoR|below"):
+        run_backtest(
+            svc,
+            BacktestRunRequest(
+                mode="SINGLE_TRADE",
+                ticker="NVDA",
+                source="AUTO_BUILD",
+                entry_snapshot_id=ids["2026-11-04"],
+                config=BacktestConfig(
+                    target_dte_min=20,
+                    target_dte_max=60,
+                    min_entry_credit_dollars=100.0,
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_kwargs",
+    [
+        {"min_entry_credit_dollars": -1.0},
+        {"min_entry_credit_dollars": float("nan")},
+        {"min_entry_credit_dollars": float("inf")},
+        {"min_entry_ror_pct": -0.5},
+        {"min_entry_ror_pct": 1000.1},
+        {"min_entry_ror_pct": float("nan")},
+        {"min_entry_ror_pct": float("-inf")},
+    ],
+)
+def test_run_backtest_rejects_invalid_entry_filter_values(
+    tmp_path: Path, bad_kwargs: dict[str, Any]
+) -> None:
+    svc = _make_svc(tmp_path)
+    _seed_entry_filter_history(svc)
+
+    # Flat and nested Pydantic request validation reject negative, out-of-range, and non-finite.
+    with pytest.raises(ValidationError):
+        BacktestRunRequest.model_validate({"mode": "SYSTEMATIC", "ticker": "NVDA", **bad_kwargs})
+    with pytest.raises(ValidationError):
+        BacktestRunRequest.model_validate(
+            {"mode": "SYSTEMATIC", "ticker": "NVDA", "config": bad_kwargs}
+        )
+
+    # Defensive service-layer check rejects model_construct bypasses with BacktestValidationError.
+    bypass_cfg = BacktestConfig.model_construct(None, **bad_kwargs)
+    bypass_req = BacktestRunRequest.model_construct(
+        mode="SYSTEMATIC",
+        ticker="NVDA",
+        config=bypass_cfg,
+    )
+    with pytest.raises(BacktestValidationError):
+        run_backtest(svc, bypass_req)
+
+
+def test_strategy_lab_optional_entry_filters_keep_defaults_and_validate(tmp_path: Path) -> None:
+    svc = _make_svc(tmp_path)
+    ids = _seed_entry_filter_history(svc)
+
+    # Default requests behave identically (no filter applied unless explicitly passed).
+    default_suggest = svc.suggest_strategies(
+        StrategySuggestRequest(ticker="NVDA", snapshot_id=ids["2026-11-04"])
+    )
+    assert any(ev.strategy_kind == "BULL_PUT_SPREAD" for ev in default_suggest.evaluations)
+
+    default_eval = svc.evaluate_strategy(
+        StrategyEvaluateRequest(
+            ticker="NVDA",
+            snapshot_id=ids["2026-11-04"],
+            strategy_kind="BULL_PUT_SPREAD",
+        )
+    )
+    assert default_eval.strategy_kind == "BULL_PUT_SPREAD"
+
+    # Explicit min_net_credit_dollars=100 rejects $60/$70 Wed Nov 4 bull put spread with 422.
+    with pytest.raises(InvalidRequestError):
+        svc.suggest_strategies(
+            StrategySuggestRequest(
+                ticker="NVDA",
+                snapshot_id=ids["2026-11-04"],
+                strategy_kind="BULL_PUT_SPREAD",
+                min_net_credit_dollars=100.0,
+            )
+        )
+
+    with pytest.raises(InvalidRequestError):
+        svc.evaluate_strategy(
+            StrategyEvaluateRequest(
+                ticker="NVDA",
+                snapshot_id=ids["2026-11-04"],
+                strategy_kind="BULL_PUT_SPREAD",
+                min_ror_pct=25.0,
+            )
+        )
+
+    # 0.0 disables the filter cleanly.
+    zero_eval = svc.evaluate_strategy(
+        StrategyEvaluateRequest(
+            ticker="NVDA",
+            snapshot_id=ids["2026-11-04"],
+            strategy_kind="BULL_PUT_SPREAD",
+            min_net_credit_dollars=0.0,
+            min_ror_pct=0.0,
+        )
+    )
+    assert zero_eval.strategy_kind == "BULL_PUT_SPREAD"
+
+    # Invalid values rejected by Pydantic and service defensive validation.
+    with pytest.raises(ValidationError):
+        StrategySuggestRequest(ticker="NVDA", min_net_credit_dollars=-5.0)
+    with pytest.raises(ValidationError):
+        StrategyEvaluateRequest(ticker="NVDA", min_ror_pct=float("nan"))
+    with pytest.raises(InvalidRequestError):
+        svc.evaluate_strategy(
+            StrategyEvaluateRequest.model_construct(
+                ticker="NVDA",
+                snapshot_id=ids["2026-11-04"],
+                min_net_credit_dollars=float("inf"),
+            )
+        )
