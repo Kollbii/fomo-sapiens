@@ -42,6 +42,7 @@ from src.broker.fetcher import (
 from src.broker.parser import extract_model_greeks, extract_open_interest, has_usable_quote
 from src.core.config import Settings
 from src.core.exceptions import (
+    CorridorBusyError,
     GatewayConnectionError,
     OptionChainFetchError,
     PacingViolationError,
@@ -52,6 +53,11 @@ from src.storage.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+CORRIDOR_BUSY_MESSAGE = (
+    "Live Wall Corridor stream not started: another IBKR operation (chain refresh, batch "
+    "load or ledger sync) holds the market-data line budget. Retry once it finishes."
+)
 
 
 @dataclass
@@ -568,8 +574,23 @@ class CorridorQuoteService:
         is_disconnected: Callable[[], bool | Awaitable[bool]] | None = None,
         max_frames: int | None = None,
         on_frame: Callable[[CorridorQuoteFrame], None] | None = None,
+        is_busy: Callable[[], bool] | None = None,
     ) -> AsyncGenerator[CorridorQuoteFrame, None]:
-        """Continuously stream throttled Wall Corridor quotes until stop/disconnect/error."""
+        """Continuously stream throttled Wall Corridor quotes until stop/disconnect/error.
+
+        The generator subscribes lazily (first `anext`). `is_busy` (injected by the service
+        layer, e.g. `refresh_lock.locked`) is re-checked when the generator starts and again
+        right after the session is registered, with no `await` before the first `reqMktData`.
+        A lock holder that acquires later therefore always sees this session and stops it via
+        `stop_all_streams()`; one that acquired earlier makes this check raise
+        `CorridorBusyError` with zero subscriptions opened.
+        """
+
+        def _raise_if_busy() -> None:
+            if is_busy is not None and is_busy():
+                raise CorridorBusyError(CORRIDOR_BUSY_MESSAGE)
+
+        _raise_if_busy()
         # Ensure zero overlapping live streams so IBKR line count stays <= 90
         await self.stop_all_streams()
 
@@ -590,6 +611,9 @@ class CorridorQuoteService:
         self._active_sessions[session.session_id] = session
 
         try:
+            # Same synchronous step as the registration above: nothing can acquire the
+            # refresh lock between this check and the first `reqMktData`.
+            _raise_if_busy()
             session, option_tickers, spot_ticker, notices = await self._poll_initial_corridor(
                 session,
                 option_contracts,

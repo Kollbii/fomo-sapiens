@@ -91,7 +91,7 @@ IBKR uses sentinel numbers (`-1.0`, `float('nan')`, `2147483647`) for missing va
 ---
 
 ## 4. Snapshot Metadata Index (`data/metadata/snapshot_index.json`)
-Maintained automatically by `CSVRepository` for instant UI history dropdown rendering:
+Maintained automatically by `CSVRepository` for instant UI history dropdown rendering (`CSVRepository.latest_snapshots(tickers)` returns the newest `SnapshotMeta` per ticker from one index read; tickers without data are omitted):
 
     {
       "updated_at_utc": "2026-11-11T15:50:04Z",

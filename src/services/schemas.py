@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -62,6 +62,7 @@ from src.broker.corridor import (
     CorridorLegRef,
     CorridorQuoteFrame,
 )
+from src.core.config import WATCHLIST_MAX_SIZE_LIMIT
 from src.storage.paper_trade_store import (
     MAX_PAPER_TRADE_LEGS,
     PaperQuoteRecord,
@@ -82,6 +83,11 @@ __all__ = [
     "BacktestSimulationResult",
     "BacktestSingleTradeSource",
     "BacktestTradeRecord",
+    "BatchRefreshRequest",
+    "BatchRefreshStatus",
+    "BatchState",
+    "BatchTickerResult",
+    "BatchTickerState",
     "ChainAnalyticsResponse",
     "ChainMetadataPayload",
     "ClosePriceMode",
@@ -116,6 +122,7 @@ __all__ = [
     "LegQuoteSource",
     "MAX_LEDGER_IMPORT_BYTES",
     "MAX_PAPER_TRADE_LEGS",
+    "MAX_TICKER_INPUT_CHARS",
     "PaperQuoteRecord",
     "PaperTrade",
     "PaperTradeLeg",
@@ -136,6 +143,9 @@ __all__ = [
     "TpSlBasis",
     "TradeDailyStep",
     "TradeStatus",
+    "WatchlistEntry",
+    "WatchlistResponse",
+    "WatchlistTickerRequest",
 ]
 
 
@@ -551,3 +561,103 @@ class BacktestRunResponse(BaseModel):
     history_snapshot_count: int
     daily_bar_count: int
     warnings: list[str] = Field(default_factory=list)
+
+
+# ------------------------------------------------------------------ watchlist & batch refresh
+MAX_TICKER_INPUT_CHARS = 32  # generous bound on raw input; `TickerValidator` is the authority
+
+TickerInput = Annotated[str, Field(min_length=1, max_length=MAX_TICKER_INPUT_CHARS)]
+BatchState = Literal["running", "cancelling", "completed", "cancelled"]
+BatchTickerState = Literal["queued", "running", "done", "failed", "cancelled"]
+
+
+class WatchlistEntry(BaseModel):
+    """One watchlist row with archive freshness (from the snapshot index, no IBKR call)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    latest_snapshot_id: str | None = None
+    latest_snapshot_utc: str | None = None
+    is_today_et: bool = False
+
+
+class WatchlistResponse(BaseModel):
+    """Response for `GET /api/watchlist` and the watchlist add / remove routes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: list[str]
+    entries: list[WatchlistEntry]
+    count: int
+    max_size: int
+    is_full: bool
+    allow_custom: bool
+    writable: bool
+    notice: str | None = None
+    today_et: str
+    ticker: str | None = None
+    changed: bool = False
+
+
+class WatchlistTickerRequest(BaseModel):
+    """Request body for `POST /api/watchlist/tickers`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: TickerInput
+
+
+class BatchRefreshRequest(BaseModel):
+    """Request body for `POST /api/refresh/batch` (`strike_step` is always Auto for batches).
+
+    `tickers` is bounded here by the absolute config limit; the service enforces
+    `watchlist.max_size` after validation + dedupe.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tickers: list[TickerInput] = Field(min_length=1, max_length=WATCHLIST_MAX_SIZE_LIMIT)
+    range_pct: float = Field(default=0.20, gt=0.0, le=1.0)
+    dte_min: int | None = Field(default=None, ge=0, le=120)
+    dte_max: int | None = Field(default=None, ge=1, le=120)
+    include_short_dte: bool | None = None
+
+    @model_validator(mode="after")
+    def _validate_dte_bounds(self) -> BatchRefreshRequest:
+        if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
+            raise ValueError("dte_min must be <= dte_max")
+        return self
+
+
+class BatchTickerResult(BaseModel):
+    """Per-ticker progress of a batch refresh; `error` is always a sanitized message."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ticker: str
+    state: BatchTickerState
+    snapshot_id: str | None = None
+    contract_count: int | None = None
+    error_code: str | None = None
+    error: str | None = None
+    duration_sec: float | None = None
+    notices: list[str] = Field(default_factory=list)
+
+
+class BatchRefreshStatus(BaseModel):
+    """Status of the running or most recent batch refresh (in memory only)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    batch_id: str
+    state: BatchState
+    total: int
+    done_count: int
+    failed_count: int
+    cancelled_count: int
+    current_ticker: str | None = None
+    started_at_utc: str
+    finished_at_utc: str | None = None
+    notices: list[str] = Field(default_factory=list)
+    items: list[BatchTickerResult]

@@ -31,6 +31,14 @@ class OptionChainFetchError(AnalyzerError):
     """Raised when option chain parameters or market data cannot be fetched."""
 
 
+class CorridorBusyError(OptionChainFetchError):
+    """Raised when a Corridor stream would subscribe while another IBKR pull holds the lock.
+
+    Subclasses `OptionChainFetchError` so the SSE route reports it through its existing
+    `event: error` (`CORRIDOR_STREAM_ERROR`) path; no market-data line is opened.
+    """
+
+
 class PacingViolationError(AnalyzerError):
     """Raised when IBKR pacing / market-data line limits would be violated."""
 
@@ -62,6 +70,10 @@ class RefreshBusyError(AnalyzerError):
         super().__init__(message)
         self.owner = owner
         self.retry_after_sec = retry_after_sec
+
+
+class BatchNotFoundError(AnalyzerError):
+    """Raised when a batch refresh id is unknown (only the latest batch is kept in memory)."""
 
 
 class DuplicatePaperTradeError(InvalidRequestError):

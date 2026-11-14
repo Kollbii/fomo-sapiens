@@ -11,7 +11,7 @@ Coding agents must enforce strict boundaries between the 6 layers in `src/` (enf
 2. **`src/storage/`:** Schema definitions (`schema.py`, incl. shared domain literals `GreeksSource`, `OptionRight`, `WallBasis`, `SpotSource`; plus `ledger_schema.py` execution/position models), snapshot usability (`quality.py`), daily-bar selector (`backtest_store.py`), and CSV/JSON persistence (`csv_repository.py`, `paper_trade_store.py`, `ledger_repository.py`). Must never import `ib_async` or `fastapi`.
 3. **`src/broker/`:** `ib-async` socket management, contract qualification, paged/exact-leg fetching, raw tick parsing, corridor subscriptions, Flex Web Service v3 (`flex.py`), and opt-in scoped ledger sync (`ledger_sync.py`). Never imports `analytics`, `services`, or `fastapi`: wall anchors (`WallAnchors`) are passed in and Greeks fallback is injected (`GreeksFallback` protocol).
 4. **`src/analytics/`:** Pure, deterministic quantitative functions operating on `polars.DataFrame` inputs and returning typed Pydantic/dict payloads or `polars.DataFrame` outputs (`bsm_fallback.py`, `walls.py`, `anomalies.py`, `term_greeks.py`, `strategies/`, `ledger/`, `backtest/`). Zero network or disk I/O; may import `src.storage.{schema,ledger_schema,quality,backtest_store}` types/pure helpers only.
-5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `ledger.py` `LedgerService`, `paper_trades.py` `PaperTradeService`, `backtest.py`, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
+5. **`src/services/`:** Application orchestration (`analyzer.py` `AnalyzerService`, `corridor.py` glue, `ledger.py` `LedgerService`, `watchlist.py` `WatchlistService`, `batch_refresh.py` `BatchRefreshService`, `error_messages.py` `describe_error`, `paper_trades.py` `PaperTradeService`, `backtest.py`, `schemas.py` request/response models). The only layer composing broker + storage + analytics. Framework-agnostic: raises domain exceptions, never `HTTPException`.
 6. **`src/web/`:** FastAPI routes (`api.py`, `backtest_api.py`), exception-to-JSON mapping (`errors.py`), Jinja2 templates, and static assets. Imports only `src.core` and `src.services`.
 
 ---
@@ -96,9 +96,11 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies contract-filtered BSM enrichment, chain + tracked fallback leg pricing (`PriceBasis`, `ClosePriceMode`), `TpSlBasis` rules, expiry settlement cutoffs (`$0` closing fees on expired legs), `SYSTEMATIC` cadences, `SINGLE_TRADE` replay, and portfolio metrics.
 21. **`tests/unit/test_analyzer_concurrency.py`, `test_paper_trades_service.py`, `test_backtest_service.py`:**
    - Verifies `AnalyzerService.refresh_lock` (`RefreshBusyError` on overlapping refreshes/corridor/MTM/SSE), pre-refresh `stop_all_streams()`, `fetch_exact_contracts` / `PaperTradeService` follow-up quoting, and `services/backtest.py` entry listing + `SYSTEMATIC`/`SINGLE_TRADE` orchestration.
-22. **`tests/unit/test_watchlist_store.py`:**
+22. **`tests/unit/test_watchlist_service.py` & `test_batch_refresh_service.py`:**
+   - Verify `WatchlistService` (non-blocking `runner`, freshness via one `CSVRepository.latest_snapshots` read, domain errors propagate) and `BatchRefreshService` (sequential single batch, `refresh_lock` held for the whole batch with `batch_owner` labels, sanitized per-ticker errors, cooperative cancel, `aclose()` shutdown, `BatchNotFoundError`).
+23. **`tests/unit/test_watchlist_store.py`:**
    - Verifies `WatchlistStore` lazy seed, add/remove, dedupe/order, `watchlist.max_size` cap (`WatchlistCapError`), `allow_custom_ticker` guard, corrupt-file notice + `watchlist.corrupt.json` backup, empty-list persistence, and atomic writes.
-23. **`tests/integration/test_backtest_api.py`:**
+24. **`tests/integration/test_backtest_api.py`:**
    - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
 ---

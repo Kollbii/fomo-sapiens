@@ -7,7 +7,7 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -215,6 +215,18 @@ class CSVRepository:
         if not entry:
             return []
         return [SnapshotMeta.model_validate(s) for s in entry["snapshots"]]
+
+    def latest_snapshots(self, tickers: Iterable[str]) -> dict[str, SnapshotMeta]:
+        """Newest `SnapshotMeta` per ticker from ONE index read (tickers without data omitted)."""
+        index_tickers = self.load_index().get("tickers", {})
+        out: dict[str, SnapshotMeta] = {}
+        for raw in tickers:
+            symbol = TickerValidator.validate(raw)
+            entry = index_tickers.get(symbol)
+            snaps = entry.get("snapshots") if isinstance(entry, dict) else None
+            if snaps:
+                out[symbol] = SnapshotMeta.model_validate(snaps[0])  # index is newest-first
+        return out
 
     # ------------------------------------------------------------------ index
     def _meta_from_frame(

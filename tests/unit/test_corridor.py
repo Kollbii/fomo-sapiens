@@ -26,7 +26,7 @@ from src.broker.corridor import (
 )
 from src.broker.fetcher import PAGE_PACING_CHUNK_SIZE, PAGE_PACING_PAUSE_SEC
 from src.core.config import IBKRSettings, Settings
-from src.core.exceptions import GatewayConnectionError, PacingViolationError
+from src.core.exceptions import CorridorBusyError, GatewayConnectionError, PacingViolationError
 from src.services.corridor import make_bsm_greeks_fallback, wall_anchors_from_report
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow
 from tests.support.aio import noop_sleep, run_coro
@@ -514,6 +514,80 @@ def test_stream_corridor_quotes_lifecycle_cleanup_and_disconnect() -> None:
     with pytest.raises(GatewayConnectionError):
         run_coro(anext(gen3))
     assert len(fake_ib.cancelled) == frame3.subscribed_count
+    assert service.active_stream_count == 0
+
+
+def test_stream_rechecks_busy_on_first_read_and_opens_zero_lines() -> None:
+    """Lock acquired between opening the stream and its first read -> no `reqMktData` at all."""
+    df = _build_chain_df(strikes=[85.0, 90.0, 100.0, 110.0, 115.0], put_wall=90.0, call_wall=110.0)
+    fake_ib = _FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
+    busy = {"locked": False}
+    gen = service.stream_corridor_quotes(
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
+        snapshot_id="NVDA_20261111_160000",
+        is_busy=lambda: busy["locked"],
+    )
+    busy["locked"] = True  # e.g. a batch took `refresh_lock` before the SSE body is iterated
+    with pytest.raises(CorridorBusyError, match="market-data line budget"):
+        run_coro(anext(gen))
+    assert fake_ib.subscribed == []
+    assert fake_ib.cancelled == []
+    assert fake_ib.qualify_calls == 0
+    assert service.active_stream_count == 0
+    with pytest.raises(StopAsyncIteration):  # generator is finished, not resumable
+        run_coro(anext(gen))
+
+
+def test_stream_busy_flip_during_preparation_is_caught_before_subscribe() -> None:
+    """Busy flips after the start check (during `_prepare_contracts` awaits) -> still 0 lines."""
+    df = _build_chain_df(strikes=[85.0, 90.0, 100.0, 110.0, 115.0], put_wall=90.0, call_wall=110.0)
+    fake_ib = _FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
+    answers = iter([False, True])
+    checks: list[bool] = []
+
+    def _is_busy() -> bool:
+        checks.append(next(answers))
+        return checks[-1]
+
+    gen = service.stream_corridor_quotes(
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
+        snapshot_id="NVDA_20261111_160000",
+        is_busy=_is_busy,
+    )
+    with pytest.raises(CorridorBusyError):
+        run_coro(anext(gen))
+    assert checks == [False, True]
+    assert fake_ib.subscribed == []
+    assert fake_ib.cancelled == []
+    assert service.active_stream_count == 0
+
+
+def test_stream_with_idle_busy_check_is_unchanged_and_lock_holder_stop_still_works() -> None:
+    df = _build_chain_df(strikes=[85.0, 90.0, 100.0, 110.0, 115.0], put_wall=90.0, call_wall=110.0)
+    fake_ib = _FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
+    busy = {"locked": False}
+    gen = service.stream_corridor_quotes(
+        _select(df, target_expiry="2026-12-19", window_strikes=2, max_contracts=30),
+        snapshot_id="NVDA_20261111_160000",
+        is_busy=lambda: busy["locked"],
+    )
+    first = run_coro(anext(gen))
+    assert first.sequence == 1 and first.mode == "STREAM"
+    assert len(fake_ib.subscribed) == first.subscribed_count > 0
+    assert service.active_stream_count == 1
+    # A lock holder that acquires AFTER subscription sees the session and stops it (existing
+    # path): the stream ends normally, it does not raise the busy error.
+    busy["locked"] = True
+    assert run_coro(service.stop_all_streams()) == first.subscribed_count
+    with pytest.raises(StopAsyncIteration):
+        run_coro(anext(gen))
+    assert len(fake_ib.cancelled) == len(fake_ib.subscribed)
     assert service.active_stream_count == 0
 
 

@@ -416,3 +416,74 @@ def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Pat
 
     run_coro(_exercise())
     assert mock_ib.isConnected() is False
+
+
+def test_corridor_stream_refuses_when_lock_taken_before_first_read(tmp_path: Path) -> None:
+    """Race: SSE opened while idle, then a batch/refresh takes `refresh_lock` before the body is
+    iterated -> the stream re-checks on subscribe, opens zero lines and emits SSE `error`."""
+    app, _repo, mock_ib = _build_corridor_test_app(tmp_path, offline=False)
+
+    class _FakeRequest:
+        async def is_disconnected(self) -> bool:
+            return False
+
+    async def _exercise() -> list[tuple[str, dict[str, Any]]]:
+        async with app.router.lifespan_context(app):
+            svc = app.state.service
+            resp = await api_corridor_stream(
+                request=_FakeRequest(),  # type: ignore[arg-type]
+                ticker="NVDA",
+                snapshot_id=None,
+                target_expiry="2026-12-19",
+                window_strikes=2,
+                max_contracts=30,
+                priority_legs=None,
+                max_frames=2,
+                svc=svc,
+            )
+            # Batch takes the lock in the gap; its one-time Corridor stop sees 0 streams.
+            assert await svc.acquire_refresh("batch:1/3:NVDA")
+            assert await svc._stop_corridor(reason="batch_refresh") == 0
+            events: list[tuple[str, dict[str, Any]]] = []
+            try:
+                async for raw_chunk in resp.body_iterator:
+                    text_chunk = (
+                        raw_chunk.decode("utf-8")
+                        if isinstance(raw_chunk, bytes)
+                        else str(raw_chunk)
+                    )
+                    events.append(_parse_sse_block(text_chunk))
+                assert mock_ib.subscribed == []  # zero market-data lines opened
+                assert mock_ib.cancelled == []
+                assert svc.corridor.active_stream_count == 0
+                assert svc.refresh_owner == "batch:1/3:NVDA"  # holder untouched
+            finally:
+                svc.release_refresh()
+
+            # Normal path unchanged once the lock is free again.
+            mock_ib.subscribed.clear()
+            mock_ib.cancelled.clear()
+            resp_ok = await api_corridor_stream(
+                request=_FakeRequest(),  # type: ignore[arg-type]
+                ticker="NVDA",
+                snapshot_id=None,
+                target_expiry="2026-12-19",
+                window_strikes=2,
+                max_contracts=30,
+                priority_legs=None,
+                max_frames=1,
+                svc=svc,
+            )
+            ok_events = [
+                _parse_sse_block(c.decode("utf-8") if isinstance(c, bytes) else str(c))
+                async for c in resp_ok.body_iterator
+            ]
+            assert [ev for ev, _ in ok_events] == ["frame"]
+            assert len(mock_ib.subscribed) == ok_events[0][1]["subscribed_count"] > 0
+            assert len(mock_ib.cancelled) == len(mock_ib.subscribed)
+            return events
+
+    events = run_coro(_exercise())
+    assert [ev for ev, _ in events] == ["error"]
+    assert events[0][1]["error_code"] == "CORRIDOR_STREAM_ERROR"
+    assert "market-data line budget" in events[0][1]["message"]
