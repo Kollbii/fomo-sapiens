@@ -485,5 +485,6 @@ def test_corridor_stream_refuses_when_lock_taken_before_first_read(tmp_path: Pat
 
     events = run_coro(_exercise())
     assert [ev for ev, _ in events] == ["error"]
-    assert events[0][1]["error_code"] == "CORRIDOR_STREAM_ERROR"
+    assert events[0][1]["error_code"] == "REFRESH_BUSY"
+    assert events[0][1]["status"] == 409
     assert "market-data line budget" in events[0][1]["message"]

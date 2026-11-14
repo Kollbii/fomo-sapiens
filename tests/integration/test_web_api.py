@@ -175,6 +175,8 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 r_index = await client.get("/")
                 assert r_index.status_code == 200
                 assert "editorial-banner-slot" in r_index.text
+                for seed_sym in Settings().watchlist.hardcoded_tickers:
+                    assert f'"{seed_sym}"' in r_index.text
 
                 r_status = await client.get("/api/status")
                 assert r_status.status_code == 200

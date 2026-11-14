@@ -7,18 +7,22 @@ import json
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Path, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
 from src.core.exceptions import (
+    CorridorBusyError,
     GatewayConnectionError,
     InvalidRequestError,
     OptionChainFetchError,
     PacingViolationError,
 )
 from src.services.analyzer import AnalyzerService
+from src.services.batch_refresh import BATCH_ID_PATTERN, BatchRefreshService
 from src.services.schemas import (
     MAX_LEDGER_IMPORT_BYTES,
+    BatchRefreshRequest,
+    BatchRefreshStatus,
     ChainAnalyticsResponse,
     CorridorLegRef,
     CorridorQuoteFrame,
@@ -39,6 +43,8 @@ from src.services.schemas import (
     StrategyEvaluationResponse,
     StrategySuggestRequest,
     StrategySuggestResponse,
+    WatchlistResponse,
+    WatchlistTickerRequest,
 )
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
@@ -90,6 +96,19 @@ async def get_web_service(request: Request) -> AnalyzerService:
     return svc
 
 
+async def get_batch_service(request: Request) -> BatchRefreshService:
+    """FastAPI dependency returning the application's `BatchRefreshService` instance."""
+    batch: BatchRefreshService | None = getattr(request.app.state, "batch_refresh", None)
+    if batch is None:
+        svc = await get_web_service(request)
+        batch = BatchRefreshService(svc)
+        request.app.state.batch_refresh = batch
+    return batch
+
+
+BatchIdPath = Path(pattern=BATCH_ID_PATTERN)
+
+
 # ------------------------------------------------------------------ routes
 @router.get("/status", response_model=GatewayStatusResponse)
 async def api_status(
@@ -139,6 +158,60 @@ async def api_refresh(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return await svc.refresh_chain(payload)
+
+
+@router.post("/refresh/batch", response_model=BatchRefreshStatus, status_code=202)
+async def api_batch_start(
+    payload: BatchRefreshRequest,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return await batch.start(payload)
+
+
+@router.get("/refresh/batch/current", response_model=BatchRefreshStatus | None)
+async def api_batch_current(
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus | None:
+    return batch.current()
+
+
+@router.get("/refresh/batch/{batch_id}", response_model=BatchRefreshStatus)
+async def api_batch_get(
+    batch_id: str = BatchIdPath,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return batch.get(batch_id)
+
+
+@router.post("/refresh/batch/{batch_id}/cancel", response_model=BatchRefreshStatus)
+async def api_batch_cancel(
+    batch_id: str = BatchIdPath,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return batch.cancel(batch_id)
+
+
+@router.get("/watchlist", response_model=WatchlistResponse)
+async def api_watchlist(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.get_watchlist()
+
+
+@router.post("/watchlist/tickers", response_model=WatchlistResponse)
+async def api_watchlist_add(
+    payload: WatchlistTickerRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.add_ticker(payload.ticker)
+
+
+@router.delete("/watchlist/tickers/{ticker}", response_model=WatchlistResponse)
+async def api_watchlist_remove(
+    ticker: str,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.remove_ticker(ticker)
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)
@@ -208,6 +281,15 @@ async def api_corridor_stream(
                     "message": (
                         f"{exc} — IBKR Gateway connection lost during live corridor stream."
                     ),
+                },
+            )
+        except CorridorBusyError as exc:
+            yield _format_sse_event(
+                "error",
+                {
+                    "error_code": "REFRESH_BUSY",
+                    "status": 409,
+                    "message": str(exc),
                 },
             )
         except (OptionChainFetchError, PacingViolationError) as exc:

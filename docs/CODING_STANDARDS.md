@@ -100,7 +100,9 @@ Every feature phase requires automated tests in `pytest`:
    - Verify `WatchlistService` (non-blocking `runner`, freshness via one `CSVRepository.latest_snapshots` read, domain errors propagate) and `BatchRefreshService` (sequential single batch, `refresh_lock` held for the whole batch with `batch_owner` labels, sanitized per-ticker errors, cooperative cancel, `aclose()` shutdown, `BatchNotFoundError`).
 23. **`tests/unit/test_watchlist_store.py`:**
    - Verifies `WatchlistStore` lazy seed, add/remove, dedupe/order, `watchlist.max_size` cap (`WatchlistCapError`), `allow_custom_ticker` guard, corrupt-file notice + `watchlist.corrupt.json` backup, empty-list persistence, and atomic writes.
-24. **`tests/integration/test_backtest_api.py`:**
+24. **`tests/integration/test_watchlist_api.py`:**
+   - Verifies `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel`, and the `WATCHLIST_FULL` / `STORAGE_UNAVAILABLE` / `BATCH_NOT_FOUND` / `REFRESH_BUSY` / `INVALID_TICKER` error mapping.
+25. **`tests/integration/test_backtest_api.py`:**
    - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
 ---

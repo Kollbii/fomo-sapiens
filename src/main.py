@@ -18,6 +18,7 @@ from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
 from src.core.config import Settings, get_settings
 from src.services.analyzer import AnalyzerService
+from src.services.batch_refresh import BatchRefreshService
 from src.services.ledger import LedgerService
 from src.storage.csv_repository import CSVRepository
 from src.web.api import get_web_service, router
@@ -71,10 +72,17 @@ def create_app(
         ledger_service=ledger_service,
     )
 
+    batch = BatchRefreshService(service)
+
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         app_instance.state.service = service
+        app_instance.state.batch_refresh = batch
         service.ensure_layout()
+        try:
+            await service.watchlist.get_watchlist()
+        except Exception:  # pragma: no cover - defensive
+            logger.warning("watchlist cache priming failed; serving seed list")
         try:
             service.repo.load_index()
         except Exception:  # pragma: no cover - defensive
@@ -90,10 +98,17 @@ def create_app(
             yield
         finally:
             try:
-                await service.stop_corridor_streams()
-            except Exception:  # pragma: no cover - defensive shutdown
-                logger.exception("error stopping corridor streams during shutdown")
-            service.broker_client.disconnect()
+                try:
+                    await batch.aclose()
+                except Exception:  # pragma: no cover - defensive shutdown
+                    logger.exception("error closing batch refresh during shutdown")
+                try:
+                    await service.stop_corridor_streams()
+                except Exception:  # pragma: no cover - defensive shutdown
+                    logger.exception("error stopping corridor streams during shutdown")
+            finally:
+                # Runs even when shutdown is cancelled (CancelledError still propagates).
+                service.broker_client.disconnect()
 
     application = FastAPI(
         title=cfg.app.name,
@@ -101,6 +116,7 @@ def create_app(
         lifespan=lifespan,
     )
     application.state.service = service
+    application.state.batch_refresh = batch
 
     STATIC_DIR.mkdir(parents=True, exist_ok=True)
     TEMPLATES_DIR.mkdir(parents=True, exist_ok=True)
@@ -123,7 +139,9 @@ def create_app(
                 "app_name": svc.settings.app.name,
                 "default_theme": svc.settings.app.default_theme,
                 "default_ticker": svc.settings.watchlist.default_ticker,
-                "watchlist": list(svc.settings.watchlist.hardcoded_tickers),
+                "watchlist": svc.watchlist.cached_tickers(),
+                "watchlist_max_size": svc.watchlist.max_size,
+                "watchlist_allow_custom": svc.watchlist.allow_custom,
                 "default_range_pct": svc.settings.options_chain.default_range_pct,
                 "allowed_range_pcts": list(svc.settings.options_chain.allowed_range_pcts),
                 "default_strike_step": svc.settings.options_chain.default_strike_step,

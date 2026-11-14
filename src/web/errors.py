@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 
 from src.core.exceptions import (
     BacktestValidationError,
+    BatchNotFoundError,
     ConfigurationError,
     DuplicatePaperTradeError,
     FlexServiceError,
@@ -26,7 +27,9 @@ from src.core.exceptions import (
     SecurityViolationError,
     SnapshotNotFoundError,
     StorageSchemaError,
+    StorageUnavailableError,
     UnderlyingPriceUnavailableError,
+    WatchlistCapError,
 )
 from src.services.analyzer import AnalyzerService
 
@@ -47,6 +50,32 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=422,
             content={"error_code": "INVALID_REQUEST", "message": str(exc), "detail": str(exc)},
+        )
+
+    @app.exception_handler(WatchlistCapError)
+    async def _handle_watchlist_full(_req: Request, exc: WatchlistCapError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=409,
+            content={"error_code": "WATCHLIST_FULL", "message": msg, "detail": msg},
+        )
+
+    @app.exception_handler(StorageUnavailableError)
+    async def _handle_storage_unavailable(
+        _req: Request, exc: StorageUnavailableError
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=503,
+            content={"error_code": "STORAGE_UNAVAILABLE", "message": msg, "detail": msg},
+        )
+
+    @app.exception_handler(BatchNotFoundError)
+    async def _handle_batch_not_found(_req: Request, exc: BatchNotFoundError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=404,
+            content={"error_code": "BATCH_NOT_FOUND", "message": msg, "detail": msg},
         )
 
     @app.exception_handler(SnapshotNotFoundError)
