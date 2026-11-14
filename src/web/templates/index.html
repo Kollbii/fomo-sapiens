@@ -90,11 +90,31 @@
 
     <label class="field-group">
       <span class="field-label">DTE</span>
-      <select id="dte-max-select" class="select-control" aria-label="DTE upper bound" title="Upper DTE bound for live IBKR chain pulls (30 to 120 DTE)">
+      <select
+        id="dte-max-select"
+        class="select-control"
+        aria-label="Dashboard DTE window"
+        title="Dashboard DTE window (default 30–120d). Select 0–29d or 0–120d to inspect cached short-DTE backtest contracts locally."
+      >
         <option value="60">30&ndash;60d</option>
         <option value="90">30&ndash;90d</option>
         <option value="120" selected>30&ndash;120d</option>
+        <option value="0:29">0&ndash;29d (Short)</option>
+        <option value="0:120">0&ndash;120d (All)</option>
       </select>
+    </label>
+
+    <label
+      class="field-group field-group--checkbox control-short-dte-toggle"
+      title="Sequential Pass 2 sync: also pull 0–29 DTE weekly contracts into the daily snapshot CSV for backtesting (dashboard charts/tables stay on your selected DTE window)"
+    >
+      <input
+        id="include-short-dte-toggle"
+        type="checkbox"
+        aria-label="Include 0 to 29 DTE contracts for backtest"
+        {% if include_short_dte_for_backtest | default(true) %} checked{% endif %}
+      />
+      <span class="field-label">0&ndash;29d Backtest</span>
     </label>
 
     <div class="field-group">
@@ -344,7 +364,7 @@
     <div id="chart-greeks" class="chart-canvas" aria-label="Multi-DTE Greeks Chart"></div>
   </article>
 
-  <!-- Targeted Wall Strike Corridor (+-5 Strikes, <= 60 Contracts) & Live Streaming -->
+  <!-- Targeted Wall Strike Corridor (+-10 Strikes, <= 90 Contracts) & Live Streaming -->
   <article
     id="wall-corridor-card"
     class="panel-card panel-card--span-12 panel-card--corridor"
@@ -353,16 +373,16 @@
   >
     <header class="panel-header panel-header--corridor">
       <div class="panel-title-stack">
-        <h2 class="panel-title">Wall Strike Corridor &mdash; &plusmn;5 Strikes Live Quotes</h2>
+        <h2 class="panel-title">Wall Strike Corridor</h2>
         <span id="corridor-status-badge" class="panel-meta">IDLE &bull; MANUAL</span>
       </div>
       <div class="panel-controls panel-controls--corridor">
         <span
           id="corridor-subs-badge"
           class="badge badge--info"
-          title="Planned/active IBKR subscriptions inside 60-contract hard ceiling"
+          title="Active IBKR reqMktData subscriptions in the corridor (hard ceiling: 90 = 88 options + 1 spot, keeping a 10-line safety buffer below IBKR's 100-line limit)"
         >
-          0 / 60 SUBS
+          0 / 90 SUBS
         </span>
         <label class="field-group">
           <span class="field-label">DTE / Exp</span>
@@ -382,22 +402,22 @@
             class="select-control"
             aria-label="Corridor strike window around Put and Call Walls"
           >
-            <option value="3">&plusmn;3 Strikes</option>
-            <option value="5" selected>&plusmn;5 Strikes</option>
+            <option value="5">&plusmn;5 Strikes</option>
             <option value="7">&plusmn;7 Strikes</option>
+            <option value="10" selected>&plusmn;10 Strikes</option>
           </select>
         </label>
         <button
           id="corridor-refresh-btn"
           type="button"
           class="btn btn-primary btn-xs"
-          title="Fetch one-shot IBKR quotes for Wall Corridor contracts (&le; 60 subs)"
+          title="Fetch one-shot IBKR quotes for Wall Corridor contracts (&le; 90 subs)"
         >
           Refresh Corridor Quotes
         </button>
         <label
           class="corridor-stream-switch"
-          title="Opt-in Live Constant Streaming (<= 60 IBKR subscriptions; auto-cancels on toggle off or navigation)"
+          title="Opt-in Live Constant Streaming (&le; 90 IBKR subscriptions; auto-cancels on toggle off or navigation)"
         >
           <input
             id="corridor-stream-toggle"
@@ -445,23 +465,30 @@
       <div class="corridor-split">
         <section class="corridor-ladder-pane" aria-label="Wall Corridor Quote Ladder">
           <div class="corridor-table-wrap">
-            <table class="corridor-ladder-table">
+            <table id="corridor-table" class="corridor-ladder-table">
               <thead>
-                <tr>
-                  <th class="text-left">Zone</th>
-                  <th class="text-left">Rgt</th>
-                  <th class="num">Strike</th>
-                  <th class="num">Bid</th>
-                  <th class="num">Ask</th>
-                  <th class="num">Mid</th>
-                  <th class="num">Sprd%</th>
-                  <th class="num">Vol / OI</th>
-                  <th class="num">&Delta; / IV</th>
+                <tr class="corridor-thead-groups">
+                  <th colspan="5" class="corridor-group-th corridor-group-calls">CALLS</th>
+                  <th colspan="1" class="corridor-group-th corridor-group-strike">STRIKE</th>
+                  <th colspan="5" class="corridor-group-th corridor-group-puts">PUTS</th>
+                </tr>
+                <tr class="corridor-thead-cols">
+                  <th class="num corridor-col-call">IV</th>
+                  <th class="num corridor-col-call">&Delta;</th>
+                  <th class="num corridor-col-call">Bid</th>
+                  <th class="num corridor-col-call">Mid</th>
+                  <th class="num corridor-col-call">Ask</th>
+                  <th class="corridor-col-strike">Strike</th>
+                  <th class="num corridor-col-put">Bid</th>
+                  <th class="num corridor-col-put">Mid</th>
+                  <th class="num corridor-col-put">Ask</th>
+                  <th class="num corridor-col-put">&Delta;</th>
+                  <th class="num corridor-col-put">IV</th>
                 </tr>
               </thead>
-              <tbody id="corridor-ladder-tbody">
+              <tbody id="corridor-tbody">
                 <tr>
-                  <td colspan="9" class="text-left">Waiting for cached option snapshot...</td>
+                  <td colspan="11" class="empty-row">No corridor quotes loaded.</td>
                 </tr>
               </tbody>
             </table>
@@ -475,7 +502,7 @@
             aria-label="Wall Strike Corridor Chart"
           >
             <div class="strategy-empty-state">
-              Load an option snapshot to preview the Put/Call Wall &plusmn;5 strike corridor, or click <strong>Refresh Corridor Quotes</strong>.
+              Click "Fetch Corridor Quotes" to load live &plusmn;10 strike bid/mid/ask quotes around Put &amp; Call Walls.
             </div>
           </div>
         </section>
@@ -865,11 +892,11 @@
           </label>
           <label class="backtest-field">
             <span class="field-label">DTE Min</span>
-            <input id="backtest-dte-min" class="input-control" type="number" min="0" max="120" step="1" value="30" inputmode="numeric" />
+            <input id="backtest-dte-min" class="input-control" type="number" min="0" max="120" step="1" value="30" inputmode="numeric" title="Target entry DTE lower bound (0–120; use 0–29 for short-DTE/weekly backtests)" />
           </label>
           <label class="backtest-field">
             <span class="field-label">DTE Max</span>
-            <input id="backtest-dte-max" class="input-control" type="number" min="1" max="120" step="1" value="60" inputmode="numeric" />
+            <input id="backtest-dte-max" class="input-control" type="number" min="0" max="120" step="1" value="60" inputmode="numeric" title="Target entry DTE upper bound (0–120; >= DTE Min, e.g. 29 for 0–29d)" />
           </label>
           <label class="backtest-field" data-bt-systematic>
             <span class="field-label">Entry Cadence</span>
@@ -958,6 +985,20 @@
               <input id="backtest-exit-dte" class="input-control" type="number" min="0" max="120" step="1" value="" placeholder="Off" inputmode="numeric" />
             </label>
           </div>
+
+          <div class="backtest-switch-group" data-bt-systematic data-bt-entry-filters>
+            <span class="field-label">BPS Entry Filters</span>
+            <div class="backtest-tpsl-inputs">
+              <label class="backtest-field">
+                <span class="field-label">Min Credit ($)</span>
+                <input id="backtest-min-credit" class="input-control" type="number" min="0" step="10" value="100" placeholder="Off" inputmode="decimal" title="Minimum net credit in dollars per 1-spread baseline (0 or blank disables)" />
+              </label>
+              <label class="backtest-field">
+                <span class="field-label">Min RoR (%)</span>
+                <input id="backtest-min-ror" class="input-control" type="number" min="0" max="1000" step="1" value="" placeholder="Off" inputmode="decimal" title="Minimum Return on Risk % (credit / max loss * 100; 0 or blank disables)" />
+              </label>
+            </div>
+          </div>
         </div>
 
         <div id="backtest-legs-box" class="backtest-legs-box" hidden>
@@ -1010,6 +1051,14 @@
 
       <div id="backtest-kpis" class="backtest-kpis" aria-label="Backtest Summary KPIs"></div>
 
+      <div id="backtest-chart-toolbar" class="backtest-chart-toolbar">
+        <span id="backtest-chart-caption" class="backtest-chart-caption">Portfolio Equity &amp; Drawdown</span>
+        <div id="backtest-chart-view-group" class="backtest-seg-group" role="group" aria-label="Backtest Chart View">
+          <button type="button" class="backtest-seg-btn is-active" data-bt-chart-view="EQUITY" aria-pressed="true">Equity &amp; Drawdown</button>
+          <button type="button" class="backtest-seg-btn" data-bt-chart-view="TRADE" aria-pressed="false">Selected Trade P&amp;L</button>
+        </div>
+      </div>
+
       <div id="backtest-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Backtest Equity and P&amp;L Chart">
         <div class="strategy-empty-state">
           Configure rules and click <strong>RUN BACKTEST</strong> to simulate daily portfolio rules or replay a single trade across archived snapshots.
@@ -1019,35 +1068,37 @@
       <div class="backtest-tables-grid">
         <section class="backtest-pane" aria-label="Simulated Trade Log">
           <div class="backtest-pane-head">
-            <strong>Trade Log</strong>
+            <strong>Trade &amp; Legs History</strong>
             <span id="backtest-trades-meta">0 trades &bull; click a row to inspect daily steps</span>
           </div>
           <div class="backtest-table-wrap">
             <table id="backtest-trades-table" class="backtest-table">
               <thead>
                 <tr>
+                  <th class="backtest-expand-col text-left" aria-label="Details"></th>
                   <th class="text-left">Trade</th>
-                  <th class="text-left">Entry &rarr; Exit</th>
-                  <th class="text-left">Reason</th>
-                  <th>Qty</th>
+                  <th class="text-left">Strategy</th>
+                  <th class="text-left">Opened</th>
+                  <th class="text-left">Closed / Status</th>
+                  <th class="text-left">Exit Reason</th>
+                  <th class="text-left">Legs</th>
                   <th>Entry $</th>
-                  <th>Net P&amp;L</th>
-                  <th>Ret %</th>
-                  <th class="text-left">Status</th>
+                  <th>MTM / Net P&amp;L</th>
+                  <th>RoR %</th>
                 </tr>
               </thead>
               <tbody id="backtest-trades-body">
                 <tr>
-                  <td colspan="8" class="text-left">Run a backtest to populate simulated trades.</td>
+                  <td colspan="10" class="text-left">Run a backtest to populate simulated trades.</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </section>
 
-        <section class="backtest-pane" aria-label="Daily Step Valuation and Flags">
+        <section class="backtest-pane" aria-label="Daily Mark-to-Market Step History">
           <div class="backtest-pane-head">
-            <strong id="backtest-steps-title">Daily Valuation &amp; Flags</strong>
+            <strong id="backtest-steps-title">Daily Mark-to-Market Step History</strong>
             <span id="backtest-steps-meta">Select a trade row</span>
           </div>
           <div class="backtest-table-wrap">
@@ -1057,17 +1108,15 @@
                   <th class="text-left">Date / Snap</th>
                   <th>DTE</th>
                   <th>Spot</th>
-                  <th>Mark $</th>
-                  <th>Nat $</th>
-                  <th>Net P&amp;L</th>
-                  <th>Basis %</th>
-                  <th class="text-left">Status</th>
-                  <th class="text-left">Flags</th>
+                  <th class="text-left">Leg Marks &amp; Source</th>
+                  <th>Daily P&amp;L</th>
+                  <th>Cum. MTM P&amp;L</th>
+                  <th class="text-left">Exit / Status</th>
                 </tr>
               </thead>
               <tbody id="backtest-steps-body">
                 <tr>
-                  <td colspan="9" class="text-left">Select a trade to inspect daily leg valuation and data flags.</td>
+                  <td colspan="7" class="text-left">Select a trade to inspect daily mark-to-market steps, leg sources, and data flags.</td>
                 </tr>
               </tbody>
             </table>
@@ -1091,6 +1140,9 @@
       <div id="dte-bucket-tabs" class="dte-bucket-tabs" role="group" aria-label="DTE Quick Range Filters">
         <button type="button" class="dte-tab-btn active" data-dte-bucket="ALL" aria-pressed="true">
           All (30&ndash;120d)
+        </button>
+        <button type="button" class="dte-tab-btn" data-dte-bucket="BUCKET:0-29" aria-pressed="false" hidden>
+          0&ndash;29d
         </button>
         <button type="button" class="dte-tab-btn" data-dte-bucket="BUCKET:30-60" aria-pressed="false">
           30&ndash;60d
@@ -1242,11 +1294,12 @@
   "defaultMarketDataType": default_market_data_type,
   "fallbackMarketDataType": fallback_market_data_type,
   "dteMin": dte_min,
-  "dteMax": dte_max
+  "dteMax": dte_max,
+  "includeShortDteForBacktest": include_short_dte_for_backtest | default(true)
 } | tojson }}
 </script>
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261113a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261114a"></script>
 {% endblock %}

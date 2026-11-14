@@ -1,4 +1,4 @@
-"""Deterministic, I/O-free Wall Strike Corridor contract selection (`<= 60` contracts)."""
+"""Deterministic, I/O-free Wall Strike Corridor contract selection (`<= 90` contracts)."""
 
 from __future__ import annotations
 
@@ -26,6 +26,7 @@ from src.broker.corridor.quotes import (
 )
 from src.core.exceptions import (
     OptionChainFetchError,
+    PacingViolationError,
 )
 from src.core.security import TickerValidator
 from src.storage.schema import (
@@ -39,6 +40,53 @@ def _nearest_index(sorted_strikes: Sequence[float], anchor: float) -> int:
         range(len(sorted_strikes)),
         key=lambda idx: (abs(sorted_strikes[idx] - anchor), sorted_strikes[idx]),
     )
+
+
+def _classify_zone(
+    idx: int | None,
+    pw_window: set[int],
+    cw_window: set[int],
+    *,
+    is_leg: bool,
+) -> CorridorZone:
+    if idx is None:
+        return "STRATEGY_LEG"
+    in_pw = idx in pw_window
+    in_cw = idx in cw_window
+    if in_pw and in_cw:
+        return "BOTH_WALLS"
+    if in_pw:
+        return "PUT_WALL"
+    if in_cw:
+        return "CALL_WALL"
+    if is_leg:
+        return "STRATEGY_LEG"
+    return "ATM"
+
+
+def _select_secondary_expiry(
+    exps: Sequence[tuple[str, int]],
+    resolved_expiry: str,
+    resolved_dte: int,
+    wall_anchors: WallAnchors,
+) -> str | None:
+    other_exps = [(exp, dte) for exp, dte in exps if exp != resolved_expiry]
+    if not other_exps:
+        return None
+    if wall_anchors.by_expiry:
+        in_anchors = [item for item in other_exps if item[0] in wall_anchors.by_expiry]
+        if in_anchors:
+            other_exps = in_anchors
+    sec_expiry, _ = min(
+        other_exps,
+        key=lambda item: (
+            0 if item[1] > resolved_dte else 1,
+            abs(item[1] - resolved_dte),
+            item[1],
+            item[0],
+        ),
+    )
+    return sec_expiry
 
 
 def _row_to_spec(
@@ -85,6 +133,89 @@ def _row_to_spec(
     )
 
 
+def _collect_expiry_candidates(
+    df_exp: pl.DataFrame,
+    *,
+    expiry: str,
+    symbol: str,
+    spot: float,
+    put_wall: float | None,
+    call_wall: float | None,
+    half_win: int,
+    wall_tier: int,
+    include_opposite_right: bool,
+    include_atm_fill: bool,
+    priority_keys: set[tuple[str, float, str]],
+    seen_keys: set[tuple[str, float, str]],
+    ranked_candidates: list[tuple[tuple[int, int, float, float, int], CorridorContractSpec]],
+) -> None:
+    avail_strikes = sorted({float(s) for s in df_exp["strike"].to_list() if float(s) > 0.0})
+    if not avail_strikes:
+        return
+
+    atm_strike = min(avail_strikes, key=lambda s: (abs(s - spot), s))
+    pw_anchor = put_wall if put_wall is not None else spot
+    cw_anchor = call_wall if call_wall is not None else spot
+
+    pw_idx = _nearest_index(avail_strikes, pw_anchor)
+    cw_idx = _nearest_index(avail_strikes, cw_anchor)
+    atm_idx = _nearest_index(avail_strikes, atm_strike)
+    idx_by_strike = {round(s, 6): i for i, s in enumerate(avail_strikes)}
+
+    pw_window = set(
+        range(max(0, pw_idx - half_win), min(len(avail_strikes), pw_idx + half_win + 1))
+    )
+    cw_window = set(
+        range(max(0, cw_idx - half_win), min(len(avail_strikes), cw_idx + half_win + 1))
+    )
+
+    for row in df_exp.iter_rows(named=True):
+        right_u = str(row["right"]).upper()
+        if right_u not in ("C", "P"):
+            continue
+        strike_val = float(row["strike"])
+        key = (expiry, round(strike_val, 6), right_u)
+        if key in seen_keys:
+            continue
+        s_idx = idx_by_strike.get(round(strike_val, 6))
+        if s_idx is None:
+            continue
+
+        in_pw = s_idx in pw_window
+        in_cw = s_idx in cw_window
+        if in_pw or in_cw:
+            if not include_opposite_right and not (
+                (in_pw and right_u == "P") or (in_cw and right_u == "C")
+            ):
+                continue
+            tier = wall_tier
+            d_pw = abs(s_idx - pw_idx) if in_pw else 999
+            d_cw = abs(s_idx - cw_idx) if in_cw else 999
+            wall_dist = min(d_pw, d_cw)
+        elif include_atm_fill:
+            tier = 3
+            wall_dist = abs(s_idx - atm_idx)
+        else:
+            continue
+
+        seen_keys.add(key)
+        is_pw = put_wall is not None and abs(strike_val - put_wall) < 1e-4 and right_u == "P"
+        is_cw = call_wall is not None and abs(strike_val - call_wall) < 1e-4 and right_u == "C"
+        is_leg = key in priority_keys
+        spec = _row_to_spec(
+            row,
+            symbol=symbol,
+            zone=_classify_zone(s_idx, pw_window, cw_window, is_leg=is_leg),
+            is_put_wall=is_pw,
+            is_call_wall=is_cw,
+            is_strategy_leg=is_leg,
+        )
+        right_ord = 0 if right_u == "P" else 1
+        ranked_candidates.append(
+            ((tier, wall_dist, abs(strike_val - spot), strike_val, right_ord), spec)
+        )
+
+
 def select_wall_corridor(
     df: pl.DataFrame,
     *,
@@ -95,20 +226,27 @@ def select_wall_corridor(
     priority_legs: Sequence[CorridorLegRef] = (),
     include_opposite_right: bool = True,
 ) -> CorridorSelection:
-    """Select `±window_strikes` around Primary Put & Call Walls, strictly `<= 60` contracts.
+    """Select `±window_strikes` around Primary Put & Call Walls, strictly `<= 90` contracts.
 
     Priority tiers inside the contract budget:
       0. Active Strategy Lab legs (even if on a secondary DTE, e.g. Diagonal spreads)
-      1. Primary Wall strikes & sides (`P` inside Put Wall `±k`, `C` inside Call Wall `±k`),
-         ordered closest to their Wall strike first
-      2. Opposite right at those Wall strikes (if `include_opposite_right=True`)
-      3. Nearest ATM `±k` strikes around underlying spot if remaining budget allows
+      1. Primary DTE Put Wall `±window_strikes` & Call Wall `±window_strikes` (`("P", "C")`)
+      2. Secondary DTE Put/Call Wall `±min(2, window_strikes)` (`("P", "C")`)
+      3. Primary DTE ATM fill outward (`("P", "C")`) until `max_contracts` is reached
     """
+    if (
+        isinstance(max_contracts, bool)
+        or int(max_contracts) <= 0
+        or int(max_contracts) > CORRIDOR_MAX_CONTRACTS
+    ):
+        raise PacingViolationError(
+            f"Corridor max_contracts={max_contracts} must be between 1 and {CORRIDOR_MAX_CONTRACTS}"
+        )
     if df.height == 0:
         raise OptionChainFetchError("Cannot select Wall Corridor from an empty chain DataFrame")
 
     eff_win = min(max(1, int(window_strikes)), 15)
-    eff_max = min(max(1, int(max_contracts)), CORRIDOR_MAX_CONTRACTS)
+    eff_max = int(max_contracts)
 
     first = df.row(0, named=True)
     symbol = TickerValidator.validate(str(first["underlying"]))
@@ -145,20 +283,14 @@ def select_wall_corridor(
 
     pw_idx = _nearest_index(avail_strikes, pw_anchor)
     cw_idx = _nearest_index(avail_strikes, cw_anchor)
-    atm_idx = _nearest_index(avail_strikes, atm_strike)
     idx_by_strike = {round(s, 6): i for i, s in enumerate(avail_strikes)}
 
-    pw_window = {
-        i for i in range(max(0, pw_idx - eff_win), min(len(avail_strikes), pw_idx + eff_win + 1))
-    }
-    cw_window = {
-        i for i in range(max(0, cw_idx - eff_win), min(len(avail_strikes), cw_idx + eff_win + 1))
-    }
-    atm_window = {
-        i for i in range(max(0, atm_idx - eff_win), min(len(avail_strikes), atm_idx + eff_win + 1))
-    }
+    pw_window = set(range(max(0, pw_idx - eff_win), min(len(avail_strikes), pw_idx + eff_win + 1)))
+    cw_window = set(range(max(0, cw_idx - eff_win), min(len(avail_strikes), cw_idx + eff_win + 1)))
 
-    priority_keys = {(leg.expiry, round(float(leg.strike), 6), leg.right) for leg in priority_legs}
+    priority_keys: set[tuple[str, float, str]] = {
+        (leg.expiry, round(float(leg.strike), 6), str(leg.right)) for leg in priority_legs
+    }
     all_rows_by_key: dict[tuple[str, float, str], dict[str, Any]] = {}
     for row in df.iter_rows(named=True):
         right_u = str(row["right"]).upper()
@@ -167,25 +299,10 @@ def select_wall_corridor(
         key = (str(row["expiry"]), round(float(row["strike"]), 6), right_u)
         all_rows_by_key[key] = row
 
-    def _classify_zone(idx: int | None, *, is_leg: bool) -> CorridorZone:
-        if idx is None:
-            return "STRATEGY_LEG"
-        in_pw = idx in pw_window
-        in_cw = idx in cw_window
-        if in_pw and in_cw:
-            return "BOTH_WALLS"
-        if in_pw:
-            return "PUT_WALL"
-        if in_cw:
-            return "CALL_WALL"
-        if is_leg:
-            return "STRATEGY_LEG"
-        return "ATM"
-
     ranked_candidates: list[tuple[tuple[int, int, float, float, int], CorridorContractSpec]] = []
     seen_keys: set[tuple[str, float, str]] = set()
 
-    # Tier 0: explicitly prioritized Strategy Lab legs (capped reasonably inside eff_max)
+    # Tier 0: explicitly prioritized Strategy Lab legs (even across secondary DTEs)
     for leg in priority_legs:
         key = (leg.expiry, round(float(leg.strike), 6), leg.right)
         if key in seen_keys:
@@ -199,9 +316,10 @@ def select_wall_corridor(
             if key[0] == resolved_expiry
             else None
         )
-        zone = _classify_zone(s_idx, is_leg=True)
-        is_pw = put_wall is not None and abs(float(raw_match["strike"]) - put_wall) < 1e-4
-        is_cw = call_wall is not None and abs(float(raw_match["strike"]) - call_wall) < 1e-4
+        zone = _classify_zone(s_idx, pw_window, cw_window, is_leg=True)
+        leg_pw, leg_cw = wall_anchors.resolve(key[0])
+        is_pw = leg_pw is not None and abs(float(raw_match["strike"]) - leg_pw) < 1e-4
+        is_cw = leg_cw is not None and abs(float(raw_match["strike"]) - leg_cw) < 1e-4
         spec = _row_to_spec(
             raw_match,
             symbol=symbol,
@@ -210,59 +328,47 @@ def select_wall_corridor(
             is_call_wall=is_cw and leg.right == "C",
             is_strategy_leg=True,
         )
-        ranked_candidates.append(((0, 0, abs(spec.strike - spot), spec.strike, 0), spec))
+        right_ord = 0 if spec.right == "P" else 1
+        ranked_candidates.append(((0, 0, abs(spec.strike - spot), spec.strike, right_ord), spec))
 
-    # Tiers 1..3 inside target expiration
-    for row in df_exp.iter_rows(named=True):
-        right_u = str(row["right"]).upper()
-        if right_u not in ("C", "P"):
-            continue
-        strike_val = float(row["strike"])
-        key = (resolved_expiry, round(strike_val, 6), right_u)
-        if key in seen_keys:
-            continue
-        s_idx = idx_by_strike.get(round(strike_val, 6))
-        if s_idx is None:
-            continue
+    # Tier 1 (Primary DTE Put/Call Wall windows) + Tier 3 (Primary DTE ATM fill outward)
+    _collect_expiry_candidates(
+        df_exp,
+        expiry=resolved_expiry,
+        symbol=symbol,
+        spot=spot,
+        put_wall=put_wall,
+        call_wall=call_wall,
+        half_win=eff_win,
+        wall_tier=1,
+        include_opposite_right=include_opposite_right,
+        include_atm_fill=True,
+        priority_keys=priority_keys,
+        seen_keys=seen_keys,
+        ranked_candidates=ranked_candidates,
+    )
 
-        in_pw = s_idx in pw_window
-        in_cw = s_idx in cw_window
-        in_atm = s_idx in atm_window
-        if not (in_pw or in_cw or in_atm):
-            continue
-
-        d_pw = abs(s_idx - pw_idx) if in_pw else 999
-        d_cw = abs(s_idx - cw_idx) if in_cw else 999
-        d_atm = abs(s_idx - atm_idx) if in_atm else 999
-
-        if (in_pw and right_u == "P") or (in_cw and right_u == "C"):
-            tier = 1
-            wall_dist = d_pw if (in_pw and right_u == "P") else d_cw
-        elif (in_pw or in_cw) and include_opposite_right:
-            tier = 2
-            wall_dist = min(d_pw, d_cw)
-        elif in_atm:
-            tier = 3
-            wall_dist = d_atm
-        else:
-            continue
-
-        seen_keys.add(key)
-        is_pw = put_wall is not None and abs(strike_val - put_wall) < 1e-4 and right_u == "P"
-        is_cw = call_wall is not None and abs(strike_val - call_wall) < 1e-4 and right_u == "C"
-        is_leg = key in priority_keys
-        spec = _row_to_spec(
-            row,
-            symbol=symbol,
-            zone=_classify_zone(s_idx, is_leg=is_leg),
-            is_put_wall=is_pw,
-            is_call_wall=is_cw,
-            is_strategy_leg=is_leg,
-        )
-        right_ord = 0 if right_u == "P" else 1
-        ranked_candidates.append(
-            ((tier, wall_dist, abs(strike_val - spot), strike_val, right_ord), spec)
-        )
+    # Tier 2: Secondary DTE Put/Call Wall ±min(2, window_strikes)
+    sec_expiry = _select_secondary_expiry(exps, resolved_expiry, resolved_dte, wall_anchors)
+    if sec_expiry is not None:
+        df_sec = df.filter(pl.col("expiry") == sec_expiry).sort(["strike", "right"])
+        if df_sec.height > 0:
+            sec_pw, sec_cw = wall_anchors.resolve(sec_expiry)
+            _collect_expiry_candidates(
+                df_sec,
+                expiry=sec_expiry,
+                symbol=symbol,
+                spot=spot,
+                put_wall=sec_pw,
+                call_wall=sec_cw,
+                half_win=min(2, eff_win),
+                wall_tier=2,
+                include_opposite_right=include_opposite_right,
+                include_atm_fill=False,
+                priority_keys=priority_keys,
+                seen_keys=seen_keys,
+                ranked_candidates=ranked_candidates,
+            )
 
     ranked_candidates.sort(key=lambda pair: pair[0])
     chosen = [spec for _, spec in ranked_candidates[:eff_max]]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
@@ -235,6 +236,19 @@ def list_backtest_entries(svc: AnalyzerService, ticker: str) -> BacktestEntriesR
     return BacktestEntriesResponse(ticker=symbol, entries=entries)
 
 
+def _validate_backtest_config(cfg: BacktestConfig) -> None:
+    checks: tuple[tuple[str, float | None, float | None], ...] = (
+        ("min_entry_credit_dollars", cfg.min_entry_credit_dollars, None),
+        ("min_entry_ror_pct", cfg.min_entry_ror_pct, 1000.0),
+    )
+    for field_name, val, upper in checks:
+        if val is None:
+            continue
+        if not math.isfinite(val) or val < 0.0 or (upper is not None and val > upper):
+            bound = f"[0, {upper:g}]" if upper is not None else ">= 0"
+            raise BacktestValidationError(f"{field_name} must be finite and {bound} (got {val!r}).")
+
+
 def run_backtest(svc: AnalyzerService, payload: BacktestRunRequest) -> BacktestRunResponse:
     """Run a `SYSTEMATIC` or `SINGLE_TRADE` historical options backtest over archived snapshots."""
     if (
@@ -246,6 +260,7 @@ def run_backtest(svc: AnalyzerService, payload: BacktestRunRequest) -> BacktestR
             f"start_date ({payload.start_date.isoformat()}) must be <= "
             f"end_date ({payload.end_date.isoformat()})."
         )
+    _validate_backtest_config(payload.config)
 
     all_trades, _ = svc.paper_trades.list_trades()
     if payload.mode == "SYSTEMATIC":

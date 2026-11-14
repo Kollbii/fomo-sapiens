@@ -14,7 +14,7 @@ from src.analytics.backtest.models import (
     TradeStatus,
     deduplicate_flags,
 )
-from src.analytics.backtest.rules import DENOM_EPS, EntryBuildResult
+from src.analytics.backtest.rules import DENOM_EPS, EntryBuildResult, resolve_tp_sl_thresholds
 from src.analytics.strategies.models import StrategyKind
 from src.storage.backtest_store import DailyChainBar
 
@@ -33,6 +33,7 @@ def finalize_trade_record(
     entry_snapshot_id: str,
     strategy_kind: StrategyKind,
     qty: int,
+    config: BacktestConfig,
     entry: EntryBuildResult,
     open_commission: float,
     steps: list[TradeDailyStep],
@@ -63,6 +64,12 @@ def finalize_trade_record(
 
     days_held = max(0, (date.fromisoformat(exit_date) - date.fromisoformat(entry_date)).days)
     risk_denom = None if entry.max_loss_unbounded else entry.max_loss_dollars
+    _denom, tp_dollars, sl_dollars, _skip_flags, _skip_notes = resolve_tp_sl_thresholds(
+        config,
+        entry_basis_dollars=entry.entry_basis_dollars,
+        max_loss_dollars=entry.max_loss_dollars,
+        max_loss_unbounded=entry.max_loss_unbounded,
+    )
     return BacktestTradeRecord(
         trade_id=trade_id,
         entry_date=entry_date,
@@ -79,6 +86,8 @@ def finalize_trade_record(
         max_profit_dollars=entry.max_profit_dollars,
         max_loss_dollars=entry.max_loss_dollars,
         max_loss_unbounded=entry.max_loss_unbounded,
+        profit_target_dollars=tp_dollars,
+        stop_loss_dollars=sl_dollars,
         exit_value_dollars=exit_value_dollars,
         commissions_dollars=commissions_dollars,
         gross_pnl_dollars=gross_pnl_dollars,
@@ -87,6 +96,7 @@ def finalize_trade_record(
         return_on_risk_pct=pct_or_none(net_pnl_dollars, risk_denom),
         days_held=days_held,
         status=status,
+        selection_notes=deduplicate_flags(entry.selection_notes),
         flags=deduplicate_flags(flags),
         steps=steps,
     )
@@ -98,9 +108,13 @@ def build_portfolio_summary(
     equity_curve: list[EquityCurvePoint],
     ok_bars: int,
     flagged_bars: int,
+    *,
+    skipped_by_reason: dict[str, int] | None = None,
 ) -> PortfolioSummary:
     """Compute portfolio KPIs and drawdown summary with strict zero-division guards."""
     final_equity = equity_curve[-1].equity_dollars if equity_curve else config.initial_capital
+    realized_pnl = round(equity_curve[-1].realized_pnl_dollars, 2) if equity_curve else 0.0
+    unrealized_pnl = round(equity_curve[-1].unrealized_pnl_dollars, 2) if equity_curve else 0.0
     net_pnl = round(final_equity - config.initial_capital, 2)
     total_comms = round(sum(t.commissions_dollars for t in trades), 2)
     if all(t.status != "UNRESOLVED" for t in trades):
@@ -120,11 +134,14 @@ def build_portfolio_summary(
     max_dd = round(max((pt.drawdown_dollars for pt in equity_curve), default=0.0), 2)
     max_dd_pct = round(max((pt.drawdown_pct for pt in equity_curve), default=0.0), 2)
 
+    clean_skips = dict(sorted((skipped_by_reason or {}).items()))
     return PortfolioSummary(
         initial_capital=config.initial_capital,
         final_equity=round(final_equity, 2),
         gross_pnl_dollars=gross_pnl,
         net_pnl_dollars=net_pnl,
+        realized_pnl_dollars=realized_pnl,
+        unrealized_pnl_dollars=unrealized_pnl,
         total_commissions_dollars=total_comms,
         total_return_pct=round((net_pnl / config.initial_capital) * 100.0, 2),
         trade_count=len(trades),
@@ -143,4 +160,6 @@ def build_portfolio_summary(
         avg_loss_dollars=round(sum(losses) / len(losses), 2) if losses else None,
         ok_bars=ok_bars,
         flagged_bars=flagged_bars,
+        skipped_entries_count=sum(clean_skips.values()),
+        skipped_by_reason=clean_skips,
     )

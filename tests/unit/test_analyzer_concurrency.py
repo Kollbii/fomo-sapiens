@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import polars as pl
 import pytest
 
 from src.analytics.strategies import StrategyLegInput
@@ -626,3 +627,245 @@ def test_injected_custom_ledger_without_lock_is_still_coordinated(tmp_path: Path
     assert svc.last_corridor_stop is not None
     assert svc.last_corridor_stop["reason"] == "ledger_mtm"
     assert not svc.refresh_lock.locked()
+
+
+def test_merged_short_dte_archive_isolates_dashboard_and_strategy_lab(tmp_path: Path) -> None:
+    from pydantic import ValidationError
+
+    from src.services.schemas import StrategySuggestRequest
+
+    # Merged rows: 0 DTE & 7 DTE (huge OI/volume to verify dashboard wall isolation) + 37 DTE.
+    def _merged_row(
+        *,
+        conid: int,
+        expiry: str,
+        dte: int,
+        strike: float,
+        right: str,
+        oi: int,
+        vol: int,
+    ) -> OptionContractRow:
+        return OptionContractRow(
+            snapshot_id=_SNAP_ID,
+            snapshot_ts_utc=_SNAP_TS,
+            market_date=_MKT_DATE,
+            market_data_type=3,
+            underlying="NVDA",
+            underlying_conid=4815747,
+            underlying_price=145.0,
+            option_conid=conid,
+            expiry=expiry,
+            dte=dte,
+            strike=strike,
+            moneyness_pct=((strike - 145.0) / 145.0) * 100.0,
+            right=right,  # type: ignore[arg-type]
+            bid=2.4,
+            ask=2.6,
+            mid=2.5,
+            last=2.5,
+            close=2.4,
+            mark_price=2.5,
+            volume=vol,
+            open_interest=oi,
+            iv=None,
+            delta=None,
+            gamma=None,
+            theta=None,
+            vega=None,
+            greeks_source="NONE",
+        )
+
+    merged_rows = [
+        _merged_row(
+            conid=9101, expiry="2026-11-11", dte=0, strike=130.0, right="P", oi=99999, vol=50000
+        ),
+        _merged_row(
+            conid=9102, expiry="2026-11-11", dte=0, strike=160.0, right="C", oi=99999, vol=50000
+        ),
+        _merged_row(
+            conid=9105, expiry="2026-11-18", dte=7, strike=130.0, right="P", oi=10000, vol=10000
+        ),
+        _merged_row(
+            conid=9103, expiry="2026-11-18", dte=7, strike=135.0, right="P", oi=80000, vol=40000
+        ),
+        _merged_row(
+            conid=9104, expiry="2026-11-18", dte=7, strike=155.0, right="C", oi=80000, vol=40000
+        ),
+        _merged_row(
+            conid=9201, expiry="2026-12-18", dte=37, strike=135.0, right="P", oi=500, vol=100
+        ),
+        _merged_row(
+            conid=9202, expiry="2026-12-18", dte=37, strike=140.0, right="P", oi=900, vol=200
+        ),
+        _merged_row(
+            conid=9203, expiry="2026-12-18", dte=37, strike=145.0, right="C", oi=800, vol=200
+        ),
+        _merged_row(
+            conid=9204, expiry="2026-12-18", dte=37, strike=150.0, right="C", oi=600, vol=100
+        ),
+    ]
+
+    class _MergedFetcher(_FakeFetcher):
+        async def fetch_option_chain(self, ticker: str, **_kwargs: Any) -> FetchResult:
+            self.call_log.append("fetch_option_chain")
+            return FetchResult(
+                snapshot_id=_SNAP_ID,
+                snapshot_ts_utc=_SNAP_TS,
+                market_date=_MKT_DATE,
+                market_data_type=3,
+                plan=_make_plan("MID"),
+                rows=merged_rows,
+                pages_fetched=2,
+                elapsed_ms=15.0,
+                primary_contract_count=4,
+                short_dte_contract_count=5,
+                short_dte_range=(0, 29),
+                notices=(
+                    "Synced 30–120d (4 contracts) + 0–29d for Backtest "
+                    "(5 contracts) -> 9 total archived",
+                ),
+            )
+
+    settings = Settings(tracker=PaperTrackerSettings(tracked_dir="data/tracked"))
+    repo = CSVRepository(settings.storage, root=tmp_path)
+    broker = _FakeBroker(settings)
+    fetcher = _MergedFetcher([])
+    svc = AnalyzerService(
+        settings=settings,
+        repo=repo,
+        broker_client=broker,  # type: ignore[arg-type]
+        fetcher=fetcher,  # type: ignore[arg-type]
+    )
+
+    assert svc.get_status().include_short_dte_for_backtest is True
+    assert svc.get_status().corridor_default_window_strikes == 10
+    assert svc.get_status().corridor_default_max_contracts == 88
+    assert svc.get_status().corridor_hard_max_contracts == 90
+
+    with pytest.raises(ValidationError):
+        RefreshRequest(ticker="NVDA", display_dte_min=60, display_dte_max=30)
+
+    payload = run_coro(svc.refresh_chain(RefreshRequest(ticker="NVDA")))
+    # Dashboard payload is isolated to >= 30 DTE (4 contracts, walls 140P/145C, NOT 130P/160C).
+    assert payload.meta.dtes == [37]
+    assert payload.meta.contract_count == 4
+    assert payload.walls.aggregate_primary_put_wall is not None
+    assert payload.walls.aggregate_primary_put_wall.strike == 140.0
+    assert payload.walls.aggregate_primary_call_wall is not None
+    assert payload.walls.aggregate_primary_call_wall.strike == 145.0
+
+    # Archived Mode 1 CSV + SnapshotMeta hold ALL 9 contracts (0, 7, 37 DTE) with BSM enrichment.
+    archived_df = repo.load_snapshot("NVDA", _SNAP_ID)
+    assert archived_df.height == 9
+    assert sorted(archived_df["dte"].unique().to_list()) == [0, 7, 37]
+    assert archived_df.filter(pl.col("dte") == 0)["greeks_source"].to_list() == [
+        "BSM_FALLBACK",
+        "BSM_FALLBACK",
+    ]
+    snap_meta = repo.list_snapshots("NVDA")[0]
+    assert snap_meta.contract_count == 9
+    assert snap_meta.expirations == ["2026-11-11", "2026-11-18", "2026-12-18"]
+
+    # Default load_chain_analytics isolates to >= 30 DTE unless dte_min/dte_max passed.
+    cached_default = svc.load_chain_analytics("NVDA")
+    assert cached_default.meta.dtes == [37]
+    cached_all = svc.load_chain_analytics("NVDA", dte_min=0, dte_max=120)
+    assert cached_all.meta.dtes == [0, 7, 37]
+    cached_short = svc.load_chain_analytics("NVDA", dte_min=0, dte_max=29)
+    assert cached_short.meta.dtes == [0, 7]
+
+    # Strategy Lab isolates walls/presets to >= 30 DTE by default; explicit short-DTE works.
+    suggest_default = svc.suggest_strategies(StrategySuggestRequest(ticker="NVDA"))
+    assert all(ev.short_dte == 37 for ev in suggest_default.evaluations)
+
+    suggest_short = svc.suggest_strategies(
+        StrategySuggestRequest(
+            ticker="NVDA", strategy_kind="BULL_PUT_SPREAD", dte_min=0, dte_max=29
+        )
+    )
+    assert suggest_short.evaluations[0].short_dte in (0, 7)
+
+    # Synthetic short-DTE-only snapshot is NOT wiped out when dte_min/dte_max are omitted.
+    short_only_id = "AVGO_20261111_193000"
+    short_only_rows = [
+        _merged_row(
+            conid=9301, expiry="2026-11-18", dte=7, strike=135.0, right="P", oi=500, vol=100
+        )
+        .model_copy(update={"underlying": "AVGO", "snapshot_id": short_only_id})
+        .model_dump(),
+        _merged_row(
+            conid=9302, expiry="2026-11-18", dte=7, strike=140.0, right="P", oi=700, vol=120
+        )
+        .model_copy(update={"underlying": "AVGO", "snapshot_id": short_only_id})
+        .model_dump(),
+        _merged_row(
+            conid=9303, expiry="2026-11-18", dte=7, strike=145.0, right="C", oi=700, vol=120
+        )
+        .model_copy(update={"underlying": "AVGO", "snapshot_id": short_only_id})
+        .model_dump(),
+        _merged_row(
+            conid=9304, expiry="2026-11-18", dte=7, strike=150.0, right="C", oi=500, vol=100
+        )
+        .model_copy(update={"underlying": "AVGO", "snapshot_id": short_only_id})
+        .model_dump(),
+    ]
+    repo.save_snapshot("AVGO", short_only_rows, spot_source="MID")
+    assert svc.load_chain_analytics("AVGO").meta.dtes == [7]
+    assert (
+        svc.suggest_strategies(
+            StrategySuggestRequest(ticker="AVGO", strategy_kind="BULL_PUT_SPREAD")
+        )
+        .evaluations[0]
+        .short_dte
+        == 7
+    )
+
+
+def test_corridor_settings_caps_reflected_in_status_and_selection(tmp_path: Path) -> None:
+    from src.core.config import CorridorSettings
+
+    settings = Settings(
+        corridor=CorridorSettings(
+            default_window_strikes=8,
+            default_max_contracts=40,
+            hard_max_contracts=50,
+        ),
+        tracker=PaperTrackerSettings(tracked_dir="data/tracked"),
+    )
+    repo = CSVRepository(settings.storage, root=tmp_path)
+    broker = _FakeBroker(settings)
+    captured_selections: list[Any] = []
+
+    class _CapturingCorridor(_FakeCorridor):
+        async def fetch_corridor_quotes(
+            self, selection: Any, *, snapshot_id: str, on_frame: Any = None
+        ) -> Any:
+            captured_selections.append(selection)
+            return await super().fetch_corridor_quotes(
+                selection, snapshot_id=snapshot_id, on_frame=on_frame
+            )
+
+        async def stream_corridor_quotes(self, selection: Any, **_kwargs: Any) -> Any:
+            captured_selections.append(selection)
+            yield SimpleNamespace()
+
+    svc = AnalyzerService(
+        settings=settings,
+        repo=repo,
+        broker_client=broker,  # type: ignore[arg-type]
+        fetcher=_FakeFetcher([]),  # type: ignore[arg-type]
+        corridor=_CapturingCorridor([]),  # type: ignore[arg-type]
+    )
+    svc.repo.save_snapshot("NVDA", [r.model_dump() for r in _sample_rows()], spot_source="MID")
+
+    status = svc.get_status()
+    assert status.corridor_default_window_strikes == 8
+    assert status.corridor_default_max_contracts == 40
+    assert status.corridor_hard_max_contracts == 50
+
+    run_coro(svc.fetch_corridor_quotes(CorridorQuotesRequest(ticker="NVDA", max_contracts=88)))
+    assert captured_selections[-1].max_contracts == 50
+
+    gen = run_coro(svc.open_corridor_stream("NVDA", max_contracts=88))
+    run_coro(anext(gen))
+    assert captured_selections[-1].max_contracts == 50

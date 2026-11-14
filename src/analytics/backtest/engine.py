@@ -12,12 +12,20 @@ from src.analytics.backtest.metrics import (
     pct_or_none,
 )
 from src.analytics.backtest.models import (
+    FLAG_LEG_FALLBACK_PRICE,
+    FLAG_NO_USABLE_DAILY_SNAPSHOT,
+    FLAG_TRACKED_LEG_USED,
+    FLAG_UNRESOLVED_EXPIRY_LEG,
+    FLAG_UNRESOLVED_EXPIRY_SPOT,
     BacktestConfig,
     BacktestMode,
     BacktestSimulationResult,
     BacktestTradeRecord,
+    ClosePriceMode,
     EquityCurvePoint,
     ExitReason,
+    LegPriceSource,
+    StepMarkSource,
     TradeDailyStep,
     TradeStatus,
     deduplicate_flags,
@@ -30,7 +38,7 @@ from src.analytics.backtest.rules import (
     DENOM_EPS,
     CadenceState,
     EntryBuildResult,
-    build_entry_candidate,
+    build_entry_candidate_outcome,
     evaluate_exit_rule,
     record_entry_attempt,
     should_attempt_entry,
@@ -78,6 +86,37 @@ class _OpenTradeState:
     last_known_unrealized_net: float = 0.0
 
 
+_SINGLE_PRICE_TO_MARK: dict[LegPriceSource, StepMarkSource] = {
+    "MID": "MID",
+    "LAST": "LAST",
+    "CLOSE": "CLOSE",
+}
+
+
+def _derive_step_mark_source(
+    step_data: EvaluatedStepData,
+    close_price_mode: ClosePriceMode,
+    *,
+    quote_missing: bool,
+) -> StepMarkSource:
+    if quote_missing:
+        return "MISSING"
+    if step_data.all_legs_settled:
+        return "SETTLEMENT"
+    if FLAG_TRACKED_LEG_USED in step_data.flags:
+        return "TRACKED"
+    if step_data.any_leg_settled:
+        return "PARTIAL_SETTLEMENT"
+    if close_price_mode == "NATURAL_SPREAD":
+        return (
+            "NATURAL_FALLBACK" if FLAG_LEG_FALLBACK_PRICE in step_data.flags else "NATURAL_SPREAD"
+        )
+    sources = {leg.price_source for leg in step_data.legs}
+    if len(sources) == 1:
+        return _SINGLE_PRICE_TO_MARK.get(next(iter(sources)), "MIXED")
+    return "MIXED"
+
+
 def _make_daily_step(
     bar: DailyChainBar,
     bar_ctx: BarContext,
@@ -86,6 +125,7 @@ def _make_daily_step(
     entry_cash_mid_dollars: float,
     entry_basis_dollars: float,
     commission_deducted: float,
+    close_price_mode: ClosePriceMode,
     extra_flags: Sequence[str] = (),
     mark_unresolved: bool = False,
 ) -> tuple[TradeDailyStep, float | None, float | None]:
@@ -97,6 +137,8 @@ def _make_daily_step(
     else:
         gross_pnl = net_pnl = None
 
+    quote_missing = net_pnl is None
+    mark_source = _derive_step_mark_source(step_data, close_price_mode, quote_missing=quote_missing)
     step = TradeDailyStep(
         market_date=bar.market_date,
         snapshot_id=bar.snapshot_id,
@@ -113,6 +155,8 @@ def _make_daily_step(
         gross_pnl_dollars=gross_pnl,
         net_pnl_dollars=net_pnl,
         pnl_pct_of_basis=pct_or_none(net_pnl, entry_basis_dollars),
+        quote_missing=quote_missing,
+        mark_source=mark_source,
         status=step_data.status,
         flags=deduplicate_flags([*step_data.flags, *extra_flags]),
         tracked_snapshot_ids=step_data.tracked_snapshot_ids,
@@ -136,6 +180,7 @@ def _start_trade_state(
         entry_cash_mid_dollars=entry.entry_cash_mid_dollars,
         entry_basis_dollars=entry.entry_basis_dollars,
         commission_deducted=open_comm,
+        close_price_mode=config.close_price_mode,
         extra_flags=entry.flags,
     )
     return _OpenTradeState(
@@ -189,6 +234,7 @@ def _step_open_trade(
         entry_cash_mid_dollars=t.entry.entry_cash_mid_dollars,
         entry_basis_dollars=t.entry.entry_basis_dollars,
         commission_deducted=t.open_commission + close_comm,
+        close_price_mode=config.close_price_mode,
         extra_flags=exit_dec.flags,
         mark_unresolved=exit_dec.unresolved,
     )
@@ -219,13 +265,16 @@ def _step_open_trade(
     return False, net_pnl
 
 
-def _finalize(state: _OpenTradeState, last_bar: DailyChainBar) -> BacktestTradeRecord:
+def _finalize(
+    state: _OpenTradeState, last_bar: DailyChainBar, config: BacktestConfig
+) -> BacktestTradeRecord:
     return finalize_trade_record(
         trade_id=state.trade_id,
         entry_date=state.entry_date,
         entry_snapshot_id=state.entry_snapshot_id,
         strategy_kind=state.strategy_kind,
         qty=state.qty,
+        config=config,
         entry=state.entry,
         open_commission=state.open_commission,
         steps=state.steps,
@@ -264,13 +313,16 @@ def _simulate_bars(
     active_open: list[_OpenTradeState] = []
     equity_curve: list[EquityCurvePoint] = []
     notes: list[str] = []
+    skipped_by_reason: dict[str, int] = {}
     cadence = CadenceState()
     realized_pnl, peak_equity = 0.0, config.initial_capital
-    ok_bars = flagged_bars = trade_seq = 0
+    ok_bars = flagged_bars = unusable_bars = trade_seq = 0
 
     for bar_idx, bar in enumerate(ordered_bars):
         bar_ctx = extract_bar_context(bar)
         bar_flags: list[str] = list(bar_ctx.flags)
+        if FLAG_NO_USABLE_DAILY_SNAPSHOT in bar_ctx.flags:
+            unusable_bars += 1
 
         still_open: list[_OpenTradeState] = []
         for t in active_open:
@@ -293,13 +345,12 @@ def _simulate_bars(
             else should_attempt_entry(bar, bar_idx, config, len(active_open), cadence)
         )
         if want_entry:
-            if mode == "SYSTEMATIC":
-                record_entry_attempt(bar, bar_idx, cadence)
-            entry_res, entry_notes = build_entry_candidate(
+            entry_res, _entry_notes, skip_reason = build_entry_candidate_outcome(
                 bar, config, legs=entry_legs, raise_on_error=(mode == "SINGLE_TRADE"), ctx=bar_ctx
             )
-            notes.extend(entry_notes)
             if entry_res is not None:
+                if mode == "SYSTEMATIC":
+                    record_entry_attempt(bar, bar_idx, cadence)
                 trade_seq += 1
                 t_state = _start_trade_state(
                     f"{ticker}_BT_{trade_seq:04d}", bar, bar_ctx, entry_res, config
@@ -307,8 +358,9 @@ def _simulate_bars(
                 all_trades.append(t_state)
                 active_open.append(t_state)
                 bar_flags.extend(t_state.flags)
-                notes.extend(entry_res.notes)
-            elif entry_notes:
+            else:
+                reason_key = skip_reason or "ENTRY_SKIPPED"
+                skipped_by_reason[reason_key] = skipped_by_reason.get(reason_key, 0) + 1
                 bar_flags.append("ENTRY_SKIPPED")
 
         unrealized = sum(
@@ -349,8 +401,52 @@ def _simulate_bars(
             )
         )
 
-    final_trades = [_finalize(t, ordered_bars[-1]) for t in all_trades]
-    summary = build_portfolio_summary(config, final_trades, equity_curve, ok_bars, flagged_bars)
+    if unusable_bars > 0:
+        notes.append(
+            f"{unusable_bars} daily bar(s) had no usable snapshot (NO_USABLE_DAILY_SNAPSHOT)."
+        )
+
+    missing_quote_steps = sum(
+        1
+        for t in all_trades
+        for s in t.steps
+        if s.quote_missing
+        and FLAG_UNRESOLVED_EXPIRY_SPOT not in s.flags
+        and FLAG_UNRESOLVED_EXPIRY_LEG not in s.flags
+    )
+    if missing_quote_steps > 0:
+        notes.append(
+            f"{missing_quote_steps} trade daily step(s) had missing leg quotes "
+            "(MTM omitted; prior unrealized P&L carried forward on equity curve)."
+        )
+
+    fallback_quote_steps = sum(
+        1
+        for t in all_trades
+        for s in t.steps
+        if not s.quote_missing
+        and (FLAG_LEG_FALLBACK_PRICE in s.flags or FLAG_TRACKED_LEG_USED in s.flags)
+    )
+    if fallback_quote_steps > 0:
+        notes.append(
+            f"{fallback_quote_steps} trade daily step(s) used fallback or tracked-leg quotes."
+        )
+
+    if skipped_by_reason:
+        skip_parts = ", ".join(f"{k}={v}" for k, v in sorted(skipped_by_reason.items()))
+        notes.append(f"Skipped {sum(skipped_by_reason.values())} entry attempt(s): {skip_parts}.")
+    elif not all_trades:
+        notes.append("No trades opened during the simulation window.")
+
+    final_trades = [_finalize(t, ordered_bars[-1], config) for t in all_trades]
+    summary = build_portfolio_summary(
+        config,
+        final_trades,
+        equity_curve,
+        ok_bars,
+        flagged_bars,
+        skipped_by_reason=skipped_by_reason,
+    )
     return BacktestSimulationResult(
         ticker=ticker,
         mode=mode,

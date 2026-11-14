@@ -147,13 +147,21 @@ export function bindEvents() {
     });
   }
 
-  [dom.rangeSelect, dom.stepSelect, dom.dteMaxSelect].forEach(function (ctrl) {
+  [dom.rangeSelect, dom.stepSelect, dom.includeShortDteToggle].forEach(function (ctrl) {
     if (ctrl) {
       ctrl.addEventListener("change", function () {
         writeTickerPullPrefs(state.ticker);
       });
     }
   });
+
+  if (dom.dteMaxSelect) {
+    dom.dteMaxSelect.addEventListener("change", function () {
+      writeTickerPullPrefs(state.ticker);
+      var activeSnap = dom.snapshotSelect ? dom.snapshotSelect.value : state.snapshotId || "";
+      loadChain(state.ticker, activeSnap);
+    });
+  }
 
   if (dom.wallsCopyAiBtn) {
     dom.wallsCopyAiBtn.addEventListener("click", copyWallsAiPrompt);
@@ -452,7 +460,10 @@ export function bindEvents() {
     dom.corridorExpirySelect.addEventListener("change", onCorridorControlChange);
   }
   if (dom.corridorWindowSelect) {
-    dom.corridorWindowSelect.addEventListener("change", onCorridorControlChange);
+    dom.corridorWindowSelect.addEventListener("change", function () {
+      state.corridorWindowUserSet = true;
+      onCorridorControlChange();
+    });
   }
   if (dom.corridorRefreshBtn) {
     dom.corridorRefreshBtn.addEventListener("click", refreshCorridorQuotesOneShot);
@@ -473,7 +484,8 @@ export function bindEvents() {
         state.chainData &&
         state.strategyLegs.length &&
         state.corridorFrame &&
-        (state.corridorStreaming || state.corridorFrame.source !== "CACHED_PREVIEW")
+        (state.corridorStreaming ||
+          (state.corridorFrame.mode !== "PREVIEW" && state.corridorFrame.source !== "CACHED_PREVIEW"))
       ) {
         evaluateStrategyRequest({ silent: true });
       }

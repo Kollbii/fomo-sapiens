@@ -4,10 +4,14 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
 import polars as pl
 
+from src.analytics.strategies.models import LegSide
 from src.storage.schema import OptionRight
+
+EntryPriceBasis = Literal["MID", "NATURAL", "AUTO_MID_LAST_CLOSE", "LAST_CLOSE_ONLY"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +32,8 @@ class PreparedRow:
     open_interest: int | None
     volume: int | None
     option_conid: int | None
+    last: float | None = None
+    close: float | None = None
 
 
 # ------------------------------------------------------------------ Row & Quote Helpers
@@ -107,9 +113,45 @@ def prepare_rows(df: pl.DataFrame) -> tuple[str, float, list[PreparedRow]]:
                 open_interest=opt_int(raw.get("open_interest")),
                 volume=opt_int(raw.get("volume")),
                 option_conid=opt_int(raw.get("option_conid")),
+                last=opt_float(raw.get("last")),
+                close=opt_float(raw.get("close")),
             )
         )
     return underlying, spot, rows
+
+
+def _positive_price(val: float | None) -> float | None:
+    if val is None or math.isnan(val) or math.isinf(val) or val <= 0.0:
+        return None
+    return val
+
+
+def resolve_entry_leg_price(
+    row: PreparedRow,
+    side: LegSide,
+    basis: EntryPriceBasis = "MID",
+) -> float | None:
+    """Resolve leg entry price per share matching Strategy Lab or backtest entry price basis."""
+    if basis == "MID":
+        return row.mid if row.mid > 0.0 else None
+
+    bid = _positive_price(row.bid)
+    ask = _positive_price(row.ask)
+    if basis == "NATURAL":
+        side_px = bid if side == "SELL" else ask
+        if side_px is not None:
+            return side_px
+        return row.mid if row.mid > 0.0 else None
+
+    last = _positive_price(row.last)
+    close = _positive_price(row.close)
+    if basis == "LAST_CLOSE_ONLY":
+        return last if last is not None else close
+
+    # AUTO_MID_LAST_CLOSE: mirrors backtest pricing.resolve_row_prices exactly
+    if bid is not None and ask is not None and ask >= bid:
+        return (bid + ask) / 2.0
+    return last if last is not None else close
 
 
 def row_lookup_map(rows: list[PreparedRow]) -> dict[tuple[str, float, OptionRight], PreparedRow]:
@@ -141,8 +183,11 @@ def chain_reference_iv(rows: list[PreparedRow], spot: float, target_expiry: str)
     pool = same_exp or [r for r in rows if r.iv is not None and 0.01 <= r.iv <= 5.0]
     if not pool:
         return 0.35
-    near_atm = sorted(pool, key=lambda r: (abs(r.strike - spot), r.spread_pct or 999.0))
-    return float(near_atm[0].iv or 0.35)
+    near_atm = sorted(
+        pool,
+        key=lambda r: (abs(r.strike - spot), r.spread_pct if r.spread_pct is not None else 999.0),
+    )
+    return float(near_atm[0].iv) if near_atm[0].iv is not None else 0.35
 
 
 # ------------------------------------------------------------------ Wall-Anchored Auto-Builder

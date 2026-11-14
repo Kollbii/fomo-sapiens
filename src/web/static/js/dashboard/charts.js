@@ -25,7 +25,7 @@ export function renderCorridorEmptyPlaceholder() {
   }
   dom.corridorChartEl.classList.add("is-idle");
   dom.corridorChartEl.innerHTML =
-    '<div class="strategy-empty-state">Load an option snapshot to preview the Put/Call Wall \u00B15 strike corridor, or click <strong>Refresh Corridor Quotes</strong>.</div>';
+    '<div class="strategy-empty-state">Load an option snapshot to preview the Put/Call Wall \u00b110 strike corridor, or click <strong>Refresh Corridor Quotes</strong>.</div>';
 }
 
 export function renderStrategyEmptyPlaceholder() {
@@ -198,7 +198,7 @@ export function appendDteBucketOptions(selectEl, expiries, previous) {
   }
   if (!matchingBuckets.length) return;
   var group = document.createElement("optgroup");
-  group.label = "DTE Buckets (30\u2013120d)";
+  group.label = "DTE Buckets";
   for (var m = 0; m < matchingBuckets.length; m++) {
     var item = matchingBuckets[m];
     var bOpt = document.createElement("option");

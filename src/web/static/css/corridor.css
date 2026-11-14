@@ -1,7 +1,7 @@
-/* Row 5a Wall Strike Corridor tile. Loaded after tokens.css (order: base.html). */
+/* Row 4b Wall Strike Corridor tile. Loaded after tokens.css (order: base.html). */
 
 /* --------------------------------------------------------------------------
-   Row 5a: Targeted Wall Strike Corridor (+-5 Strikes & Live Streaming)
+   Row 4b: Wall Strike Corridor (11-Col IBKR T-Chain & Live Streaming)
    -------------------------------------------------------------------------- */
 .panel-card--corridor {
   height: 550px;
@@ -115,7 +115,7 @@
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(490px, 1.15fr) minmax(360px, 0.95fr);
+  grid-template-columns: minmax(540px, 1.35fr) minmax(360px, 1fr);
   gap: 12px;
   align-items: stretch;
 }
@@ -139,20 +139,56 @@
 
 .corridor-ladder-table {
   width: 100%;
-  border-collapse: collapse;
+  border-collapse: separate;
+  border-spacing: 0;
   font-family: var(--font-mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 
-.corridor-ladder-table thead th {
+.corridor-ladder-table thead tr.corridor-thead-groups th {
   position: sticky;
   top: 0;
+  z-index: 3;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 3px 6px;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+  font-family: var(--font-sans);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.corridor-ladder-table thead th.corridor-group-calls {
+  color: var(--accent-call);
+  background-image: linear-gradient(var(--accent-call-bg), var(--accent-call-bg));
+}
+
+.corridor-ladder-table thead th.corridor-group-strike {
+  color: var(--text-primary);
+  background-color: var(--bg-elevated);
+  border-left: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+}
+
+.corridor-ladder-table thead th.corridor-group-puts {
+  color: var(--accent-put);
+  background-image: linear-gradient(var(--accent-put-bg), var(--accent-put-bg));
+}
+
+.corridor-ladder-table thead tr.corridor-thead-cols th {
+  position: sticky;
+  top: 24px;
   z-index: 2;
-  background: var(--bg-surface);
+  background-color: var(--bg-surface);
   color: var(--text-secondary);
   border-bottom: 2px solid var(--border-strong);
-  padding: 5px 6px;
+  padding: 5px 5px;
   font-size: 10px;
   font-weight: 700;
   text-transform: uppercase;
@@ -160,12 +196,20 @@
   white-space: nowrap;
 }
 
+.corridor-ladder-table thead tr.corridor-thead-cols th.corridor-col-strike {
+  text-align: center;
+  background-color: var(--bg-elevated);
+  color: var(--text-primary);
+  border-left: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+}
+
 .corridor-ladder-table thead th.text-left {
   text-align: left;
 }
 
 .corridor-ladder-table tbody td {
-  padding: 4px 6px;
+  padding: 4px 5px;
   border-bottom: 1px solid var(--border-subtle);
   text-align: right;
   white-space: nowrap;
@@ -177,51 +221,127 @@
   text-align: left;
 }
 
-.corridor-ladder-table tbody tr:hover {
-  background: var(--bg-hover);
+.corridor-ladder-table tbody td.empty-row {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 18px 8px;
+  font-style: italic;
 }
 
-.corridor-ladder-table tbody tr.row-wall-put {
-  box-shadow: inset 3px 0 0 var(--accent-put);
-  background: var(--accent-put-bg);
+.corridor-ladder-table tbody td.corridor-call-mid,
+.corridor-ladder-table tbody td.corridor-put-mid {
+  font-weight: 600;
 }
 
-.corridor-ladder-table tbody tr.row-wall-call {
-  box-shadow: inset 3px 0 0 var(--accent-call);
-  background: var(--accent-call-bg);
+.corridor-ladder-table tbody td.corridor-call-cell.corridor-side-itm {
+  background-color: var(--corridor-itm-call-bg);
 }
 
-.corridor-ladder-table tbody tr.row-strategy-leg {
-  outline: 1px dashed var(--accent-warn);
-  outline-offset: -1px;
+.corridor-ladder-table tbody td.corridor-put-cell.corridor-side-itm {
+  background-color: var(--corridor-itm-put-bg);
 }
 
-.corridor-zone-pill {
+.corridor-ladder-table tbody td.corridor-strike-cell {
+  text-align: center;
+  font-weight: 700;
+  color: var(--text-primary);
+  background-color: var(--bg-elevated);
+  border-left: 1px solid var(--border-strong);
+  border-right: 1px solid var(--border-strong);
+  padding: 4px 7px;
+}
+
+.corridor-strike-value {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.corridor-off-expiry-tag {
+  display: inline-block;
+  margin-left: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text-muted);
+  vertical-align: middle;
+}
+
+.corridor-strike-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: 5px;
+  vertical-align: middle;
+}
+
+.wall-badge {
   display: inline-block;
   padding: 1px 4px;
   border-radius: var(--radius-xs);
   border: 1px solid var(--border-subtle);
-  background: var(--bg-elevated);
+  background: var(--bg-surface);
   color: var(--text-secondary);
+  font-family: var(--font-sans);
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.04em;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
-.corridor-zone-pill--pw {
+.wall-badge-put {
   border-color: var(--accent-put);
   color: var(--accent-put);
+  background: var(--accent-put-bg);
 }
 
-.corridor-zone-pill--cw {
+.wall-badge-call {
   border-color: var(--accent-call);
   color: var(--accent-call);
+  background: var(--accent-call-bg);
 }
 
-.corridor-zone-pill--leg {
+.wall-badge-atm {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+  background: var(--accent-atm-bg);
+}
+
+.wall-badge-strategy {
   border-color: var(--accent-warn);
   color: var(--accent-warn);
-  margin-left: 3px;
+  background: var(--accent-warn-bg);
+}
+
+.corridor-ladder-table tbody tr:hover td {
+  background-color: var(--bg-hover);
+}
+
+.corridor-ladder-table tbody tr.corridor-row-atm td.corridor-strike-cell {
+  background-color: var(--accent-atm-bg);
+  box-shadow:
+    inset 0 1px 0 var(--border-strong),
+    inset 0 -1px 0 var(--border-strong);
+}
+
+.corridor-ladder-table tbody tr.corridor-row-put-wall td.corridor-put-cell {
+  background-image: linear-gradient(var(--accent-put-bg), var(--accent-put-bg));
+}
+
+.corridor-ladder-table tbody tr.corridor-row-put-wall td:last-child {
+  box-shadow: inset -3px 0 0 var(--accent-put);
+}
+
+.corridor-ladder-table tbody tr.corridor-row-call-wall td.corridor-call-cell {
+  background-image: linear-gradient(var(--accent-call-bg), var(--accent-call-bg));
+}
+
+.corridor-ladder-table tbody tr.corridor-row-call-wall td:first-child {
+  box-shadow: inset 3px 0 0 var(--accent-call);
+}
+
+.corridor-ladder-table tbody tr.corridor-row-strategy td {
+  border-top: 1px dashed var(--accent-warn);
+  border-bottom: 1px dashed var(--accent-warn);
 }
 
 @keyframes corridorFlashUp {
@@ -242,10 +362,14 @@
   }
 }
 
+.corridor-ladder-table tbody td.corridor-call-mid.flash-up,
+.corridor-ladder-table tbody td.corridor-put-mid.flash-up,
 .corridor-ladder-table tbody td.flash-up {
   animation: corridorFlashUp 0.9s ease-out;
 }
 
+.corridor-ladder-table tbody td.corridor-call-mid.flash-down,
+.corridor-ladder-table tbody td.corridor-put-mid.flash-down,
 .corridor-ladder-table tbody td.flash-down {
   animation: corridorFlashDown 0.9s ease-out;
 }

@@ -59,6 +59,39 @@ class FetchResult:
     elapsed_ms: float
     notices: tuple[str, ...] = ()
     page_quote_counts: tuple[int, ...] = ()
+    primary_contract_count: int | None = None
+    short_dte_contract_count: int = 0
+    short_dte_range: tuple[int, int] | None = None
+
+
+def _row_quote_score(row: OptionContractRow) -> int:
+    """Rank quote richness so deduplication keeps better-quoted rows."""
+    if row.bid is not None and row.ask is not None:
+        return 3
+    if row.bid is not None or row.ask is not None or row.last is not None:
+        return 2
+    if row.close is not None:
+        return 1
+    return 0
+
+
+def _merge_and_dedupe_rows(
+    pass1_rows: Sequence[OptionContractRow],
+    pass2_rows: Sequence[OptionContractRow],
+) -> list[OptionContractRow]:
+    """Deduplicate merged Pass 1 + Pass 2 rows by `(expiry, round(strike, 4), right)`."""
+    best: dict[tuple[str, float, str], tuple[tuple[int, int], OptionContractRow]] = {}
+    for is_pass1, batch in ((1, pass1_rows), (0, pass2_rows)):
+        for row in batch:
+            key = (row.expiry, round(row.strike, 4), row.right)
+            rank = (_row_quote_score(row), is_pass1)
+            existing = best.get(key)
+            if existing is None or rank > existing[0]:
+                best[key] = (rank, row)
+    return sorted(
+        (pair[1] for pair in best.values()),
+        key=lambda r: (r.expiry, r.strike, r.right),
+    )
 
 
 @dataclass(frozen=True)
@@ -457,10 +490,24 @@ class PagedOptionChainFetcher:
         strike_step: float | None = None,
         dte_min: int | None = None,
         dte_max: int | None = None,
+        *,
+        include_short_dte: bool = False,
+        short_dte_min: int | None = None,
+        short_dte_max: int | None = None,
     ) -> FetchResult:
-        """Execute the full 5-stage pipeline and return validated `OptionContractRow` rows."""
+        """Execute the full 5-stage pipeline (and optional sequential short-DTE pass)."""
         t0 = time.perf_counter()
         self._notices = []
+        oc = self.settings.options_chain
+        eff_dte_min = oc.dte_min if dte_min is None else int(dte_min)
+        eff_dte_max = oc.dte_max if dte_max is None else int(dte_max)
+        eff_short_min = oc.short_dte_min if short_dte_min is None else int(short_dte_min)
+        eff_short_max = oc.short_dte_max if short_dte_max is None else int(short_dte_max)
+        if eff_short_min > eff_short_max:
+            raise OptionChainFetchError(
+                f"Invalid short DTE bounds: {eff_short_min} > {eff_short_max} for {ticker}"
+            )
+
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
 
@@ -468,8 +515,8 @@ class PagedOptionChainFetcher:
             ticker,
             range_pct=range_pct,
             strike_step=strike_step,
-            dte_min=dte_min,
-            dte_max=dte_max,
+            dte_min=eff_dte_min,
+            dte_max=eff_dte_max,
         )
         candidates = self.build_candidate_contracts(plan)
         qualified = await self.qualify_option_contracts(candidates)
@@ -496,11 +543,11 @@ class PagedOptionChainFetcher:
         )
         dte_map = {m.ib_expiry: m.dte for m in plan.expirations}
 
-        rows: list[OptionContractRow] = []
+        rows1: list[OptionContractRow] = []
         for contract, tk in zip(qualified, tickers, strict=True):
             ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
             dte = dte_map.get(ib_exp)
-            rows.append(
+            rows1.append(
                 TickerParser.parse_ticker(
                     tk,
                     contract=contract,
@@ -510,13 +557,84 @@ class PagedOptionChainFetcher:
             )
 
         page_size = self.max_contracts_per_page
-        page_quote_counts = tuple(
+        page_quote_counts1 = tuple(
             sum(1 for tk in tickers[i : i + page_size] if has_real_quote(tk))
             for i in range(0, len(tickers), page_size)
         )
+
+        # Sequential Pass 2 for [short_dte_min, min(short_dte_max, eff_dte_min - 1)] after Pass 1
+        # has completed 100% of its cancelMktData calls inside _collect_page_once's finally:.
+        pass2_min = eff_short_min
+        pass2_max = min(eff_short_max, eff_dte_min - 1)
+        rows2: list[OptionContractRow] = []
+        pages2 = 0
+        page_quote_counts2: tuple[int, ...] = ()
+        short_range_used: tuple[int, int] | None = None
+        all_dtes_matched = [m.dte for m in plan.expirations]
+
+        if include_short_dte and pass2_min <= pass2_max:
+            try:
+                plan2 = await self.discovery.build_plan(
+                    ticker,
+                    range_pct=range_pct,
+                    strike_step=strike_step,
+                    dte_min=pass2_min,
+                    dte_max=pass2_max,
+                    underlying_info=plan.underlying,
+                    smart_chains=plan.smart_chains or None,
+                    market_date=plan.market_date,
+                )
+                candidates2 = self.build_candidate_contracts(plan2)
+                qualified2 = await self.qualify_option_contracts(candidates2)
+                if self.active_cooldown_sec > 0:
+                    await self.sleep(self.active_cooldown_sec)
+                tickers2, pages2 = await self.fetch_pages(qualified2)
+
+                sub_notice2 = self.client.consume_subscription_fallback_notice()
+                if sub_notice2 and sub_notice2 not in self._notices:
+                    self._notices.append(sub_notice2)
+
+                dte_map2 = {m.ib_expiry: m.dte for m in plan2.expirations}
+                for contract, tk in zip(qualified2, tickers2, strict=True):
+                    ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
+                    dte2 = dte_map2.get(ib_exp)
+                    rows2.append(
+                        TickerParser.parse_ticker(
+                            tk,
+                            contract=contract,
+                            context=ctx,
+                            dte=dte2,
+                        )
+                    )
+                page_quote_counts2 = tuple(
+                    sum(1 for tk in tickers2[i : i + page_size] if has_real_quote(tk))
+                    for i in range(0, len(tickers2), page_size)
+                )
+                short_range_used = (pass2_min, pass2_max)
+                all_dtes_matched = sorted({*all_dtes_matched, *(m.dte for m in plan2.expirations)})
+                for notice2 in plan2.notices:
+                    tagged = f"[Backtest {pass2_min}–{pass2_max}d] {notice2}"
+                    if tagged not in self._notices:
+                        self._notices.append(tagged)
+            except OptionChainFetchError as exc:
+                skip_msg = f"Backtest short-DTE [{pass2_min}, {pass2_max}] sync skipped: {exc}"
+                self._notices.append(skip_msg)
+                logger.info("%s", skip_msg)
+
+        if rows2:
+            rows = _merge_and_dedupe_rows(rows1, rows2)
+            self._notices.append(
+                f"Synced {eff_dte_min}–{eff_dte_max}d ({len(rows1)} contracts) + "
+                f"{pass2_min}–{pass2_max}d for Backtest ({len(rows2)} contracts) -> "
+                f"{len(rows)} total archived"
+            )
+        else:
+            rows = rows1
+
+        total_pages = pages_fetched + pages2
+        page_quote_counts = (*page_quote_counts1, *page_quote_counts2)
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         source_counts = dict(Counter(r.greeks_source for r in rows))
-        dtes_matched = [m.dte for m in plan.expirations]
         logger.info(
             "refresh_summary ticker=%s market_data_type=%d spot_price=%.4f "
             "dtes_matched=%s range_pct=%.4f strike_step=%.4f total_contracts=%d "
@@ -525,11 +643,11 @@ class PagedOptionChainFetcher:
             plan.underlying.symbol,
             active_md_type,
             plan.underlying.spot,
-            dtes_matched,
+            all_dtes_matched,
             plan.range_pct,
             plan.strikes.effective_step,
             len(rows),
-            pages_fetched,
+            total_pages,
             list(page_quote_counts),
             plan.underlying.spot_source,
             elapsed_ms,
@@ -545,10 +663,13 @@ class PagedOptionChainFetcher:
             market_data_type=active_md_type,
             plan=plan,
             rows=rows,
-            pages_fetched=pages_fetched,
+            pages_fetched=total_pages,
             elapsed_ms=elapsed_ms,
             notices=notices,
             page_quote_counts=page_quote_counts,
+            primary_contract_count=len(rows1),
+            short_dte_contract_count=len(rows2),
+            short_dte_range=short_range_used,
         )
 
     async def fetch_exact_contracts(

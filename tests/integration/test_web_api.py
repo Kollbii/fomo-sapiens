@@ -187,10 +187,14 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert st["watchlist"] == ["NVDA", "AVGO", "CRDO", "PLTR"]
                 assert st["dte_min"] == 30
                 assert st["dte_max"] == 120
+                assert st["include_short_dte_for_backtest"] is True
                 assert st["default_strike_step"] is None
                 assert st["available_strike_steps"] == st["allowed_strike_steps"]
                 assert st["available_range_pcts"] == st["allowed_range_pcts"]
                 assert st["active_capabilities_ticker"] is None
+                assert st["corridor_default_window_strikes"] == 10
+                assert st["corridor_default_max_contracts"] == 88
+                assert st["corridor_hard_max_contracts"] == 90
 
                 mock_ib.client.marketDataType = 1
                 r_status_live = await client.get("/api/status")
@@ -427,7 +431,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261113a"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261114a"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -484,6 +488,12 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "30&ndash;120 DTE WEEKLY EXPIRATIONS" in html
             assert '<option value="auto" selected>Auto</option>' in html
             assert 'id="dte-max-select"' in html
+            assert 'value="0:29">0&ndash;29d (Short)</option>' in html
+            assert 'value="0:120">0&ndash;120d (All)</option>' in html
+            assert 'id="include-short-dte-toggle"' in html
+            assert 'id="backtest-dte-max"' in html
+            assert 'min="0" max="120"' in html
+            assert 'data-dte-bucket="BUCKET:0-29"' in html
             assert 'id="dte-bucket-tabs"' in html
             assert 'data-dte-bucket="BUCKET:61-90"' in html
             assert 'data-dte-bucket="BUCKET:91-120"' in html
@@ -495,7 +505,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261113a">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261114a">' in html
             assert html.count('<option value="">Auto (Follow Walls)</option>') == 2
             assert 'id="collector-control"' not in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
@@ -519,6 +529,13 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "ibkr_walls_show_anomalies",
                 "walls-dte-select",
                 "dte-max-select",
+                "include-short-dte-toggle",
+                "parseDashboardDteWindow",
+                "buildRefreshDtePayload",
+                "include_short_dte",
+                "display_dte_min",
+                "display_dte_max",
+                "BUCKET:0-29",
                 "dte-bucket-tabs",
                 "matchesDteFilterValue",
                 "syncDteBucketTabs",
@@ -562,6 +579,12 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "refreshCorridorQuotesOneShot",
                 "refreshStrategyLegsQuotesOnly",
                 "renderCorridorChart",
+                "renderCorridorLadderChart",
+                "renderCorridorTable",
+                "updateCorridorSubsBadge",
+                "getDefaultWindowStrikes",
+                "getDefaultMaxContracts",
+                "getHardMaxContracts",
                 "TABLE_COLUMNS",
                 "matchesNumericFilterExpr",
                 "applyTableSort",
@@ -590,6 +613,20 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="backtest-card"' in html
             assert 'id="snapshot-picker"' in html
             assert 'id="wall-corridor-card"' in html
+            assert '<h2 class="panel-title">Wall Strike Corridor</h2>' in html
+            assert "0 / 90 SUBS" in html
+            assert '<option value="10" selected>&plusmn;10 Strikes</option>' in html
+            assert 'id="corridor-table"' in html
+            assert 'id="corridor-tbody"' in html
+            assert (
+                '<th colspan="5" class="corridor-group-th corridor-group-calls">CALLS</th>' in html
+            )
+            assert (
+                '<th colspan="1" class="corridor-group-th corridor-group-strike">STRIKE</th>'
+                in html
+            )
+            assert '<th colspan="5" class="corridor-group-th corridor-group-puts">PUTS</th>' in html
+            assert '<td colspan="11" class="empty-row">No corridor quotes loaded.</td>' in html
             assert 'id="corridor-refresh-btn"' in html
             assert 'id="corridor-stream-toggle"' in html
             assert 'id="corridor-reprice-btn"' not in html
@@ -602,6 +639,10 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".panel-card--corridor" in r_css.text
             assert ".corridor-stream-switch" in r_css.text
             assert ".chart-canvas--corridor" in r_css.text
+            assert ".corridor-thead-groups" in r_css.text
+            assert ".corridor-strike-cell" in r_css.text
+            assert ".wall-badge-atm" in r_css.text
+            assert ".corridor-side-itm" in r_css.text
             assert ".panel-card--strategy" in r_css.text
             assert ".chart-canvas--strategy" in r_css.text
             assert ".chart-canvas--strategy.is-idle" in r_css.text
@@ -887,5 +928,89 @@ def test_service_level_validation_errors_map_to_structured_422(tmp_path: Path) -
                 body = resp.json()
                 assert body["error_code"] == "INVALID_REQUEST"
                 assert body["message"] == body["detail"] == "dte_min must be <= dte_max"
+
+    run_coro(_exercise())
+
+
+def test_short_dte_refresh_display_isolation_and_zero_dte_chain_and_strategy(
+    tmp_path: Path,
+) -> None:
+    app, repo, mock_ib = _build_test_app(tmp_path, offline=False)
+
+    async def _expirations_with_short_and_zero_dte(
+        symbol: str, _fut_exch: str, _sec_type: str, _con_id: int
+    ) -> list[Any]:
+        base = date(2026, 11, 11)
+        exps = [(base + timedelta(days=d)).strftime("%Y%m%d") for d in (0, 9, 16, 37, 65)]
+        return [
+            SimpleNamespace(
+                exchange="SMART",
+                tradingClass=symbol,
+                multiplier="100",
+                expirations=exps,
+                strikes=[135.0, 140.0, 145.0],
+            )
+        ]
+
+    mock_ib.reqSecDefOptParamsAsync = _expirations_with_short_and_zero_dte  # type: ignore[method-assign]
+
+    async def _exercise() -> None:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            r_ref = await client.post(
+                "/api/refresh",
+                json={
+                    "ticker": "NVDA",
+                    "range_pct": 0.20,
+                    "strike_step": 5.0,
+                    "dte_min": 30,
+                    "dte_max": 120,
+                    "include_short_dte": True,
+                    "display_dte_min": 30,
+                    "display_dte_max": 120,
+                },
+            )
+            assert r_ref.status_code == 200
+            ref_body = r_ref.json()
+            assert ref_body["meta"]["dtes"] == [37, 65]
+
+            # Full merged archive includes 0-DTE and short-DTE rows on disk
+            archived = repo.load_latest("NVDA")
+            archived_dtes = sorted({int(x) for x in archived["dte"].to_list()})
+            assert 0 in archived_dtes
+            assert any(0 < d < 30 for d in archived_dtes)
+            assert 37 in archived_dtes
+
+            # Omitted query bounds isolate >= 30 DTE by default
+            r_default = await client.get("/api/chain/NVDA")
+            assert r_default.status_code == 200
+            assert r_default.json()["meta"]["dtes"] == [37, 65]
+
+            # Explicit 0..29 query surfaces short-DTE slice from cache
+            r_short = await client.get("/api/chain/NVDA", params={"dte_min": 0, "dte_max": 29})
+            assert r_short.status_code == 200
+            short_dtes = r_short.json()["meta"]["dtes"]
+            assert all(0 <= d <= 29 for d in short_dtes)
+            assert 0 in short_dtes
+
+            # Explicit 0..0 DTE query is valid (dte_max ge=0)
+            r_zero = await client.get("/api/chain/NVDA", params={"dte_min": 0, "dte_max": 0})
+            assert r_zero.status_code == 200
+            assert r_zero.json()["meta"]["dtes"] == [0]
+
+            # Strategy suggest supports 0..29 DTE window
+            r_strat = await client.post(
+                "/api/strategy/suggest",
+                json={
+                    "ticker": "NVDA",
+                    "strategy_kind": "BULL_PUT_SPREAD",
+                    "dte_min": 0,
+                    "dte_max": 29,
+                },
+            )
+            assert r_strat.status_code == 200
+            evals = r_strat.json()["evaluations"]
+            assert len(evals) == 1
+            assert all(0 <= leg["dte"] <= 29 for leg in evals[0]["legs"])
 
     run_coro(_exercise())

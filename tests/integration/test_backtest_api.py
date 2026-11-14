@@ -318,7 +318,20 @@ def test_backtest_run_modes_switches_and_errors(
                 assert sys_body["daily_bar_count"] >= 4
                 assert sys_body["simulation"]["config"]["tp_sl_basis"] == "CREDIT_DEBIT_PCT"
                 assert sys_body["simulation"]["summary"]["trade_count"] >= 1
+                assert "realized_pnl_dollars" in sys_body["simulation"]["summary"]
+                assert "unrealized_pnl_dollars" in sys_body["simulation"]["summary"]
                 assert sys_body["simulation"]["equity_curve"]
+
+                first_trade = sys_body["simulation"]["trades"][0]
+                assert "selection_notes" in first_trade
+                assert isinstance(first_trade["selection_notes"], list)
+                assert first_trade["profit_target_dollars"] is not None
+                assert first_trade["stop_loss_dollars"] is not None
+                assert first_trade["stop_loss_dollars"] < 0
+                missing_steps = [s for s in first_trade["steps"] if s["quote_missing"]]
+                valid_steps = [s for s in first_trade["steps"] if not s["quote_missing"]]
+                assert missing_steps and missing_steps[0]["mark_source"] == "MISSING"
+                assert valid_steps and valid_steps[0]["mark_source"] in {"MID", "LAST", "CLOSE"}
 
                 r_alt = await client.post(
                     "/api/backtest/run",
@@ -542,5 +555,118 @@ def test_refresh_busy_returns_409_with_retry_after(
                     assert body["detail"] == body["message"]
             finally:
                 svc.release_refresh()
+
+    run_coro(_exercise())
+
+
+def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _build_app(tmp_path)
+    asgi_app = _patch_inline_threads(monkeypatch, app)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                r_page = await client.get("/")
+                assert r_page.status_code == 200
+                html = r_page.text
+                assert 'id="backtest-card"' in html
+                assert 'id="backtest-min-credit"' in html
+                assert 'id="backtest-min-ror"' in html
+                assert "data-bt-entry-filters" in html
+                assert 'id="backtest-chart-toolbar"' in html
+                assert 'id="backtest-chart-caption"' in html
+                assert 'id="backtest-chart-view-group"' in html
+                assert 'data-bt-chart-view="EQUITY"' in html
+                assert 'data-bt-chart-view="TRADE"' in html
+                assert "Trade &amp; Legs History" in html
+                assert "Daily Mark-to-Market Step History" in html
+                assert "?v=20261114a" in html
+
+                r_css = await client.get("/static/css/backtest.css")
+                assert r_css.status_code == 200
+                assert ".backtest-drawer" in r_css.text
+                assert ".backtest-pill--missing" in r_css.text
+
+                r_js_charts = await client.get("/static/js/dashboard/backtest_charts.js")
+                assert r_js_charts.status_code == 200
+                assert "if (!dom.backtestChartEl.data)" in r_js_charts.text
+                assert "window.Plotly.purge(dom.backtestChartEl)" in r_js_charts.text
+                assert "&bull;" not in r_js_charts.text
+                assert "&mdash;" not in r_js_charts.text
+
+                r_js_tables = await client.get("/static/js/dashboard/backtest_tables.js")
+                assert r_js_tables.status_code == 200
+                assert "toggleBacktestTradeExpand" in r_js_tables.text
+                assert "MISSING QUOTE" in r_js_tables.text
+                assert "&bull;" not in r_js_tables.text
+                assert "&mdash;" not in r_js_tables.text
+
+                # min_entry_credit_dollars=150 allows $190/$163 spreads and skips lower-credit bars.
+                r_credit_skip = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SYSTEMATIC",
+                        "ticker": "NVDA",
+                        "config": {
+                            "strategy_kind": "BULL_PUT_SPREAD",
+                            "entry_cadence": "EVERY_N_DAYS",
+                            "entry_every_n_days": 1,
+                            "max_open_trades": 5,
+                            "min_entry_credit_dollars": 150.0,
+                            "min_entry_ror_pct": None,
+                        },
+                    },
+                )
+                assert r_credit_skip.status_code == 200
+                skip_sim = r_credit_skip.json()["simulation"]
+                assert skip_sim["config"]["min_entry_credit_dollars"] == 150.0
+                assert skip_sim["summary"]["trade_count"] == 2
+                assert skip_sim["summary"]["skipped_entries_count"] == 3
+                assert skip_sim["summary"]["skipped_by_reason"].get("BELOW_MIN_CREDIT") == 2
+
+                # Null min_entry_credit_dollars disables $100 default; min_entry_ror_pct=28 keeps 1.
+                r_ror = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SYSTEMATIC",
+                        "ticker": "NVDA",
+                        "config": {
+                            "strategy_kind": "BULL_PUT_SPREAD",
+                            "entry_cadence": "EVERY_N_DAYS",
+                            "entry_every_n_days": 1,
+                            "max_open_trades": 5,
+                            "min_entry_credit_dollars": None,
+                            "min_entry_ror_pct": 28.0,
+                        },
+                    },
+                )
+                assert r_ror.status_code == 200
+                ror_sim = r_ror.json()["simulation"]
+                assert ror_sim["config"]["min_entry_credit_dollars"] is None
+                assert ror_sim["config"]["min_entry_ror_pct"] == 28.0
+                assert ror_sim["summary"]["trade_count"] == 1
+                assert ror_sim["summary"]["skipped_entries_count"] == 4
+                assert ror_sim["summary"]["skipped_by_reason"].get("BELOW_MIN_ROR") == 3
+
+                # Negative filter bounds fail validation with 422.
+                for bad_cfg in (
+                    {"min_entry_credit_dollars": -10.0},
+                    {"min_entry_ror_pct": -1.0},
+                    {"min_entry_ror_pct": 1001.0},
+                ):
+                    r_bad = await client.post(
+                        "/api/backtest/run",
+                        json={
+                            "mode": "SYSTEMATIC",
+                            "ticker": "NVDA",
+                            "config": bad_cfg,
+                        },
+                    )
+                    assert r_bad.status_code == 422
 
     run_coro(_exercise())

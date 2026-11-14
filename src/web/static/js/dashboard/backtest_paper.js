@@ -293,15 +293,24 @@ async function resolveLegsForPaperTrade(snapshotId) {
     };
   }
   if (strat !== "CUSTOM") {
+    var btDteMin = dom.backtestDteMin ? parseInt(dom.backtestDteMin.value, 10) : NaN;
+    var btDteMax = dom.backtestDteMax ? parseInt(dom.backtestDteMax.value, 10) : NaN;
+    var suggestBody = {
+      ticker: state.ticker,
+      snapshot_id: snapshotId,
+      strategy_kind: strat,
+      qty_multiplier: 1,
+    };
+    if (!Number.isNaN(btDteMin) && btDteMin >= 0) {
+      suggestBody.dte_min = btDteMin;
+    }
+    if (!Number.isNaN(btDteMax) && btDteMax >= 1) {
+      suggestBody.dte_max = btDteMax;
+    }
     var suggestRes = await apiJson("/api/strategy/suggest", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ticker: state.ticker,
-        snapshot_id: snapshotId,
-        strategy_kind: strat,
-        qty_multiplier: 1,
-      }),
+      body: JSON.stringify(suggestBody),
     });
     var evals =
       suggestRes.ok && suggestRes.body && Array.isArray(suggestRes.body.evaluations)

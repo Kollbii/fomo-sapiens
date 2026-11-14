@@ -18,6 +18,7 @@ import {
   fmtNum,
   formatPullScopeSummary,
   gatewayAddressLabel,
+  readTickerPullPrefs,
   syncControlCapabilities,
 } from "./helpers.js";
 
@@ -56,6 +57,16 @@ export function renderStatusBadges(statusPayload) {
       ", Fallback Type " +
       configuredFallbackMdType() +
       subNote;
+  }
+  if (
+    dom.includeShortDteToggle &&
+    statusPayload &&
+    typeof statusPayload.include_short_dte_for_backtest === "boolean"
+  ) {
+    var savedPrefs = readTickerPullPrefs(state.ticker);
+    if (!savedPrefs || typeof savedPrefs.include_short_dte !== "boolean") {
+      dom.includeShortDteToggle.checked = statusPayload.include_short_dte_for_backtest;
+    }
   }
   if (statusPayload && !state.chainData) {
     syncControlCapabilities(statusPayload);

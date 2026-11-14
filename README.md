@@ -16,7 +16,7 @@ Strategy Lab in a dual-theme (NYT Print / Obsidian Terminal) web UI.
 - Paged fetching (`<= 80` contracts/page, `<= 400` per refresh) that respects IBKR pacing limits.
 - Offline-first: the UI works from cached snapshots while Gateway is closed.
 - Put/Call Walls (OI with Volume fallback), `Volume > OI` and Z-score anomalies, IV smile and Greeks overlays.
-- Wall Corridor: `<= 60` targeted live quotes around the walls (one-shot or SSE stream).
+- Wall Strike Corridor: `<= 90` targeted live quotes (`88` options + `1` spot around `±10` default wall strikes, one-shot or SSE stream).
 - Strategy Lab: spreads, iron condors, diagonals, custom legs; risk, POP, expected move, `T+n` payoff curves.
 - Trade Ledger & Roll Chains: Flex Web Service v3 + optional Gateway sync, FIFO matching, and realized vs. open MTM views.
 - Daily-Bar Options Backtester & Paper Tracker: offline daily-bar systematic/single-trade simulation plus manual-refresh leg quote follow-up (`data/tracked/`).

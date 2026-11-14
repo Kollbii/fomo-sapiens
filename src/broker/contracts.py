@@ -94,6 +94,7 @@ class ChainPlan:
     available_strike_steps: tuple[float, ...] = ()
     available_range_pcts: tuple[float, ...] = ()
     exchange_native_verified: bool = True
+    smart_chains: tuple[OptionChainLike, ...] = field(default=(), compare=False, repr=False)
 
     @property
     def total_contracts(self) -> int:
@@ -730,6 +731,10 @@ class ContractDiscoveryService:
         strike_step: float | None = None,
         dte_min: int | None = None,
         dte_max: int | None = None,
+        *,
+        underlying_info: UnderlyingInfo | None = None,
+        smart_chains: Sequence[OptionChainLike] | None = None,
+        market_date: date | None = None,
     ) -> ChainPlan:
         oc = self.settings.options_chain
         rp = oc.default_range_pct if range_pct is None else range_pct
@@ -740,26 +745,41 @@ class ContractDiscoveryService:
                 f"Invalid DTE bounds: {eff_dte_min} > {eff_dte_max} for {ticker}"
             )
 
-        contract = await self.qualify_underlying(ticker)
-        spot, spot_source = await self.resolve_spot_with_source(contract)
-        smart_chains = await self.fetch_chains(contract)
-        primary_chain = select_chain(smart_chains, contract.symbol)
+        if underlying_info is None:
+            contract = await self.qualify_underlying(ticker)
+            spot, spot_source = await self.resolve_spot_with_source(contract)
+            resolved_underlying = UnderlyingInfo(
+                contract.symbol, int(contract.conId), contract, spot, spot_source
+            )
+        else:
+            TickerValidator.validate(ticker)
+            resolved_underlying = underlying_info
+            contract = resolved_underlying.contract
+            spot = resolved_underlying.spot
 
-        market_date = market_date_for(self.clock())
-        raw_expirations = [exp for ch in smart_chains for exp in ch.expirations]
+        resolved_chains = (
+            list(smart_chains) if smart_chains is not None else await self.fetch_chains(contract)
+        )
+        primary_chain = select_chain(resolved_chains, resolved_underlying.symbol)
+
+        resolved_market_date = (
+            market_date if market_date is not None else market_date_for(self.clock())
+        )
+        raw_expirations = [exp for ch in resolved_chains for exp in ch.expirations]
         expirations = match_expirations(
             raw_expirations,
-            market_date,
+            resolved_market_date,
             eff_dte_min,
             eff_dte_max,
         )
         if not expirations:
             raise OptionChainFetchError(
-                f"No weekly expirations in [{eff_dte_min}, {eff_dte_max}] DTE for {contract.symbol}"
+                f"No weekly expirations in [{eff_dte_min}, {eff_dte_max}] DTE for "
+                f"{resolved_underlying.symbol}"
             )
 
         exact_by_exp = await self._prefetch_exact_contracts_by_exp(
-            contract.symbol, expirations, smart_chains
+            resolved_underlying.symbol, expirations, resolved_chains
         )
         per_exp_strikes: dict[str, list[float]] = {}
         for exp in expirations:
@@ -778,7 +798,8 @@ class ContractDiscoveryService:
         if strike_step is None:
             step = choose_auto_strike_step(all_exchange_strikes, spot, rp, max_strikes=max_strikes)
             notices.append(
-                f"Auto strike step selected ${step:g} for {contract.symbol} spot ${spot:.2f}"
+                f"Auto strike step selected ${step:g} for {resolved_underlying.symbol} "
+                f"spot ${spot:.2f}"
             )
         else:
             step = float(strike_step)
@@ -823,7 +844,7 @@ class ContractDiscoveryService:
             adapted_str = ", ".join(f"${v:g}" for v in adapted_vals)
             notices.append(
                 f"Adapted strike step from requested ${strikes.requested_step:g} to "
-                f"exchange-native {adapted_str} for {contract.symbol} "
+                f"exchange-native {adapted_str} for {resolved_underlying.symbol} "
                 f"(cap {self.max_total_contracts} contracts)"
             )
             logger.info(notices[-1])
@@ -862,10 +883,8 @@ class ContractDiscoveryService:
             )
 
         return ChainPlan(
-            underlying=UnderlyingInfo(
-                contract.symbol, int(contract.conId), contract, spot, spot_source
-            ),
-            market_date=market_date,
+            underlying=resolved_underlying,
+            market_date=resolved_market_date,
             exchange="SMART",
             trading_class=primary_chain.tradingClass,
             multiplier=primary_chain.multiplier,
@@ -878,4 +897,5 @@ class ContractDiscoveryService:
             available_strike_steps=avail_steps,
             available_range_pcts=avail_ranges,
             exchange_native_verified=True,
+            smart_chains=tuple(resolved_chains),
         )

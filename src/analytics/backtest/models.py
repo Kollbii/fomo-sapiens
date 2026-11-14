@@ -39,6 +39,18 @@ TpSlBasis = Literal["CREDIT_DEBIT_PCT", "MAX_RISK_PCT"]
 EntryCadence = Literal["WEEKLY_DAY", "EVERY_N_DAYS", "WHEN_FLAT"]
 ExitReason = Literal["PROFIT_TARGET", "STOP_LOSS", "EXIT_DTE", "EXPIRY_SETTLED", "END_OF_DATA"]
 StepStatus = Literal["OK", "UNRELIABLE", "INCOMPLETE"]
+StepMarkSource = Literal[
+    "MID",
+    "LAST",
+    "CLOSE",
+    "NATURAL_SPREAD",
+    "NATURAL_FALLBACK",
+    "MIXED",
+    "TRACKED",
+    "PARTIAL_SETTLEMENT",
+    "SETTLEMENT",
+    "MISSING",
+]
 TradeStatus = Literal["CLOSED", "OPEN", "UNRESOLVED"]
 
 LegPriceSource = Literal["MID", "LAST", "CLOSE", "BID", "ASK", "INTRINSIC", "NO_PRICE"]
@@ -55,7 +67,7 @@ class BacktestConfig(BaseModel):
 
     strategy_kind: StrategyKind = "BULL_PUT_SPREAD"
     target_dte_min: int = Field(default=30, ge=0, le=120)
-    target_dte_max: int = Field(default=60, ge=1, le=120)
+    target_dte_max: int = Field(default=60, ge=0, le=120)
     entry_cadence: EntryCadence = "WEEKLY_DAY"
     entry_weekday: int = Field(default=4, ge=0, le=4)
     entry_every_n_days: int = Field(default=5, ge=1, le=60)
@@ -71,6 +83,23 @@ class BacktestConfig(BaseModel):
     exit_dte: int | None = Field(default=None, ge=0, le=120)
     risk_free_rate: float = Field(default=DEFAULT_RISK_FREE_RATE, ge=0.0, le=1.0)
     walls_top_n: int = Field(default=3, ge=1, le=20)
+    min_entry_credit_dollars: float | None = Field(
+        default=100.0,
+        ge=0.0,
+        description=(
+            "Minimum net credit in dollars per 1-spread baseline (credit_per_share * 100, "
+            "independent of qty) for auto-built BULL_PUT_SPREAD entries; 0.0 or None disables."
+        ),
+    )
+    min_entry_ror_pct: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1000.0,
+        description=(
+            "Minimum entry Return on Risk percentage (net_credit / max_loss * 100) for "
+            "auto-built BULL_PUT_SPREAD entries; 0.0 or None disables."
+        ),
+    )
 
     @model_validator(mode="after")
     def _validate_dte_window(self) -> Self:
@@ -124,6 +153,8 @@ class TradeDailyStep(BaseModel):
     gross_pnl_dollars: float | None = None
     net_pnl_dollars: float | None = None
     pnl_pct_of_basis: float | None = None
+    quote_missing: bool = False
+    mark_source: StepMarkSource | None = None
     status: StepStatus
     flags: list[str] = Field(default_factory=list)
     tracked_snapshot_ids: list[str] = Field(default_factory=list)
@@ -149,6 +180,8 @@ class BacktestTradeRecord(BaseModel):
     max_profit_dollars: float | None = None
     max_loss_dollars: float | None = None
     max_loss_unbounded: bool = False
+    profit_target_dollars: float | None = None
+    stop_loss_dollars: float | None = None
     exit_value_dollars: float | None = None
     commissions_dollars: float
     gross_pnl_dollars: float | None = None
@@ -157,6 +190,7 @@ class BacktestTradeRecord(BaseModel):
     return_on_risk_pct: float | None = None
     days_held: int
     status: TradeStatus
+    selection_notes: list[str] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)
     steps: list[TradeDailyStep] = Field(default_factory=list)
 
@@ -188,6 +222,8 @@ class PortfolioSummary(BaseModel):
     final_equity: float
     gross_pnl_dollars: float
     net_pnl_dollars: float
+    realized_pnl_dollars: float = 0.0
+    unrealized_pnl_dollars: float = 0.0
     total_commissions_dollars: float
     total_return_pct: float
     trade_count: int
@@ -204,6 +240,8 @@ class PortfolioSummary(BaseModel):
     avg_loss_dollars: float | None = None
     ok_bars: int
     flagged_bars: int
+    skipped_entries_count: int = 0
+    skipped_by_reason: dict[str, int] = Field(default_factory=dict)
 
 
 class BacktestSimulationResult(BaseModel):

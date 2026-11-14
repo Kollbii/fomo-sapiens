@@ -135,6 +135,9 @@ def create_app(
                 "fallback_market_data_type": svc.settings.ibkr.fallback_market_data_type,
                 "dte_min": svc.settings.options_chain.dte_min,
                 "dte_max": svc.settings.options_chain.dte_max,
+                "include_short_dte_for_backtest": (
+                    svc.settings.options_chain.include_short_dte_for_backtest
+                ),
                 "feed_summary": _format_feed_summary(svc.settings),
             },
         )

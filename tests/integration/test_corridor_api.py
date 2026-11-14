@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import math
 from datetime import UTC, datetime
@@ -190,14 +191,33 @@ def test_corridor_offline_and_validation_errors(tmp_path: Path) -> None:
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://testserver"
             ) as client:
+                r_status = await client.get("/api/status")
+                assert r_status.status_code == 200
+                status_payload = r_status.json()
+                assert status_payload["corridor_default_window_strikes"] == 10
+                assert status_payload["corridor_default_max_contracts"] == 88
+                assert status_payload["corridor_hard_max_contracts"] == 90
+
                 r_bad = await client.post("/api/corridor/quotes", json={"ticker": "bad!"})
                 assert r_bad.status_code == 422
                 assert r_bad.json()["error_code"] == "INVALID_TICKER"
 
                 r_over = await client.post(
-                    "/api/corridor/quotes", json={"ticker": "NVDA", "max_contracts": 61}
+                    "/api/corridor/quotes", json={"ticker": "NVDA", "max_contracts": 91}
                 )
                 assert r_over.status_code == 422
+
+                r_win_over = await client.post(
+                    "/api/corridor/quotes", json={"ticker": "NVDA", "window_strikes": 16}
+                )
+                assert r_win_over.status_code == 422
+
+                r_cap_ok = await client.post(
+                    "/api/corridor/quotes",
+                    json={"ticker": "NVDA", "window_strikes": 15, "max_contracts": 90},
+                )
+                assert r_cap_ok.status_code == 503
+                assert r_cap_ok.json()["error_code"] == "GATEWAY_OFFLINE"
 
                 r_off = await client.post("/api/corridor/quotes", json={"ticker": "NVDA"})
                 assert r_off.status_code == 503
@@ -206,8 +226,17 @@ def test_corridor_offline_and_validation_errors(tmp_path: Path) -> None:
                 r_stream_bad = await client.get("/api/corridor/stream/bad!")
                 assert r_stream_bad.status_code == 422
 
-                r_stream_over = await client.get("/api/corridor/stream/NVDA?max_contracts=61")
+                r_stream_over = await client.get("/api/corridor/stream/NVDA?max_contracts=91")
                 assert r_stream_over.status_code == 422
+
+                r_stream_win_over = await client.get("/api/corridor/stream/NVDA?window_strikes=16")
+                assert r_stream_win_over.status_code == 422
+
+                r_stream_cap_ok = await client.get(
+                    "/api/corridor/stream/NVDA?window_strikes=15&max_contracts=90"
+                )
+                assert r_stream_cap_ok.status_code == 503
+                assert r_stream_cap_ok.json()["error_code"] == "GATEWAY_OFFLINE"
 
                 r_stream_off = await client.get("/api/corridor/stream/NVDA")
                 assert r_stream_off.status_code == 503
@@ -258,7 +287,7 @@ def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Pat
                 assert payload["ticker"] == "NVDA"
                 assert payload["mode"] == "ONE_SHOT"
                 assert 1 <= payload["subscribed_count"] <= 40 <= CORRIDOR_MAX_CONTRACTS
-                assert payload["subscription_cap"] == CORRIDOR_MAX_CONTRACTS
+                assert payload["subscription_cap"] == CORRIDOR_MAX_CONTRACTS == 90
                 assert mock_ib.qualify_calls == 0
                 assert len(mock_ib.cancelled) == payload["subscribed_count"]
 
@@ -368,6 +397,22 @@ def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Pat
                 r_stop = await client.post("/api/corridor/stop")
                 assert r_stop.status_code == 200
                 assert r_stop.json()["active_streams"] == 0
+
+                # Default POST /api/corridor/quotes uses 10 strikes, 88 max, 90 cap
+                mock_ib.cancelled.clear()
+                r_defaults = await client.post("/api/corridor/quotes", json={"ticker": "NVDA"})
+                assert r_defaults.status_code == 200
+                defaults_payload = r_defaults.json()
+                assert defaults_payload["window_strikes"] == 10
+                assert defaults_payload["max_contracts"] == 88
+                assert defaults_payload["subscription_cap"] == 90
+                assert len(mock_ib.cancelled) == defaults_payload["subscribed_count"]
+
+                # Verify SSE route defaults (`window_strikes=10`, `max_contracts=88`)
+                sig = inspect.signature(api_corridor_stream)
+                assert sig.parameters["window_strikes"].default.default == 10
+                assert sig.parameters["max_contracts"].default.default == 88
+                assert latest_csv_path.read_bytes() == csv_before
 
     run_coro(_exercise())
     assert mock_ib.isConnected() is False

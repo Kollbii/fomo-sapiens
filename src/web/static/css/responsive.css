@@ -3,6 +3,23 @@
 /* --------------------------------------------------------------------------
    Responsive Breakpoints
    -------------------------------------------------------------------------- */
+@media (max-width: 1200px) {
+  .panel-card--corridor {
+    height: auto;
+    min-height: 700px;
+  }
+  .corridor-split {
+    grid-template-columns: 1fr;
+  }
+  .corridor-chart-pane {
+    height: 320px;
+    min-height: 280px;
+  }
+  .chart-canvas--corridor {
+    min-height: 280px;
+  }
+}
+
 @media (max-width: 1120px) {
   .kpi-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -22,22 +39,8 @@
   .panel-resize-handle {
     cursor: ns-resize;
   }
-  .panel-card--corridor {
-    height: auto;
-    min-height: 700px;
-  }
   .corridor-kpi-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-  .corridor-split {
-    grid-template-columns: 1fr;
-  }
-  .corridor-chart-pane {
-    height: 320px;
-    min-height: 280px;
-  }
-  .chart-canvas--corridor {
-    min-height: 280px;
   }
   .panel-card--strategy {
     height: auto;

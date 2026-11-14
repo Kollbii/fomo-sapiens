@@ -3,7 +3,7 @@
 **Hard invariants — never violate, never "temporarily" relax:**
 1. No order/mutation APIs (`placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, `whatIfOrder[Async]`) and no account queries (`reqAccountSummary`, `reqPositions`, `reqPnL`, `managedAccounts`). Never weaken `src/core/security.py`.
 2. Every user ticker passes `TickerValidator.validate()` before touching file paths or IBKR contracts.
-3. Never request an unfiltered chain: weekly `[dte_min, dte_max]` DTE + `range_pct` + `strike_step` filters, pages `<= 80`, corridor `<= 60`, every `reqMktData` paired with `cancelMktData` in `finally:`.
+3. Never request an unfiltered chain: weekly `[dte_min, dte_max]` DTE + `range_pct` + `strike_step` filters, pages `<= 80`, corridor `<= 90` (`88` options + `1` spot = `89 <= 90`, keeping a 10-line buffer below IBKR's 100-line ceiling), every `reqMktData` paired with `cancelMktData` in `finally:`.
 4. Never block the event loop (`time.sleep`, sync sockets). Use `asyncio.sleep` and `*Async` ib-async calls.
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.

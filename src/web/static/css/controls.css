@@ -194,6 +194,20 @@ html[data-theme="print"] .panel-toggle-pill[aria-pressed="true"] {
   gap: 5px;
 }
 
+.control-short-dte-toggle {
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+}
+
+.control-short-dte-toggle input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--accent-primary);
+  cursor: pointer;
+}
+
 .field-label {
   font-family: var(--font-mono);
   font-size: 10px;
