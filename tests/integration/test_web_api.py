@@ -184,7 +184,7 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert st["market_data_mode"] == "DELAYED"
                 assert st["default_market_data_type"] == 3
                 assert st["active_market_data_type"] == 3
-                assert st["watchlist"] == ["NVDA", "AVGO", "CRDO", "PLTR"]
+                assert st["watchlist"] == list(Settings().watchlist.hardcoded_tickers)
                 assert st["dte_min"] == 30
                 assert st["dte_max"] == 120
                 assert st["include_short_dte_for_backtest"] is True

@@ -26,9 +26,22 @@ watchlist:
     - "NVDA"
     - "AVGO"
     - "CRDO"
+    - "MRVL"
+    - "META"
+    - "MSFT"
+    - "AMZN"
+    - "TSLA"
+    - "SPCX"
+    - "LITE"
+    - "AMD"
+    - "ORCL"
     - "PLTR"
+    - "ALAB"
+    - "MU"
+    - "GOOGL"
   allow_custom_ticker: true
   custom_ticker_regex: "^[A-Z]{1,5}$"
+  max_size: 20           # Server-persisted watchlist cap (data/watchlist.json); 1..50, >= len(hardcoded_tickers)
 
 options_chain:
   dte_min: 30

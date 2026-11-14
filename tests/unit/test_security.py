@@ -9,9 +9,38 @@ import pytest
 from ib_async import IB
 
 from src.core.exceptions import AnalyzerError, InvalidTickerError, SecurityViolationError
-from src.core.security import BLOCKED_METHODS, ReadOnlyIBGuard, TickerValidator
+from src.core.security import (
+    BLOCKED_METHODS,
+    DEFAULT_WATCHLIST,
+    ReadOnlyIBGuard,
+    TickerValidator,
+)
 
-WATCHLIST = ["NVDA", "AVGO", "CRDO", "PLTR"]
+WATCHLIST = [
+    "NVDA",
+    "AVGO",
+    "CRDO",
+    "MRVL",
+    "META",
+    "MSFT",
+    "AMZN",
+    "TSLA",
+    "SPCX",
+    "LITE",
+    "AMD",
+    "ORCL",
+    "PLTR",
+    "ALAB",
+    "MU",
+    "GOOGL",
+]
+
+
+def test_default_watchlist_is_16_ticker_seed() -> None:
+    assert tuple(WATCHLIST) == DEFAULT_WATCHLIST
+    assert len(set(DEFAULT_WATCHLIST)) == 16
+    assert all(TickerValidator.validate(s) == s for s in DEFAULT_WATCHLIST)
+    assert TickerValidator().watchlist == DEFAULT_WATCHLIST
 
 
 @pytest.mark.parametrize("symbol", WATCHLIST)

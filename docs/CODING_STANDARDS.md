@@ -96,7 +96,9 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies contract-filtered BSM enrichment, chain + tracked fallback leg pricing (`PriceBasis`, `ClosePriceMode`), `TpSlBasis` rules, expiry settlement cutoffs (`$0` closing fees on expired legs), `SYSTEMATIC` cadences, `SINGLE_TRADE` replay, and portfolio metrics.
 21. **`tests/unit/test_analyzer_concurrency.py`, `test_paper_trades_service.py`, `test_backtest_service.py`:**
    - Verifies `AnalyzerService.refresh_lock` (`RefreshBusyError` on overlapping refreshes/corridor/MTM/SSE), pre-refresh `stop_all_streams()`, `fetch_exact_contracts` / `PaperTradeService` follow-up quoting, and `services/backtest.py` entry listing + `SYSTEMATIC`/`SINGLE_TRADE` orchestration.
-22. **`tests/integration/test_backtest_api.py`:**
+22. **`tests/unit/test_watchlist_store.py`:**
+   - Verifies `WatchlistStore` lazy seed, add/remove, dedupe/order, `watchlist.max_size` cap (`WatchlistCapError`), `allow_custom_ticker` guard, corrupt-file notice + `watchlist.corrupt.json` backup, empty-list persistence, and atomic writes.
+23. **`tests/integration/test_backtest_api.py`:**
    - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
 ---

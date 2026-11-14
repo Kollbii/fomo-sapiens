@@ -14,12 +14,33 @@ from src.core.config import (
     PaperTrackerSettings,
     Settings,
     StorageSettings,
+    WatchlistSettings,
     configure_logging,
     get_settings,
     load_settings,
     resolve_project_path,
 )
 from src.core.exceptions import ConfigurationError
+from src.core.security import DEFAULT_WATCHLIST
+
+SEED_WATCHLIST = (
+    "NVDA",
+    "AVGO",
+    "CRDO",
+    "MRVL",
+    "META",
+    "MSFT",
+    "AMZN",
+    "TSLA",
+    "SPCX",
+    "LITE",
+    "AMD",
+    "ORCL",
+    "PLTR",
+    "ALAB",
+    "MU",
+    "GOOGL",
+)
 
 ENV_VARS = (
     "IBKR_HOST",
@@ -56,7 +77,9 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.ibkr.default_market_data_type == 3
     assert s.ibkr.fallback_market_data_type == 4
     assert s.ibkr.market_data_mode == "DELAYED"
-    assert s.watchlist.hardcoded_tickers == ("NVDA", "AVGO", "CRDO", "PLTR")
+    assert s.watchlist.hardcoded_tickers == SEED_WATCHLIST
+    assert s.watchlist.default_ticker == "NVDA"
+    assert s.watchlist.max_size == 20
     assert s.options_chain.max_contracts_per_page == 80
     assert s.options_chain.dte_min == 30
     assert s.options_chain.dte_max == 120
@@ -301,3 +324,27 @@ def test_corridor_settings_bounds_and_cap_validator() -> None:
         CorridorSettings(default_window_strikes=16)
     with pytest.raises(ValidationError):
         CorridorSettings(hard_max_contracts=91)
+
+
+def test_watchlist_settings_defaults_max_size_bounds_and_seed_cap(tmp_path: Path) -> None:
+    wl = WatchlistSettings()
+    assert wl.hardcoded_tickers == SEED_WATCHLIST
+    assert wl.hardcoded_tickers == DEFAULT_WATCHLIST
+    assert wl.default_ticker == "NVDA"
+    assert wl.max_size == 20
+    assert load_settings(tmp_path / "nope.yaml", tmp_path / "nope.env").watchlist == wl
+
+    assert WatchlistSettings(hardcoded_tickers=("NVDA",), max_size=1).max_size == 1
+    assert WatchlistSettings(max_size=50).max_size == 50
+    assert WatchlistSettings(hardcoded_tickers=(), max_size=1).hardcoded_tickers == ()
+    with pytest.raises(ValidationError):
+        WatchlistSettings(max_size=0)
+    with pytest.raises(ValidationError):
+        WatchlistSettings(max_size=51)
+    with pytest.raises(ValidationError, match=r"must be <= watchlist\.max_size \(15\)"):
+        WatchlistSettings(max_size=15)
+
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("watchlist:\n  max_size: 10\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError):
+        load_settings(yaml_path, tmp_path / "nope.env")

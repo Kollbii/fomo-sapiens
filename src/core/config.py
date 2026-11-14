@@ -124,11 +124,41 @@ class IBKRSettings(_StrictModel):
         return self
 
 
+WATCHLIST_MAX_SIZE_LIMIT = 50
+
+
 class WatchlistSettings(_StrictModel):
     default_ticker: str = "NVDA"
-    hardcoded_tickers: tuple[str, ...] = ("NVDA", "AVGO", "CRDO", "PLTR")
+    hardcoded_tickers: tuple[str, ...] = (
+        "NVDA",
+        "AVGO",
+        "CRDO",
+        "MRVL",
+        "META",
+        "MSFT",
+        "AMZN",
+        "TSLA",
+        "SPCX",
+        "LITE",
+        "AMD",
+        "ORCL",
+        "PLTR",
+        "ALAB",
+        "MU",
+        "GOOGL",
+    )
     allow_custom_ticker: bool = True
     custom_ticker_regex: str = "^[A-Z]{1,5}$"
+    max_size: int = Field(default=20, ge=1, le=WATCHLIST_MAX_SIZE_LIMIT)
+
+    @model_validator(mode="after")
+    def _check_seed_fits_max_size(self) -> WatchlistSettings:
+        if len(self.hardcoded_tickers) > self.max_size:
+            raise ValueError(
+                f"watchlist.hardcoded_tickers has {len(self.hardcoded_tickers)} entries; "
+                f"must be <= watchlist.max_size ({self.max_size})"
+            )
+        return self
 
 
 class OptionsChainSettings(_StrictModel):

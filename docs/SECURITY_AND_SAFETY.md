@@ -38,7 +38,7 @@ Users running IBKR Gateway on `IBKR_PORT` (default `4001`, or TWS/custom port) s
 
 ### 2.1 Dual-Source Ticker Policy
 The application supports two ticker selection methods:
-1. **Hardcoded Watchlist:** `["NVDA", "AVGO", "CRDO", "PLTR"]` (defined in `config/settings.yaml`).
+1. **Hardcoded Watchlist:** 16 seed tickers (`DEFAULT_WATCHLIST` in `src/core/security.py`, mirrored by `watchlist.hardcoded_tickers` in `config/settings.yaml`): `NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`. `WatchlistStore` (`src/storage/watchlist_store.py`) re-validates every entry on read and on every write through `TickerValidator.validate_selection()` (so the `allow_custom_ticker=false` membership guard applies); the read is bounded (`MAX_WATCHLIST_FILE_BYTES` = 64 KiB) and deeply nested JSON (`RecursionError`) is caught, so a file with an invalid, over-cap, oversize, or too-deep payload is treated as corrupt (seed list served, backed up to `watchlist.corrupt.json` on the next change). An unreadable file (`OSError`, or a directory at the path) serves the seed list but refuses all writes (`StorageUnavailableError`), so a transient lock can never overwrite the user's list. Removing a ticker never touches `data/snapshots/` or `data/latest/`.
 2. **Dynamic Custom Stock Input Box:** Allows typing any US Stock/ETF symbol in the UI.
 
 ### 2.2 Strict Sanitization Pipeline (`TickerValidator` in `src/core/security.py`)

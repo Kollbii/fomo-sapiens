@@ -39,6 +39,10 @@ class StorageSchemaError(AnalyzerError):
     """Raised when CSV/row data violates the storage schema contract."""
 
 
+class StorageUnavailableError(AnalyzerError):
+    """Raised when an existing storage file cannot be opened/read (e.g. locked); nothing written."""
+
+
 class InvalidRequestError(AnalyzerError):
     """Request is well-formed but semantically invalid for the current data (HTTP 422)."""
 
@@ -66,6 +70,10 @@ class DuplicatePaperTradeError(InvalidRequestError):
 
 class PaperTradeCapError(InvalidRequestError):
     """Raised when registering a paper trade would exceed `max_active_trades`."""
+
+
+class WatchlistCapError(InvalidRequestError):
+    """Raised when adding a ticker would exceed `watchlist.max_size`."""
 
 
 class PaperTradeStateError(InvalidRequestError):

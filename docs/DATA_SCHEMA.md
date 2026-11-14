@@ -19,6 +19,7 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
     ├── tracked/
     │   └── NVDA/
     │       └── NVDA_20261112_153000.csv   # immutable paper-trade leg quotes (outside snapshots/)
+    ├── watchlist.json            # user watchlist (+ watchlist.corrupt.json backup)
     ├── latest/
     │   ├── NVDA_latest.csv
     │   ├── AVGO_latest.csv
@@ -209,6 +210,20 @@ Forward paper trades registered via `POST /api/backtest/paper-trades` and leg qu
    - Populated solely during manual `POST /api/refresh` follow-ups (`PaperTradeService.quote_active_trades_for_refresh`) for non-expired active paper-trade legs, ensuring `< 30 DTE` legs falling outside `[30, 120]` chain snapshots remain markable down to expiration.
 4. **Daily Bar Selection & Merging (`src/storage/backtest_store.py`):**
    - `select_daily_bar_snapshots()` pre-filters archive filenames in `O(window)` by `[start_date, end_date]` before parsing metadata/CSVs, selects one canonical snapshot per NYSE trading day (preferring the latest usable snapshot per `quality.is_usable_snapshot()`, otherwise the latest snapshot with `NO_USABLE_DAILY_SNAPSHOT`), and `load_daily_chain_bars()` attaches same-ET-date `data/tracked/{TICKER}/` CSV slices (`load_tracked_quotes_by_date()`) for leg-level fallback pricing.
+
+---
+
+## 6.1 Watchlist File (`data/watchlist.json`, `WatchlistStore` in `src/storage/watchlist_store.py`)
+Path is `{storage.data_dir}/watchlist.json` (`resolve_watchlist_path()`, returns a resolved absolute path). JSON shape (`WatchlistFile`, `extra="forbid"`):
+
+    {"version": 1, "tickers": ["NVDA", "AVGO"], "updated_at": "2026-11-14T12:00:00Z"}
+
+- `tickers`: ordered, deduplicated; new tickers append at the end; each entry passes `TickerValidator`; length `<= watchlist.max_size` (default `20`, bounds `1..50`, must be `>= len(watchlist.hardcoded_tickers)`). An empty list `[]` is a valid persisted state and is never re-seeded.
+- **Lazy seed:** a missing file serves `watchlist.hardcoded_tickers` (reads never write); the file is created on the first `add` / `remove`. Adding beyond the cap raises `WatchlistCapError`.
+- **Read states (`WatchlistFileStatus`, exposed as `WatchlistState.status` and `.writable`):** `ok`, `corrupt`, `unreadable`. Reads are bounded: at most `MAX_WATCHLIST_FILE_BYTES` (`65536`, 64 KiB) are read.
+  - **`corrupt`** (invalid JSON/UTF-8, schema, ticker, over-cap content, file over 64 KiB, or deeply nested JSON raising `RecursionError`): seed list is served with `CORRUPT_WATCHLIST_NOTICE`; the file is left untouched until the next successful write, which first copies it atomically to `data/watchlist.corrupt.json`.
+  - **`unreadable`** (`OSError` on open/read, or a directory at the path): seed list is served with `UNREADABLE_WATCHLIST_NOTICE`, `writable` is `False`, and `add()` / `remove()` raise `StorageUnavailableError` without writing or backing up anything (protects the saved list from transient file locks).
+- `WatchlistFile.version` must be the integer `1` (bool, float, and str are rejected). Writes are atomic (`.tmp` + `fsync` + `os.replace()`, same for the corrupt backup); `updated_at` is UTC `%Y-%m-%dT%H:%M:%SZ`. The store never touches `data/snapshots/` or `data/latest/`.
 
 ---
 

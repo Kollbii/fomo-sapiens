@@ -7,6 +7,10 @@ milestones in git history.
 
 ## [Unreleased]
 
+### Added
+- **16-ticker default watchlist:** `watchlist.hardcoded_tickers` and `DEFAULT_WATCHLIST` now seed `NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`; the list is stored server-side in `data/watchlist.json`.
+- **Config key `watchlist.max_size`** (default `20`, `1..50`, must be `>= len(hardcoded_tickers)`): caps the persisted watchlist.
+
 ## [0.3.0] - 2026-11-14
 
 ### Added

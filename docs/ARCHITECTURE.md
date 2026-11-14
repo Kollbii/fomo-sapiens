@@ -5,7 +5,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 
     +-----------------------------------------------------------------------------------+
     |                        BROWSER UI (NYT Editorial + Terminal)                      |
-    |  [Reserved Editorial Banner Slot]  [Watchlist: NVDA|AVGO|CRDO|PLTR + Custom Box]  |
+    |  [Reserved Editorial Banner Slot]  [Watchlist: 16 seed tickers + Custom Box]  |
     |  [Range % | Strike Step $ | Refresh Button | Historical Snapshot Selector]        |
     |  [Multi-DTE Plotly Overlays (Walls, IV, Greeks)]  [High-Density Tabular Chain]    |
     +-----------------------------------------+-----------------------------------------+
@@ -99,6 +99,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   ├── quality.py            # SpotSource & quote coverage snapshot usability scoring
     │   │   ├── paper_trade_store.py  # atomic paper_trades.json, paper_quotes.jsonl & data/tracked/
     │   │   ├── backtest_store.py     # O(window) daily bar selection & tracked fallback merge
+    │   │   ├── watchlist_store.py    # atomic data/watchlist.json (lazy seed, cap, corrupt backup)
     │   │   ├── ledger_schema.py      # 23-col execution & 15-col open position contracts
     │   │   └── ledger_repository.py  # atomic data/ledger/ archive & Gateway -> Flex upgrade
     │   ├── analytics/
