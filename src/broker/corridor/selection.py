@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import polars as pl
@@ -130,6 +130,22 @@ def _row_to_spec(
         cached_theta=opt_float(raw.get("theta")),
         cached_vega=opt_float(raw.get("vega")),
         cached_greeks_source=normalize_greeks_source(raw.get("greeks_source")),
+    )
+
+
+def strategy_leg_spec_from_row(raw: Mapping[str, Any], *, symbol: str) -> CorridorContractSpec:
+    """Exact-contract line spec for one strategy leg (or leg neighbour) snapshot row.
+
+    Used by the live screener leg stream: zone `STRATEGY_LEG`, no wall flags, the snapshot
+    `conId` reused and its quote / Greeks kept as the cached fallback. `symbol` is validated.
+    """
+    return _row_to_spec(
+        dict(raw),
+        symbol=TickerValidator.validate(symbol),
+        zone="STRATEGY_LEG",
+        is_put_wall=False,
+        is_call_wall=False,
+        is_strategy_leg=True,
     )
 
 

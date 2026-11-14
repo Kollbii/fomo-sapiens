@@ -2,11 +2,14 @@
 
 - `wall_anchors_from_report`: analytics walls report -> broker `WallAnchors`.
 - `make_bsm_greeks_fallback`: binds the vectorized BSM fallback to the broker `GreeksFallback`.
+- `overlay_live_quotes`: live spot / quotes / Greeks applied to a cached chain frame (in memory).
 - `CorridorQuoteCache`: in-memory live-quote overlay applied to cached chains for Strategy Lab;
   Mode 1 CSV archives on disk are never mutated.
 """
 
 from __future__ import annotations
+
+from collections.abc import Mapping
 
 import polars as pl
 
@@ -26,6 +29,51 @@ QuoteKey = tuple[str, float, str]
 
 def _quote_key(expiry: str, strike: float, right: str) -> QuoteKey:
     return (expiry, round(float(strike), 6), right.upper())
+
+
+def chain_quote_key(expiry: str, strike: float, right: str) -> QuoteKey:
+    """`(expiry, strike rounded to 6 dp, right)` key of `overlay_live_quotes`' quote map."""
+    return _quote_key(expiry, strike, right)
+
+
+def overlay_live_quotes(
+    df: pl.DataFrame,
+    live_spot: float,
+    quote_map: Mapping[QuoteKey, CorridorQuoteRow],
+) -> pl.DataFrame:
+    """Return `df` with the live spot (when `> 0`) and the mapped live quotes / Greeks applied.
+
+    Bid / ask / mid / last / close are replaced as quoted (even when `None`); volume, open
+    interest, IV and Greeks only when the live value is known; `greeks_source` unless `NONE`.
+    The input frame is never mutated; it is returned unchanged when nothing applies.
+    """
+    rows = df.to_dicts()
+    changed = False
+    for row in rows:
+        if live_spot > 0.0:
+            row["underlying_price"] = live_spot
+            row["moneyness_pct"] = ((float(row["strike"]) - live_spot) / live_spot) * 100.0
+            changed = True
+        live_q = quote_map.get(
+            _quote_key(str(row["expiry"]), float(row["strike"]), str(row["right"]))
+        )
+        if live_q is None:
+            continue
+        changed = True
+        row["bid"] = live_q.bid
+        row["ask"] = live_q.ask
+        row["mid"] = live_q.mid
+        row["last"] = live_q.last
+        row["close"] = live_q.close
+        for col in ("volume", "open_interest", "iv", "delta", "gamma", "theta", "vega"):
+            value = getattr(live_q, col)
+            if value is not None:
+                row[col] = value
+        if live_q.greeks_source != "NONE":
+            row["greeks_source"] = live_q.greeks_source
+    if not changed:
+        return df
+    return pl.DataFrame(rows, schema=df.schema)
 
 
 def wall_anchors_from_report(report: ChainWallsReport) -> WallAnchors:
@@ -97,30 +145,4 @@ class CorridorQuoteCache:
         if entry is None or not entry[1]:
             return df
         live_spot, quote_map = entry
-        rows = df.to_dicts()
-        changed = False
-        for row in rows:
-            if live_spot > 0.0:
-                row["underlying_price"] = live_spot
-                row["moneyness_pct"] = ((float(row["strike"]) - live_spot) / live_spot) * 100.0
-                changed = True
-            live_q = quote_map.get(
-                _quote_key(str(row["expiry"]), float(row["strike"]), str(row["right"]))
-            )
-            if live_q is None:
-                continue
-            changed = True
-            row["bid"] = live_q.bid
-            row["ask"] = live_q.ask
-            row["mid"] = live_q.mid
-            row["last"] = live_q.last
-            row["close"] = live_q.close
-            for col in ("volume", "open_interest", "iv", "delta", "gamma", "theta", "vega"):
-                value = getattr(live_q, col)
-                if value is not None:
-                    row[col] = value
-            if live_q.greeks_source != "NONE":
-                row["greeks_source"] = live_q.greeks_source
-        if not changed:
-            return df
-        return pl.DataFrame(rows, schema=df.schema)
+        return overlay_live_quotes(df, live_spot, quote_map)

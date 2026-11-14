@@ -47,6 +47,14 @@ class CorridorBusyError(OptionChainFetchError):
     """
 
 
+class ScreenerLiveBusyError(OptionChainFetchError):
+    """Raised when the live screener stream would subscribe while `refresh_lock` is held.
+
+    Sibling of `CorridorBusyError` (fixed `SCREENER_LIVE_BUSY_MESSAGE`); raised at subscribe time
+    by `LiveLegQuoteService.stream_live_legs(..., is_busy)` with zero market-data lines opened.
+    """
+
+
 class PacingViolationError(AnalyzerError):
     """Raised when IBKR pacing / market-data line limits would be violated."""
 
@@ -61,6 +69,13 @@ class StorageUnavailableError(AnalyzerError):
 
 class InvalidRequestError(AnalyzerError):
     """Request is well-formed but semantically invalid for the current data (HTTP 422)."""
+
+
+class LiveStreamNotFoundError(InvalidRequestError):
+    """Raised when a live screener stream id is unknown or the stream already stopped.
+
+    Subclasses `InvalidRequestError` (422 by default); the client re-opens the stream.
+    """
 
 
 class SnapshotNotFoundError(AnalyzerError):

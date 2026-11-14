@@ -10,7 +10,7 @@ from collections.abc import Mapping
 from datetime import date
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from src.analytics.anomalies import AnomaliesReport
 from src.analytics.backtest import (
@@ -48,10 +48,15 @@ from src.analytics.ledger import (
     RollStep,
 )
 from src.analytics.strategies import (
+    EvaluatedLeg,
+    PositionGreeks,
     PresetStrategyKind,
+    RepickKeepReason,
     StrategyEvaluationResponse,
     StrategyKind,
     StrategyLegInput,
+    StrategyPricing,
+    StrategyRiskMetrics,
 )
 from src.analytics.term_greeks import MultiDTEProfilesReport
 from src.analytics.walls import ChainWallsReport
@@ -97,6 +102,7 @@ __all__ = [
     "CorridorStopResponse",
     "EntryCadence",
     "EquityCurvePoint",
+    "EvaluatedLeg",
     "ExitReason",
     "GatewayStatusResponse",
     "LedgerAnalyticsReport",
@@ -129,14 +135,37 @@ __all__ = [
     "PaperTradeStatus",
     "PaperTradesListResponse",
     "PortfolioSummary",
+    "PositionGreeks",
     "PriceBasis",
     "RefreshRequest",
     "RegisterPaperTradeRequest",
+    "RepickKeepReason",
     "RollStep",
+    "SCREENER_LIVE_MAX_ROWS",
+    "ScreenerFilterName",
+    "ScreenerLiveFrame",
+    "ScreenerLiveReallocateRequest",
+    "ScreenerLiveReallocateResponse",
+    "ScreenerLiveRequest",
+    "ScreenerLiveRow",
+    "ScreenerLiveRowAllocation",
+    "ScreenerLiveStatus",
+    "ScreenerLiveStopReason",
+    "ScreenerLiveStopResponse",
+    "ScreenerMode",
+    "ScreenerParams",
+    "ScreenerRow",
+    "ScreenerRowId",
+    "ScreenerRowStatus",
+    "ScreenerRunRequest",
+    "ScreenerRunResponse",
+    "ScreenerStatusCounts",
     "SnapshotsListResponse",
     "StepStatus",
     "StrategyEvaluateRequest",
     "StrategyEvaluationResponse",
+    "StrategyPricing",
+    "StrategyRiskMetrics",
     "StrategySuggestRequest",
     "StrategySuggestResponse",
     "SystemStatusResponse",
@@ -675,3 +704,287 @@ class BatchRefreshStatus(BaseModel):
     finished_at_utc: str | None = None
     notices: list[str] = Field(default_factory=list)
     items: list[BatchTickerResult]
+
+
+# ------------------------------------------------------------------ best option screener
+# `selected`: one row per ticker for `strategy_kind`; `best`: one row per ticker, the passing
+# preset with the highest RoR; `all`: every passing ticker x preset.
+ScreenerMode = Literal["selected", "best", "all"]
+ScreenerRowStatus = Literal["ok", "filtered", "not_buildable", "no_data"]
+# Entry floors named by their request field.
+ScreenerFilterName = Literal["min_net_credit_dollars", "min_ror_pct", "min_pop_pct"]
+
+
+class ScreenerRunRequest(BaseModel):
+    """Request body of a Best Option screener run over the watchlist (cached CSVs, no IBKR).
+
+    - `mode` defaults to `best`. `strategy_kind` is required for `selected` and ignored by
+      `best` / `all` (echoed as `null` in `ScreenerParams`).
+    - `dte_min` / `dte_max`: same bounds as `StrategySuggestRequest`; `None` falls back to the
+      configured primary window (`options_chain.dte_min` / `dte_max`, 30-120 by default).
+    - Floors (`None` or `0` = off): `min_net_credit_dollars` applies to the credit presets only
+      (Bull Put, Bear Call, Iron Condor); `min_ror_pct` and `min_pop_pct` apply to every preset.
+    """
+
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    mode: ScreenerMode = "best"
+    strategy_kind: PresetStrategyKind | None = None
+    dte_min: int | None = Field(default=None, ge=0, le=120)
+    dte_max: int | None = Field(default=None, ge=1, le=120)
+    min_net_credit_dollars: float | None = Field(default=None, ge=0.0)
+    min_ror_pct: float | None = Field(default=None, ge=0.0, le=1000.0)
+    min_pop_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+
+    @model_validator(mode="after")
+    def _validate_mode_and_dte(self) -> ScreenerRunRequest:
+        if self.dte_min is not None and self.dte_max is not None and self.dte_min > self.dte_max:
+            raise ValueError("dte_min must be <= dte_max")
+        if self.mode == "selected" and self.strategy_kind is None:
+            raise ValueError("strategy_kind is required when mode is 'selected'")
+        return self
+
+
+class ScreenerParams(BaseModel):
+    """Effective screener inputs echoed by `ScreenerRunResponse` (after normalization).
+
+    DTE bounds are resolved (config defaults applied), floors set to `0` are `None`, and
+    `strategy_kind` is `None` unless `mode == "selected"`. `qty_multiplier`, `days_forward` and
+    `iv_shift` are the fixed Strategy Lab defaults the candidates were built with (target expiry
+    is always Auto, as in Autobuild).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ScreenerMode
+    strategy_kind: PresetStrategyKind | None = None
+    dte_min: int
+    dte_max: int
+    min_net_credit_dollars: float | None = None
+    min_ror_pct: float | None = None
+    min_pop_pct: float | None = None
+    qty_multiplier: int = 1
+    days_forward: int = 0
+    iv_shift: float = 0.0
+
+
+class ScreenerRow(BaseModel):
+    """One screener row: a passing Autobuild candidate or a per-ticker status row (no curves).
+
+    `status`:
+    - `ok`: a candidate passing every active floor; all candidate fields are set and equal the
+      Strategy Lab Autobuild evaluation for the same ticker, snapshot and inputs.
+    - `filtered`: the candidate(s) failed `failed_filters`; `status_reason` names the floors
+      (e.g. `min POP 60%`).
+    - `not_buildable`: Autobuild could not construct the preset; `status_reason` is a sanitized
+      single-line reason and `skip_reason` the builder's code when it reported one.
+    - `no_data`: no complete snapshot is archived (or it could not be read).
+    Status rows carry the ticker, the status fields and, when a snapshot was found, its metadata
+    and spot; candidate fields stay empty. `row_id` (`{ticker}:{strategy_kind}`, or `{ticker}`
+    for a `best` status row) is unique within a response. `legs_label` is e.g. `−P150 / +P145`
+    (`src.services.screener.format_legs_label`); `min_leg_open_interest` is the lowest leg open
+    interest, `None` when any leg's open interest is unknown.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_id: str
+    ticker: str
+    status: ScreenerRowStatus
+    status_reason: str | None = None
+    failed_filters: list[ScreenerFilterName] = Field(default_factory=list)
+    skip_reason: str | None = None
+    strategy_kind: PresetStrategyKind | None = None
+    snapshot_id: str | None = None
+    snapshot_ts_utc: str | None = None
+    is_today_et: bool = False
+    market_data_type: int | None = None
+    underlying_price: float | None = None
+    short_expiry: str | None = None
+    short_dte: int | None = None
+    long_expiry: str | None = None
+    long_dte: int | None = None
+    legs: list[EvaluatedLeg] = Field(default_factory=list)
+    legs_label: str | None = None
+    pricing: StrategyPricing | None = None
+    risk: StrategyRiskMetrics | None = None
+    net_greeks: PositionGreeks | None = None
+    min_leg_open_interest: int | None = None
+    rationale: list[str] = Field(default_factory=list)
+    primary_call_wall: float | None = None
+    primary_put_wall: float | None = None
+
+
+class ScreenerStatusCounts(BaseModel):
+    """Row counts per status. In `selected` / `best` they count the returned rows (one per
+    ticker); in `all` they count every ticker x preset (one `no_data` per ticker without
+    usable data) before the status rows are dropped."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ok: int = 0
+    filtered: int = 0
+    not_buildable: int = 0
+    no_data: int = 0
+
+
+class ScreenerRunResponse(BaseModel):
+    """Best Option screener result. `rows` come in the default order (RoR desc, rows without
+    an RoR, including every status row, last); the UI sorts and filters them client-side."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: ScreenerMode
+    params: ScreenerParams
+    generated_at_utc: str
+    today_et: str
+    tickers: list[str]
+    rows: list[ScreenerRow]
+    counts: ScreenerStatusCounts
+    notices: list[str] = Field(default_factory=list)
+
+
+# ------------------------------------------------------------------ live best option screener
+#: Most screener rows one live request may list (20 tickers x 6 presets).
+SCREENER_LIVE_MAX_ROWS = 120
+ScreenerRowId = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)
+]
+# `live`: allocated and re-priced from live quotes; `no_quotes`: allocated but a current leg has no
+# live quote yet (or its snapshot is unavailable), showing the last values; `not_live_budget`: did
+# not fit in the IBKR line budget.
+ScreenerLiveStatus = Literal["live", "not_live_budget", "no_quotes"]
+# Why a live screener stream ended server-side (the reason of the `refresh_lock` holder, the
+# other live feed, a newer screener stream, the UI teardown or the server shutdown).
+ScreenerLiveStopReason = Literal[
+    "manual_stop",
+    "superseded",
+    "corridor_stream",
+    "corridor_snapshot",
+    "refresh_chain",
+    "batch_refresh",
+    "ledger",
+    "ledger_sync",
+    "ledger_mtm",
+    "shutdown",
+]
+
+
+class ScreenerLiveRequest(ScreenerRunRequest):
+    """Opens a live screener stream: the screener run inputs plus the client's row order.
+
+    `row_ids` are the rows of `POST /api/screener/run` (same inputs) in the client's current
+    sort / filter order (duplicates ignored, unknown ids and non-`ok` rows skipped); line budget
+    allocation walks them in this order.
+    """
+
+    row_ids: list[ScreenerRowId] = Field(default_factory=list, max_length=SCREENER_LIVE_MAX_ROWS)
+
+    def run_request(self) -> ScreenerRunRequest:
+        """The screener run inputs (without `row_ids`)."""
+        return ScreenerRunRequest.model_validate(self.model_dump(exclude={"row_ids"}))
+
+
+class ScreenerLiveReallocateRequest(BaseModel):
+    """Re-allocates the line budget of a running stream to `row_ids` (new sort / filter order).
+
+    The stream keeps the run inputs it was opened with; new inputs (Recalculate) re-open it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stream_id: str = Field(min_length=1, max_length=64)
+    row_ids: list[ScreenerRowId] = Field(default_factory=list, max_length=SCREENER_LIVE_MAX_ROWS)
+
+
+class ScreenerLiveRowAllocation(BaseModel):
+    """Planned live status of one requested `ok` row."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_id: str
+    ticker: str
+    live_status: ScreenerLiveStatus
+
+
+class ScreenerLiveReallocateResponse(BaseModel):
+    """Result of a re-allocation; frames switch to it at `version` (lines change paced).
+
+    `lines_planned` / `lines_budget` count options + spots (budget 90); `option_lines_budget`
+    caps the option lines alone (the Corridor option cap, 88).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stream_id: str
+    version: int
+    lines_planned: int
+    lines_budget: int
+    option_lines_budget: int
+    rows: list[ScreenerLiveRowAllocation]
+    notices: list[str] = Field(default_factory=list)
+
+
+class ScreenerLiveRow(BaseModel):
+    """Live state of one requested `ok` screener row inside a frame.
+
+    - `live` / `no_quotes`: every candidate field is set. `adjusted` is `True` while the streamed
+      legs differ from the screener row's legs (a strictly higher-RoR neighbour combination
+      inside the subscribed +-1 window that passes the screener floors); `keep_reason` is the
+      latest re-pick's reason for keeping the legs (`None` when it switched). `passes_filters`
+      tells whether the shown legs still meet the floors with live quotes.
+    - `not_live_budget`: only the identity fields are set (the client keeps the snapshot row).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    row_id: str
+    ticker: str
+    strategy_kind: PresetStrategyKind
+    live_status: ScreenerLiveStatus
+    adjusted: bool = False
+    keep_reason: RepickKeepReason | None = None
+    passes_filters: bool | None = None
+    underlying_price: float | None = None
+    legs: list[EvaluatedLeg] = Field(default_factory=list)
+    legs_label: str | None = None
+    pricing: StrategyPricing | None = None
+    risk: StrategyRiskMetrics | None = None
+    net_greeks: PositionGreeks | None = None
+    min_leg_open_interest: int | None = None
+
+
+class ScreenerLiveFrame(BaseModel):
+    """One live screener frame (about every second); display-only, never persisted.
+
+    `rows` lists the requested `ok` rows in request order. `version` is the applied allocation
+    (`ScreenerLiveReallocateResponse.version`). `lines_used` / `lines_budget` count options +
+    spots (budget 90); `option_lines_budget` caps the option lines alone (88). A stream stopped
+    server-side ends with one frame with `stopped=True`, `stop_reason` and no rows; a client
+    disconnect ends it silently.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    stream_id: str
+    sequence: int
+    version: int
+    updated_ts_utc: str
+    market_data_type: int
+    market_data_type_label: str
+    lines_used: int
+    lines_budget: int
+    option_lines_budget: int
+    rows: list[ScreenerLiveRow] = Field(default_factory=list)
+    notices: list[str] = Field(default_factory=list)
+    stopped: bool = False
+    stop_reason: ScreenerLiveStopReason | None = None
+
+
+class ScreenerLiveStopResponse(BaseModel):
+    """Response of a live screener stop (mirrors `CorridorStopResponse`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    stopped_subscriptions: int
+    active_streams: int

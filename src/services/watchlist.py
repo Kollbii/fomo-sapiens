@@ -43,6 +43,16 @@ def _parse_utc(value: str) -> datetime | None:
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
+def is_snapshot_today_et(snapshot_ts_utc: str, today_et: date) -> bool:
+    """True when a snapshot's UTC timestamp falls on the US Eastern calendar day `today_et`.
+
+    The one freshness rule shared by the watchlist and the Best Option screener; an unparsable
+    timestamp is never fresh.
+    """
+    ts = _parse_utc(snapshot_ts_utc)
+    return ts is not None and et_date(ts) == today_et
+
+
 class WatchlistService:
     """List / add / remove the user's watchlist; never touches snapshot CSVs.
 
@@ -87,6 +97,13 @@ class WatchlistService:
             state = self._remember(self.store.load())
         return list(state.tickers)
 
+    def read_state(self) -> WatchlistState:
+        """Fresh store read (never raises; blocking, so call it through `runner`).
+
+        Remembered for `cached_tickers()`, like every async load / add / remove.
+        """
+        return self._remember(self.store.load())
+
     async def get_watchlist(self) -> WatchlistResponse:
         return await self.runner(lambda: self._respond(self.store.load()))
 
@@ -125,13 +142,12 @@ class WatchlistService:
             if meta is None:
                 entries.append(WatchlistEntry(ticker=ticker))
                 continue
-            ts = _parse_utc(meta.snapshot_ts_utc)
             entries.append(
                 WatchlistEntry(
                     ticker=ticker,
                     latest_snapshot_id=meta.snapshot_id,
                     latest_snapshot_utc=meta.snapshot_ts_utc,
-                    is_today_et=ts is not None and et_date(ts) == today,
+                    is_today_et=is_snapshot_today_et(meta.snapshot_ts_utc, today),
                 )
             )
         return entries, True

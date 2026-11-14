@@ -156,6 +156,7 @@ class LedgerService:
         now_fn: Callable[[], datetime] | None = None,
         sleep: SleepFn = asyncio.sleep,
         corridor_stopper: CorridorStopper | None = None,
+        screener_stopper: CorridorStopper | None = None,
         refresh_acquire: RefreshAcquireFn | None = None,
         refresh_release: RefreshReleaseFn | None = None,
         refresh_owner_getter: Callable[[], str | None] | None = None,
@@ -170,6 +171,8 @@ class LedgerService:
         )
         self.now_fn = now_fn or (lambda: datetime.now(UTC))
         self.corridor_stopper = corridor_stopper
+        # Live Best Option screener stream stop (lines freed), run right after the Corridor's.
+        self.screener_stopper = screener_stopper
         self._refresh_acquire = refresh_acquire
         self._refresh_release = refresh_release
         self._refresh_owner_getter = refresh_owner_getter
@@ -343,6 +346,13 @@ class LedgerService:
                             f"Stopped {stopped_lines} active Wall Corridor subscription(s) "
                             "before Gateway ledger sync."
                         )
+                if self.screener_stopper is not None:
+                    screener_lines = await self.screener_stopper()
+                    if screener_lines > 0:
+                        notices.append(
+                            f"Stopped the live Best Option screener stream ({screener_lines} "
+                            "line(s)) before Gateway ledger sync."
+                        )
                 try:
                     gw_execs, gw_positions = await fetch_gateway_ledger(
                         self.broker_client,
@@ -501,6 +511,14 @@ class LedgerService:
                     notices.append(
                         f"Stopped {stopped_lines} active Wall Corridor subscription(s) before "
                         "live MTM refresh to stay under IBKR's 100-line market data ceiling."
+                    )
+            if self.screener_stopper is not None:
+                screener_lines = await self.screener_stopper()
+                if screener_lines > 0:
+                    notices.append(
+                        f"Stopped the live Best Option screener stream ({screener_lines} "
+                        "line(s)) before live MTM refresh to stay under IBKR's 100-line market "
+                        "data ceiling."
                     )
             marks = await refresh_open_option_marks(
                 self.broker_client, pos_models, sleep=self.sleep

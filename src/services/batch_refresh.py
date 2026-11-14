@@ -8,7 +8,7 @@ Invariants:
 - Tickers run strictly one after another, each as a CHILD task running
   `AnalyzerService.refresh_ticker_locked` (same fetch -> enrich -> save -> paper-trade quote path
   as `refresh_chain`) with a fresh `ChainFetchProgress`; `strike_step` is forced to Auto (`None`).
-  Active Wall Corridor streams are stopped once at batch start.
+  Every live feed (Wall Corridor stream, live screener stream) is stopped once at batch start.
 - `cancel()` stops at once: it cancels the running child task (no waiting for the ticker). The
   fetcher's `finally` cancels every market-data line; the orchestrator waits for that cleanup at
   most `cancel_cleanup_sec` (`BATCH_CANCEL_CLEANUP_SEC`), archives the FINISHED pages as a
@@ -56,6 +56,7 @@ from src.services.schemas import (
     BatchTickerResult,
     BatchTickerState,
 )
+from src.services.screener_live import screener_stop_notice
 from src.storage.schema import PartialReason
 
 logger = logging.getLogger(__name__)
@@ -340,15 +341,19 @@ class BatchRefreshService:
             if batch.cancel_requested:  # stopped before the first step
                 return
             try:
-                stopped = await self.analyzer._stop_corridor(reason="batch_refresh")
+                stopped = await self.analyzer._stop_live_feeds(reason="batch_refresh")
             except Exception as exc:
-                logger.exception("batch %s: stopping Corridor streams failed", batch.batch_id)
+                logger.exception("batch %s: stopping live feeds failed", batch.batch_id)
                 self._fail_remaining(batch, exc)
                 return
-            if stopped > 0:
+            if stopped.corridor_lines > 0:
                 batch.notices.append(
-                    f"Stopped {stopped} active Wall Corridor quote stream(s) before batch "
-                    "load to stay within IBKR's 100-line ceiling."
+                    f"Stopped {stopped.corridor_lines} active Wall Corridor quote stream(s) "
+                    "before batch load to stay within IBKR's 100-line ceiling."
+                )
+            if stopped.screener_lines > 0:
+                batch.notices.append(
+                    screener_stop_notice(stopped.screener_lines, "before batch load")
                 )
             total = len(batch.items)
             for position, item in enumerate(batch.items, start=1):

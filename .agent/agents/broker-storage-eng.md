@@ -6,7 +6,7 @@ description: >-
   data/ledger/ execution & open-position CSV/JSON archives), src/broker/ (ib-async client,
   DELAYED 3->4 / LIVE 1->2 cascade, weekly 30-120 DTE discovery, strike striding, <=80 paged
   fetcher, <=90 Wall Corridor streaming (`88` options + `1` spot, 10-line buffer < 100), Flex Web Service v3, opt-in ledger_sync), or
-  src/services/ (`AnalyzerService`, corridor glue, `LedgerService`, `WatchlistService`, `BatchRefreshService`), and the server-persisted watchlist (`src/storage/watchlist_store.py`). Also use for IBKR error
+  src/services/ (`AnalyzerService`, corridor glue, `LedgerService`, `WatchlistService`, `BatchRefreshService`, `ScreenerService`, `ScreenerLiveService`), the live leg stream (`src/broker/live_legs.py`, `src/broker/corridor/lines.py`), and the server-persisted watchlist (`src/storage/watchlist_store.py`). Also use for IBKR error
   codes, pacing, disconnect recovery, and cancelMktData cleanup bugs.
 profile: deep-reasoning
 color: blue
