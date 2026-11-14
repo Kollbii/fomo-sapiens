@@ -1175,6 +1175,7 @@ export async function refreshCorridorQuotesOneShot() {
       dom.corridorRefreshBtn.disabled = false;
       dom.corridorRefreshBtn.textContent = "Refresh Corridor Quotes";
     }
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }
 

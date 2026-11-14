@@ -14,6 +14,7 @@ export var TABLE_SORT_KEY = "ibkr_chain_table_sort_v1";
 export var STRATEGY_AUTO_POPULATE_KEY = "ibkr_strategy_auto_populate_v1";
 export var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
 export var LEDGER_PREFS_KEY = "ibkr_ledger_prefs_v1";
+export var SCREENER_PREFS_KEY = "ibkr_screener_prefs_v1";
 export var WATCHLIST_SELECTION_KEY = "ibkr_watchlist_selection_v1";
 export var DEFAULT_PANEL_VISIBILITY = {
   walls: true,
@@ -24,6 +25,7 @@ export var DEFAULT_PANEL_VISIBILITY = {
   strategy: true,
   trade_ledger: true,
   backtest: true,
+  best_option: true,
 };
 
 export function cloneDefaultPanelVisibility() {
@@ -36,6 +38,7 @@ export function cloneDefaultPanelVisibility() {
     strategy: DEFAULT_PANEL_VISIBILITY.strategy,
     trade_ledger: DEFAULT_PANEL_VISIBILITY.trade_ledger,
     backtest: DEFAULT_PANEL_VISIBILITY.backtest,
+    best_option: DEFAULT_PANEL_VISIBILITY.best_option,
   };
 }
 

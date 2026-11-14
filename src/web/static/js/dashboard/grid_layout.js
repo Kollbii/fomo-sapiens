@@ -171,7 +171,7 @@ export function initChartResizeHandling() {
           var minGuard =
             key === "strategy-lab-card"
               ? 530
-              : key === "backtest-card"
+              : key === "backtest-card" || key === "best-option-card"
                 ? 540
                 : key === "trade-ledger-card"
                   ? 500
@@ -209,7 +209,7 @@ export function initChartResizeHandling() {
           var curHeight = Math.round(card.getBoundingClientRect().height) || 410;
           card.style.width = "";
           card.style.maxWidth = "";
-          if (key === "strategy-lab-card" || key === "backtest-card") {
+          if (key === "strategy-lab-card" || key === "backtest-card" || key === "best-option-card") {
             card.style.height = "";
             savedLayout[key] = { span: nextSpan };
           } else {

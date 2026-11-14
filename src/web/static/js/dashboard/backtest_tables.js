@@ -53,6 +53,8 @@ function fmtStrike(strike) {
 var STRATEGY_SHORT_LABELS = {
   BULL_PUT_SPREAD: "Bull Put",
   BULL_CALL_SPREAD: "Bull Call",
+  BEAR_CALL_SPREAD: "Bear Call",
+  BEAR_PUT_SPREAD: "Bear Put",
   DIAGONAL_SPREAD: "Diagonal",
   IRON_CONDOR: "Iron Condor",
   CUSTOM: "Custom",
@@ -232,6 +234,9 @@ var SKIP_REASON_LABELS = {
   MISSING_CONTRACT: "missing leg",
   UNUSABLE_ENTRY_PRICE: "no quote",
   NO_OTM_PUT_CANDIDATES: "no OTM puts",
+  NO_OTM_CALL_CANDIDATES: "no OTM calls",
+  NO_CALL_CONTRACTS: "no calls",
+  NO_PUT_CONTRACTS: "no puts",
   INSUFFICIENT_WINGS: "no wings",
   NON_POSITIVE_CREDIT: "<=0 credit",
   NON_POSITIVE_MAX_LOSS: "<=0 max loss",

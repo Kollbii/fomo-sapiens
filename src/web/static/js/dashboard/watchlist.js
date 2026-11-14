@@ -378,6 +378,9 @@ function applyBatch(batch, source) {
 }
 
 async function onBatchFinished(batch) {
+  // Lets the Best Option screener recalculate from the new snapshots and auto-resume live mode.
+  document.dispatchEvent(new Event("ibkr:batch-finished"));
+  document.dispatchEvent(new Event("ibkr:lock-released"));
   await refreshWatchlist();
   var follow = state.watchlistFollow;
   state.watchlistFollow = null;
@@ -450,6 +453,7 @@ async function pollBatch() {
     renderProgress();
     updateRows();
     syncControls();
+    document.dispatchEvent(new Event("ibkr:lock-released"));
     showBanner("warn", "Batch status was lost (server restarted?). Reloading watchlist markers.", {
       phase: "BATCH_LOAD",
       status: 404,

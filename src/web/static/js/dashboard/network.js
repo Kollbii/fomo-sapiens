@@ -456,5 +456,7 @@ export async function refreshFromIBKR() {
       dom.refreshBtn.disabled = Boolean(state.watchlistBatchBusy);
       dom.refreshBtn.textContent = "REFRESH FROM IBKR";
     }
+    // Lock holder finished: lets the Best Option screener auto-resume its live stream.
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }

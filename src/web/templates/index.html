@@ -262,6 +262,15 @@
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Backtest</span>
       </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="best_option"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Best Option</span>
+      </button>
     </div>
     <button
       id="panel-visibility-reset"
@@ -574,6 +583,8 @@
         >
           <button type="button" class="pill-btn strategy-preset-btn active" data-strategy-preset="BULL_PUT_SPREAD" title="Credit Put Spread anchored near Put Wall">Bull Put</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BULL_CALL_SPREAD" title="Debit Call Spread capped near Call Wall">Bull Call</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BEAR_CALL_SPREAD" title="Credit Call Spread anchored near Call Wall">Bear Call</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BEAR_PUT_SPREAD" title="Debit Put Spread reaching toward Put Wall">Bear Put</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="DIAGONAL_SPREAD" title="Calendar Diagonal Spread across DTEs">Diagonal</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="IRON_CONDOR" title="4-leg Iron Condor anchored between Put &amp; Call Walls">Iron Condor</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="CUSTOM" title="Evaluate custom hand-picked legs">Custom</button>
@@ -1170,6 +1181,101 @@
       <ul id="backtest-assumptions" class="backtest-assumptions" aria-label="Simulation Assumptions"></ul>
     </div>
   </article>
+
+  <article id="best-option-card" class="panel-card panel-card--span-12 panel-card--best-option" data-panel-id="best_option" data-default-span="12">
+    <div class="panel-head">
+      <div class="panel-head-left">
+        <h2 class="panel-title">Best Option Screener</h2>
+        <span class="panel-meta">WATCHLIST-WIDE STRATEGY RANKING FROM CACHED SNAPSHOTS</span>
+      </div>
+      <div class="panel-actions screener-head-actions">
+        <span id="screener-live-badge" class="badge badge--muted" hidden></span>
+        <span id="screener-md-label" class="badge badge--delayed" hidden></span>
+      </div>
+    </div>
+
+    <div class="panel-body screener-body">
+      <form id="screener-form" class="screener-controls" autocomplete="off">
+        <label class="screener-field">
+          <span class="field-label">Mode</span>
+          <select id="screener-mode" class="select-control" aria-label="Screener mode">
+            <option value="best" selected>Best per ticker</option>
+            <option value="selected">Selected strategy</option>
+            <option value="all">All combinations</option>
+          </select>
+        </label>
+        <label class="screener-field">
+          <span class="field-label">Strategy</span>
+          <select id="screener-strategy" class="select-control" aria-label="Screener strategy" disabled>
+            <option value="BULL_PUT_SPREAD" selected>Bull Put</option>
+            <option value="BEAR_CALL_SPREAD">Bear Call</option>
+            <option value="BULL_CALL_SPREAD">Bull Call</option>
+            <option value="BEAR_PUT_SPREAD">Bear Put</option>
+            <option value="DIAGONAL_SPREAD">Diagonal</option>
+            <option value="IRON_CONDOR">Iron Condor</option>
+          </select>
+        </label>
+        <label class="screener-field">
+          <span class="field-label">DTE</span>
+          <select id="screener-dte" class="select-control" aria-label="Screener DTE window">
+            <option value="60">30&ndash;60d</option>
+            <option value="90">30&ndash;90d</option>
+            <option value="120" selected>30&ndash;120d</option>
+            <option value="0:29">0&ndash;29d (Short)</option>
+            <option value="0:120">0&ndash;120d (All)</option>
+          </select>
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min credit $</span>
+          <input id="screener-min-credit" class="input-control" type="number" min="0" step="any" inputmode="decimal" placeholder="off" title="Minimum net credit in dollars (credit strategies only)" />
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min RoR %</span>
+          <input id="screener-min-ror" class="input-control" type="number" min="0" max="1000" step="any" inputmode="decimal" placeholder="off" />
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min POP %</span>
+          <input id="screener-min-pop" class="input-control" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="off" />
+        </label>
+        <button type="submit" id="screener-recalc-btn" class="btn btn-primary">Recalculate</button>
+        <label class="screener-check" title="Stream live quotes for the top rows of the current sort (display only)">
+          <input id="screener-live" type="checkbox" />
+          <span>Live</span>
+        </label>
+        <label class="screener-check">
+          <input id="screener-show-status" type="checkbox" checked />
+          <span>Show status rows</span>
+        </label>
+        <button type="button" id="screener-reset-filters" class="btn btn-xs" title="Clear every header filter">Reset filters</button>
+        <div class="screener-columns-wrap">
+          <button
+            type="button"
+            id="screener-columns-btn"
+            class="btn btn-xs screener-columns-btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="screener-columns-menu"
+            title="Show or hide columns"
+          ><span aria-hidden="true">&#9638;</span><span>Columns</span></button>
+          <div id="screener-columns-menu" class="screener-columns-menu" role="group" aria-label="Screener columns" hidden></div>
+        </div>
+      </form>
+
+      <div id="screener-status" class="screener-status" role="status" aria-live="polite">Waiting for the first calculation&hellip;</div>
+      <ul id="screener-notices" class="screener-notices" hidden></ul>
+
+      <div id="screener-scroll" class="screener-scroll">
+        <table id="screener-table" class="screener-table">
+          <thead>
+            <tr id="screener-head-row"></tr>
+            <tr id="screener-filter-row" class="screener-filter-row"></tr>
+          </thead>
+          <tbody id="screener-body"></tbody>
+        </table>
+        <div id="screener-empty" class="screener-empty" hidden></div>
+      </div>
+    </div>
+  </article>
 </section>
 
 <!-- Row 6: High-Density Option Chain Table -->
@@ -1346,5 +1452,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261114c"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261115a"></script>
 {% endblock %}

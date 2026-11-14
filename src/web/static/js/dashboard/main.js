@@ -41,6 +41,9 @@ import {
 import {
   initWatchlist,
 } from "./watchlist.js";
+import {
+  initScreener,
+} from "./screener.js";
 
 // ------------------------------------------------------------------ Init
 function init() {
@@ -60,6 +63,7 @@ function init() {
   loadLedger();
   initBacktestPanel();
   initWatchlist();
+  initScreener();
 }
 
 if (document.readyState === "loading") {
