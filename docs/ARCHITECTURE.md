@@ -5,7 +5,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
 
     +-----------------------------------------------------------------------------------+
     |                        BROWSER UI (NYT Editorial + Terminal)                      |
-    |  [Reserved Editorial Banner Slot]  [Watchlist: 16 seed tickers + Custom Box]  |
+    |  [Reserved Editorial Banner Slot]  [Collapsible Watchlist Panel + Add Box]  |
     |  [Range % | Strike Step $ | Refresh Button | Historical Snapshot Selector]        |
     |  [Multi-DTE Plotly Overlays (Walls, IV, Greeks)]  [High-Density Tabular Chain]    |
     +-----------------------------------------+-----------------------------------------+
@@ -130,10 +130,10 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │       └── static/
     │           ├── css/          # tokens, layout, controls, charts, corridor, strategy_lab,
     │           │                 # ledger, snapshot_picker, backtest, chain_table, responsive
-    │           └── js/dashboard/ # 19 native ES modules: main.js entry + state, helpers, badges,
+    │           └── js/dashboard/ # 20 native ES modules: main.js entry + state, helpers, badges,
     │                             # charts, panels, chain_table, snapshots, strategy_lab,
     │                             # corridor, ledger, backtest, backtest_charts, backtest_paper,
-    │                             # backtest_tables, network, events, ai_prompt, grid_layout
+    │                             # backtest_tables, network, events, ai_prompt, grid_layout, watchlist
     └── tests/
         ├── conftest.py          # fixtures_dir, fixture_repo
         ├── support/             # aio.py (run_coro, run_virtual_loop, noop_sleep), ib_fakes.py

@@ -33,7 +33,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   Row 3: Control Bar (Watchlist Pills, Ticker Input, Filters, Actions)
+   Row 3: Control Bar (Watchlist Panel, Add Ticker, Filters, Actions)
    -------------------------------------------------------------------------- */
 .control-bar {
   grid-column: 1 / -1;
@@ -84,6 +84,250 @@
   background: var(--accent-primary);
   border-color: var(--accent-primary);
   color: var(--bg-canvas);
+}
+
+/* --------------------------------------------------------------------------
+   Watchlist panel (toggle + collapsible rows), add-ticker form, batch progress strip
+   -------------------------------------------------------------------------- */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.wl-picker {
+  position: relative;
+}
+
+.wl-picker__toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.wl-picker__active {
+  font-family: var(--font-mono);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--accent-primary);
+}
+
+.wl-picker__caret {
+  color: var(--text-muted);
+}
+
+.wl-picker__label {
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-picker__panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 320px;
+  max-width: calc(100vw - 24px);
+  max-height: 440px;
+  overflow-y: auto;
+  padding: 4px 0;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.wl-picker__panel[hidden],
+.wl-picker__notice[hidden],
+.wl-picker__empty[hidden],
+.wl-progress[hidden],
+.wl-progress__running[hidden],
+.wl-progress__summary[hidden] {
+  display: none;
+}
+
+.wl-picker__notice {
+  margin: 0;
+  padding: 6px 12px;
+  color: var(--accent-warn);
+  background: var(--accent-warn-bg);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.wl-picker__empty {
+  margin: 0;
+  padding: 10px 12px;
+  color: var(--text-muted);
+}
+
+.wl-picker__rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.wl-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 12px;
+}
+
+.wl-row:hover {
+  background: var(--bg-hover);
+}
+
+.wl-row.is-active .wl-row__sym {
+  color: var(--accent-primary);
+  text-decoration: underline;
+}
+
+.wl-row__sym {
+  justify-self: start;
+  padding: 3px 4px;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.wl-row__sym:hover {
+  text-decoration: underline;
+}
+
+.wl-row__status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 96px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.wl-row__status.is-fresh {
+  color: var(--accent-call);
+}
+
+.wl-row__status.is-pending {
+  color: var(--accent-warn);
+}
+
+.wl-row__status.is-failed {
+  color: var(--accent-put);
+}
+
+.wl-row__status.is-none {
+  color: var(--text-muted);
+}
+
+.wl-row__remove {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.wl-row__remove:hover:not(:disabled) {
+  color: var(--accent-put);
+  border-color: var(--accent-put);
+}
+
+.wl-row__remove:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.wl-row__sym:focus-visible,
+.wl-row__remove:focus-visible,
+.wl-row__check:focus-visible,
+.wl-picker__toggle:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+.wl-picker__footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px 4px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.wl-btn-small {
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.wl-picker__load {
+  margin-left: auto;
+}
+
+.wl-add {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.wl-add__input {
+  width: 120px;
+  text-transform: uppercase;
+}
+
+.wl-progress {
+  flex: 1 0 100%;
+  padding: 6px 0 2px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.wl-progress__running,
+.wl-progress__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.wl-progress__track {
+  flex: 0 1 280px;
+  min-width: 120px;
+  height: 8px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+
+.wl-progress__fill {
+  width: 0;
+  height: 100%;
+  background: var(--accent-primary);
+  transition: width 0.2s ease;
+}
+
+.wl-progress__text {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .panel-visibility-bar {

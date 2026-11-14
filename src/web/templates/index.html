@@ -37,31 +37,74 @@
 <!-- Row 3: Control Bar -->
 <section class="control-bar" aria-label="Chain Controls and Filters">
   <div class="control-group">
-    <div id="watchlist-pills" class="watchlist-pills" role="group" aria-label="Watchlist Tickers">
-      {% for sym in watchlist %}
+    <div class="wl-picker" id="watchlist-picker">
       <button
         type="button"
-        class="pill-btn{% if sym == default_ticker %} active{% endif %}"
-        data-ticker="{{ sym }}"
+        id="watchlist-toggle"
+        class="btn wl-picker__toggle"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-controls="watchlist-panel"
       >
-        {{ sym }}
+        <span id="watchlist-active" class="wl-picker__active">{{ default_ticker }}</span>
+        <span class="wl-picker__caret" aria-hidden="true">&#9662;</span>
+        <span class="wl-picker__label">Watchlist (<span id="watchlist-count">{{ watchlist | length }}</span>)</span>
       </button>
-      {% endfor %}
+      <div id="watchlist-panel" class="wl-picker__panel" role="group" aria-label="Watchlist" hidden>
+        <p id="watchlist-notice" class="wl-picker__notice" role="status" hidden></p>
+        <p id="watchlist-empty" class="wl-picker__empty" hidden>Watchlist is empty. Add a ticker.</p>
+        <ul id="watchlist-rows" class="wl-picker__rows"></ul>
+        <div class="wl-picker__footer">
+          <button type="button" id="watchlist-select-all" class="btn wl-btn-small">All</button>
+          <button type="button" id="watchlist-select-none" class="btn wl-btn-small">None</button>
+          <button type="button" id="watchlist-select-stale" class="btn wl-btn-small">Stale only</button>
+          <button type="button" id="watchlist-load-selected" class="btn btn-primary wl-btn-small wl-picker__load" disabled>
+            LOAD SELECTED (<span id="watchlist-selected-count">0</span>)
+          </button>
+        </div>
+      </div>
     </div>
 
-    <form id="custom-ticker-form" class="field-group" autocomplete="off">
-      <label for="custom-ticker-input" class="field-label">Ticker</label>
+    <form id="watchlist-add-form" class="field-group wl-add" autocomplete="off">
+      <label for="watchlist-add-input" class="sr-only">Add ticker to watchlist and load it from IBKR</label>
       <input
-        id="custom-ticker-input"
-        class="input-control"
+        id="watchlist-add-input"
+        class="input-control wl-add__input"
         type="text"
         maxlength="5"
         pattern="[A-Za-z]{1,5}"
-        placeholder="e.g. AAPL"
-        aria-label="Custom US Stock Ticker"
+        placeholder="+ add ticker"
+        title="Add a US stock ticker to the watchlist and load it from IBKR (Enter)"
       />
-      <button id="custom-ticker-submit" class="btn" type="submit">LOAD</button>
+      <button id="watchlist-add-submit" class="btn" type="submit" title="Add ticker and load it from IBKR">ADD</button>
     </form>
+
+    <button type="button" id="watchlist-load-bar" class="btn btn-primary wl-load-bar" disabled>
+      LOAD SELECTED (<span id="watchlist-load-bar-count">0</span>)
+    </button>
+  </div>
+
+  <div id="watchlist-progress" class="wl-progress" hidden>
+    <div id="watchlist-progress-running" class="wl-progress__running" hidden>
+      <div
+        id="watchlist-progress-track"
+        class="wl-progress__track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+        aria-label="Batch load progress"
+      >
+        <div id="watchlist-progress-fill" class="wl-progress__fill"></div>
+      </div>
+      <span id="watchlist-progress-text" class="wl-progress__text" role="status" aria-live="polite"></span>
+      <button type="button" id="watchlist-cancel" class="btn wl-btn-small">Cancel</button>
+    </div>
+    <div id="watchlist-progress-summary" class="wl-progress__summary" hidden>
+      <span id="watchlist-summary-text" class="wl-progress__text" role="status"></span>
+      <button type="button" id="watchlist-retry" class="btn wl-btn-small" hidden>Retry failed</button>
+      <button type="button" id="watchlist-summary-dismiss" class="btn wl-btn-small" aria-label="Dismiss batch summary" title="Dismiss">&times;</button>
+    </div>
   </div>
 
   <div class="control-group">
@@ -1286,6 +1329,8 @@
   "defaultTicker": default_ticker,
   "defaultTheme": default_theme,
   "watchlist": watchlist,
+  "watchlistMaxSize": watchlist_max_size,
+  "watchlistAllowCustom": watchlist_allow_custom,
   "defaultRangePct": default_range_pct,
   "defaultStrikeStep": default_strike_step,
   "ibkrHost": ibkr_host,
@@ -1301,5 +1346,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261114a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261114b"></script>
 {% endblock %}

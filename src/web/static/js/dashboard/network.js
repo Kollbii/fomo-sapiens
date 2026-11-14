@@ -294,7 +294,7 @@ export async function loadChain(ticker, snapshotId) {
 }
 
 export async function refreshFromIBKR() {
-  if (state.loading) return;
+  if (state.loading || state.watchlistBatchBusy) return;
   if (state.corridorStreaming || state.corridorStreamSource) {
     stopCorridorStream({ silent: true });
   }
@@ -383,6 +383,9 @@ export async function refreshFromIBKR() {
       return;
     }
 
+    // Tell the watchlist panel a new snapshot exists (decoupled event; no import cycle).
+    document.dispatchEvent(new Event("ibkr:snapshot-saved"));
+
     // Stage 2: Post-Refresh DOM / Plotly Render
     try {
       state.chainData = res.body;
@@ -438,7 +441,7 @@ export async function refreshFromIBKR() {
   } finally {
     state.loading = false;
     if (dom.refreshBtn) {
-      dom.refreshBtn.disabled = false;
+      dom.refreshBtn.disabled = Boolean(state.watchlistBatchBusy);
       dom.refreshBtn.textContent = "REFRESH FROM IBKR";
     }
   }

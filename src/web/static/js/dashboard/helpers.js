@@ -888,15 +888,14 @@ export function showBanner(kind, message, meta) {
 }
 
 export function setActiveTickerUI(ticker) {
-  if (dom.watchlistPills) {
-    var pills = dom.watchlistPills.querySelectorAll(".pill-btn");
-    for (var i = 0; i < pills.length; i++) {
-      var btn = pills[i];
-      btn.classList.toggle("active", btn.getAttribute("data-ticker") === ticker);
-    }
+  if (dom.watchlistActive) {
+    dom.watchlistActive.textContent = ticker;
   }
-  if (dom.customInput && state.watchlist.indexOf(ticker) === -1) {
-    dom.customInput.value = ticker;
+  if (dom.watchlistRows) {
+    var rows = dom.watchlistRows.querySelectorAll("[data-wl-row]");
+    for (var i = 0; i < rows.length; i++) {
+      rows[i].classList.toggle("is-active", rows[i].getAttribute("data-wl-row") === ticker);
+    }
   }
   updateExportLink();
 }
