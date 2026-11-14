@@ -44,8 +44,8 @@ Any failure needing a logic change in `src/` → STOP, emit the report with `sta
 ## 3. Commit (only when all gates pass)
 1. Never stage `.env`, `data/**` (except `.gitkeep`), `__pycache__/`, `.venv/`.
 2. Stage explicit paths only: `git add <paths from git status>` (never `git add -A`).
-3. Conventional Commits, scope = layer: `feat(broker): …`, `fix(analytics): …`, `feat(ui): …`, `test(unit): …`, `docs(sync): …`, `chore(agents): …`.
-4. Tag only when the user gives a tag or asks for a release; derive the version from recent git tags (`git tag -l --sort=-v:refname` — in PowerShell pipe to `Select-Object -First 3`) rather than `pyproject.toml` alone. `git tag -a <tag> -m "<summary>"`.
+3. Conventional Commits, scope = layer: `feat(broker): …`, `fix(analytics): …`, `feat(ui): …`, `test(unit): …`, `docs(sync): …`, `chore(agents): …`. When a change legitimately spans multiple coupled layers, either commit each layer separately in dependency order or use combined scopes: `feat(core,storage,broker): …`, `feat(web,ui): …`, `docs(sync): … for X.Y.Z`.
+4. Tag only when the user gives a tag or asks for a release; derive the version from `CHANGELOG.md` or recent git tags (`git tag -l --sort=-v:refname` — in PowerShell pipe to `Select-Object -First 3`, repo tags use raw semver e.g. `0.3.0` without `v` prefix). Tag annotated: `git tag -a <version> -m "<summary or release title>"`. Ensure working directory is clean before tagging.
 5. Push only on explicit instruction: `git push origin HEAD --follow-tags`.
 
 ## 4. Report (<= 10 lines, then the shared HANDOFF block)
@@ -82,7 +82,7 @@ Model `gemini-4-hydrogen`, thinking `thinkingLevel=LOW`. Do not narrate delibera
 **Hard invariants — never violate, never "temporarily" relax:**
 1. No order/mutation APIs (`placeOrder`, `cancelOrder`, `reqGlobalCancel`, `exerciseOptions`, `whatIfOrder[Async]`) and no account queries (`reqAccountSummary`, `reqPositions`, `reqPnL`, `managedAccounts`). Never weaken `src/core/security.py`.
 2. Every user ticker passes `TickerValidator.validate()` before touching file paths or IBKR contracts.
-3. Never request an unfiltered chain: weekly `[dte_min, dte_max]` DTE + `range_pct` + `strike_step` filters, pages `<= 80`, corridor `<= 60`, every `reqMktData` paired with `cancelMktData` in `finally:`.
+3. Never request an unfiltered chain: weekly `[dte_min, dte_max]` DTE + `range_pct` + `strike_step` filters, pages `<= 80`, corridor `<= 90` (`88` options + `1` spot = `89 <= 90`, keeping a 10-line buffer below IBKR's 100-line ceiling), every `reqMktData` paired with `cancelMktData` in `finally:`.
 4. Never block the event loop (`time.sleep`, sync sockets). Use `asyncio.sleep` and `*Async` ib-async calls.
 5. Never overwrite `data/snapshots/**`; writes are atomic (`.tmp` + `os.replace`).
 6. No `pandas` in `src/`. Polars + NumPy/SciPy only. `mypy --strict` clean, full type hints.
