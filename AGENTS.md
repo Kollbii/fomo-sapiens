@@ -4,7 +4,7 @@
 - **System Name:** IBKR Options Analyzer & Dashboard
 - **Architecture:** Local, strictly **READ-ONLY** quantitative options analytics platform connecting to **IBKR Gateway / TWS** (`IBKR_HOST:IBKR_PORT`, default `127.0.0.1:4001`), persisting immutable local CSV snapshots, and serving a dual-theme (**NYT Editorial + High-Density Financial Terminal**) web UI via FastAPI.
 - **Primary Market Data Mode:** Configured dynamically via `MARKET_DATA_MODE`, `DEFAULT_MARKET_DATA_TYPE`, and `FALLBACK_MARKET_DATA_TYPE` in `.env` / `config/settings.yaml` — defaulting to `DELAYED` (**Type 3** 15-min Delayed with automatic fallback to **Type 4** Delayed-Frozen outside market hours) and supporting `LIVE` (**Type 1** Live OPRA with fallback to **Type 2** Frozen, plus automatic `10089`/`354` downgrade to Delayed when OPRA permissions are missing).
-- **Default Watchlist:** 16 seed tickers (`NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`), plus a strictly validated dynamic US Stock (`STK`) ticker input box. The list is user-editable and capped at 20 (configurable `watchlist.max_size`, `1..50`) (server-persisted store `data/watchlist.json`; UI editing lands with the watchlist panel).
+- **Default Watchlist:** 16 seed tickers (`NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`), plus a strictly validated dynamic US Stock (`STK`) ticker input box. The list is user-editable in the collapsible watchlist panel (add/remove, multi-ticker batch load) and capped at 20 (configurable `watchlist.max_size`, `1..50`); it is server-persisted in `data/watchlist.json`.
 
 ---
 

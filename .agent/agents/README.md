@@ -38,7 +38,7 @@ Gemini reasoning effort is applied through `.gemini/settings.json` → `agents.o
 
 | Agent | Profile | Tools | Use when the change touches… |
 | :--- | :--- | :--- | :--- |
-| `broker-storage-eng` | deep-reasoning | rw + bash | `src/core/` (except `security.py`), `src/storage/`, `src/broker/`, `src/services/` (orchestration, corridor lifecycle), `config/settings.yaml`, `.env.example` |
+| `broker-storage-eng` | deep-reasoning | rw + bash | `src/core/` (except `security.py`), `src/storage/`, `src/broker/`, `src/services/` (orchestration, corridor lifecycle, watchlist & batch refresh), `config/settings.yaml`, `.env.example` |
 | `quant-analytics-eng` | deep-reasoning | rw + bash | `src/analytics/` (BSM, walls, anomalies, term structure, Strategy Lab, roadmap GEX/diff/skew/max-pain) |
 | `ui-frontend-eng` | balanced-coding | rw + bash | `src/main.py`, `src/web/` (thin routes, `errors.py`, SSE, templates, `css/*.css`, `js/dashboard/*.js`) |
 | `doc-sync-auditor` | precise-writer | edit + bash | after any code change: `AGENTS.md`, `docs/*.md`, `CHANGELOG.md`, `README.md`, `.agent/agents/*.md` |

@@ -4,7 +4,7 @@ description: >-
   Use for any change in src/main.py or src/web/: FastAPI routes and response models, SSE
   corridor endpoints, Jinja2 templates, NYT Print / Obsidian Terminal CSS tokens, the 12-column
   snap-to-grid Plotly panels, Wall Corridor card, Strategy Lab card, Trade Ledger & Roll Chains
-  card, Daily Backtester & Paper Tracker card, ET-day snapshot picker, 18-column chain table,
+  card, Daily Backtester & Paper Tracker card, collapsible watchlist panel with batch progress strip, ET-day snapshot picker, 18-column chain table,
   alert banner, theme switching, and localStorage preferences.
 profile: balanced-coding
 color: purple
@@ -37,15 +37,15 @@ You own the HTTP adapter and the browser. `src/web/` may import only `src.core` 
 `src/services/` (owned by `broker-storage-eng`) and math/socket logic never enters `src/web/`.
 
 ## 1. Navigating Large Files (mandatory token rule)
-Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (19 ES modules; `main.js` entry) and `src/web/static/css/*.css` (11 files split per dashboard row). Open only the module for the panel you touch; `index.html` (~1250 lines) is still large.
+Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (20 ES modules, incl. `watchlist.js`; `main.js` entry) and `src/web/static/css/*.css` (11 files split per dashboard row). Open only the module for the panel you touch; `index.html` (~1250 lines) is still large.
 - Find: search (`rg -n`, `grep -rn`, or PowerShell `Select-String`) for `"function renderStrategyPayoffChart"` inside `src/web/static/js/dashboard/`.
 - Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
 - New cross-module function: `export` it and add it to the importer's `import { ... }` list;
   `make js-check` fails on unresolved imports.
 
 ## 2. Backend Rules (`src/web/api.py`, `src/web/backtest_api.py`, `src/web/errors.py`, `src/main.py`)
-- Routes stay thin: parse HTTP input, call one service method (`AnalyzerService` / `PaperTradeService` / `backtest` — running `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `409` concurrency/paper-trade guards (`REFRESH_BUSY`, `DUPLICATE_PAPER_TRADE`, `PAPER_TRADE_CAP`, `PAPER_TRADE_STATE`), `422` ticker/request/config/backtest (`INVALID_TICKER`, `INVALID_REQUEST`, `BACKTEST_VALIDATION_ERROR`, `CONFIGURATION_ERROR`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`), `502` fetch/spot/Flex (`FLEX_SERVICE_ERROR`), `429` pacing, `403` security. Never leak tracebacks to the browser.
-- Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`, `GET /api/ledger`, `POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`, `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`. A new/renamed route => `contracts_touched`.
+- Routes stay thin: parse HTTP input, call one service method (`AnalyzerService` / `PaperTradeService` / `backtest` — running `TickerValidator`), return its model. Domain errors map to JSON in `src/web/errors.py`: `409` concurrency/paper-trade guards (`REFRESH_BUSY`, `DUPLICATE_PAPER_TRADE`, `PAPER_TRADE_CAP`, `PAPER_TRADE_STATE`, `WATCHLIST_FULL`), `422` ticker/request/config/backtest (`INVALID_TICKER`, `INVALID_REQUEST`, `BACKTEST_VALIDATION_ERROR`, `CONFIGURATION_ERROR`), `404` missing snapshot, `503` Gateway offline (configured `{host}:{port}`) or `STORAGE_UNAVAILABLE`, `502` fetch/spot/Flex (`FLEX_SERVICE_ERROR`), `429` pacing, `403` security. Never leak tracebacks to the browser.
+- Routes: `GET /api/status`, `GET /api/snapshots/{ticker}`, `GET /api/chain/{ticker}`, `POST /api/refresh`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel`, `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `GET /api/csv/{ticker}`, `POST /api/strategy/suggest`, `POST /api/strategy/evaluate`, `POST /api/corridor/quotes`, `POST /api/corridor/stop`, `GET /api/corridor/stream/{ticker}`, `GET /api/ledger`, `POST /api/ledger/sync`, `POST /api/ledger/import`, `POST /api/ledger/mtm`, `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`. A new/renamed route => `contracts_touched`.
 - SSE: `AnalyzerService.open_corridor_stream()` validates and calls `ensure_connected()` before the route returns a `StreamingResponse` (so failures are `409`/`422`/`503`, not a broken stream); the route keeps `finally: await gen.aclose()`; lifespan shutdown awaits `stop_corridor_streams()` before disconnect.
 - Corridor live quotes and `/api/ledger/mtm` marks overlay in-memory caches only; Mode 1 chain CSVs and `data/ledger/*.csv` archives are never mutated silently.
 - Boot must succeed with the Gateway closed (Offline Cache Mode), including `LedgerService.ensure_layout()` and `PaperTradeStore.ensure_layout()`.
