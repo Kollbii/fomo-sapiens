@@ -16,11 +16,15 @@ from src.storage.schema import (
     WallBasis,
 )
 
-CORRIDOR_MAX_CONTRACTS = 60
+#: Hard ceiling on concurrent IBKR subscriptions (88 options + 1 spot = 89 <= 90, keeping a
+#: 10-line buffer below IBKR's 100-line market-data limit).
+CORRIDOR_MAX_CONTRACTS: int = 90
 
-DEFAULT_CORRIDOR_MAX_CONTRACTS = 56
+#: Default maximum option contracts selected for the Wall Strike Corridor.
+DEFAULT_CORRIDOR_MAX_CONTRACTS: int = 88
 
-DEFAULT_WINDOW_STRIKES = 5
+#: Default ±strike window around Primary Put & Call Walls.
+DEFAULT_WINDOW_STRIKES: int = 10
 
 CorridorZone = Literal["PUT_WALL", "CALL_WALL", "BOTH_WALLS", "ATM", "STRATEGY_LEG"]
 
@@ -79,7 +83,7 @@ class CorridorQuoteFrame(BaseModel):
     snapshot_id: str
     target_expiry: str
     target_dte: int
-    window_strikes: int
+    window_strikes: int = Field(default=DEFAULT_WINDOW_STRIKES, ge=1, le=15)
     max_contracts: int
     subscribed_count: int
     subscription_cap: int = CORRIDOR_MAX_CONTRACTS

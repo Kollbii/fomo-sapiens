@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from src.core.config import (
     DEFAULT_YAML_PATH,
     PROJECT_ROOT,
+    CorridorSettings,
     LedgerSettings,
     PaperTrackerSettings,
     Settings,
@@ -64,9 +65,9 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.options_chain.contract_details_timeout_sec == 5.0
     assert s.options_chain.contract_details_cooldown_sec == 0.10
     assert s.options_chain.contract_details_cache_ttl_sec == 900.0
-    assert s.corridor.default_window_strikes == 5
-    assert s.corridor.default_max_contracts == 56
-    assert s.corridor.hard_max_contracts == 60
+    assert s.corridor.default_window_strikes == 10
+    assert s.corridor.default_max_contracts == 88
+    assert s.corridor.hard_max_contracts == 90
     assert s.analytics.risk_free_rate == 0.0425
 
 
@@ -256,3 +257,47 @@ def test_paper_tracker_settings_and_resolve_project_path(tmp_path: Path) -> None
         PaperTrackerSettings(max_active_trades=0)
     with pytest.raises(ValidationError):
         PaperTrackerSettings(max_active_trades=201)
+
+
+def test_short_dte_backtest_options_chain_settings(tmp_path: Path) -> None:
+    from src.core.config import OptionsChainSettings
+
+    s = load_settings(DEFAULT_YAML_PATH, tmp_path / "missing.env")
+    assert s.options_chain.dte_min == 30
+    assert s.options_chain.dte_max == 120
+    assert s.options_chain.include_short_dte_for_backtest is True
+    assert s.options_chain.short_dte_min == 0
+    assert s.options_chain.short_dte_max == 29
+
+    valid = OptionsChainSettings(
+        short_dte_min=0, short_dte_max=30, include_short_dte_for_backtest=False
+    )
+    assert valid.short_dte_max == 30
+    assert valid.include_short_dte_for_backtest is False
+
+    with pytest.raises(ValidationError, match="short_dte_min"):
+        OptionsChainSettings(short_dte_min=15, short_dte_max=14)
+    with pytest.raises(ValidationError):
+        OptionsChainSettings(short_dte_min=-1)
+    with pytest.raises(ValidationError):
+        OptionsChainSettings(short_dte_max=31)
+    with pytest.raises(ValidationError, match="dte_min"):
+        OptionsChainSettings(dte_min=90, dte_max=60)
+
+
+def test_corridor_settings_bounds_and_cap_validator() -> None:
+    cfg = CorridorSettings(
+        default_window_strikes=15,
+        default_max_contracts=88,
+        hard_max_contracts=90,
+    )
+    assert cfg.default_window_strikes == 15
+    assert cfg.default_max_contracts == 88
+    assert cfg.hard_max_contracts == 90
+
+    with pytest.raises(ValidationError, match="default_max_contracts"):
+        CorridorSettings(default_max_contracts=88, hard_max_contracts=80)
+    with pytest.raises(ValidationError):
+        CorridorSettings(default_window_strikes=16)
+    with pytest.raises(ValidationError):
+        CorridorSettings(hard_max_contracts=91)

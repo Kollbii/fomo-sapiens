@@ -597,3 +597,77 @@ def test_select_spot_cross_check_and_resolve_spot_with_source() -> None:
     plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
     assert plan.underlying.spot == pytest.approx(140.0)
     assert plan.underlying.spot_source == "MID"
+
+
+def test_short_dte_zero_dte_discovery_and_reuse() -> None:
+    now = datetime(2026, 11, 13, 15, 30, 0, tzinfo=UTC)  # Friday 2026-11-13
+    mkt = date(2026, 11, 13)
+    # 0 DTE (same-day Friday), 7, 14, 21, 28, plus 30 & 37 DTE (excluded from [0, 29])
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (0, 7, 14, 21, 28, 30, 37)]
+    strikes = [130.0, 135.0, 140.0, 145.0, 150.0]
+
+    matched = match_expirations(exps, mkt, dte_min=0, dte_max=29)
+    assert [m.dte for m in matched] == [0, 7, 14, 21, 28]
+
+    qualify_calls = 0
+    secdef_calls = 0
+
+    class _TrackingFakeIB(FakeChainIB):
+        async def reqSecDefOptParamsAsync(  # noqa: N802
+            self, symbol: str, fut_fop_exchange: str, sec_type: str, con_id: int
+        ) -> list[Any]:
+            nonlocal secdef_calls
+            secdef_calls += 1
+            return await super().reqSecDefOptParamsAsync(symbol, fut_fop_exchange, sec_type, con_id)
+
+    fake_ib = _TrackingFakeIB()
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+
+    def _track_qualify(*contracts: Any) -> list[Any]:
+        nonlocal qualify_calls
+        qualify_calls += 1
+        for idx, c in enumerate(contracts, start=1):
+            c.conId = 4815 + idx
+        return list(contracts)
+
+    fake_ib.qualify_handler = _track_qualify
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, last=140.0, bid=139.9, ask=140.1, close=139.5
+    )
+
+    settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, settings, clock=lambda: now, sleep=noop_sleep)
+
+    plan1 = run_coro(
+        svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0, dte_min=30, dte_max=120)
+    )
+    assert [m.dte for m in plan1.expirations] == [30, 37]
+    assert qualify_calls == 1
+    assert secdef_calls == 1
+
+    # Pass 2 reuses underlying_info, smart_chains, and market_date: zero extra qualify/secdef calls.
+    plan2 = run_coro(
+        svc.build_plan(
+            "NVDA",
+            range_pct=0.20,
+            strike_step=5.0,
+            dte_min=0,
+            dte_max=29,
+            underlying_info=plan1.underlying,
+            smart_chains=plan1.smart_chains,
+            market_date=plan1.market_date,
+        )
+    )
+    assert [m.dte for m in plan2.expirations] == [0, 7, 14, 21, 28]
+    assert plan2.total_contracts <= svc.max_total_contracts
+    assert qualify_calls == 1
+    assert secdef_calls == 1

@@ -15,6 +15,8 @@ from src.analytics.walls import compute_walls
 from src.broker.client import IBKRBrokerClient
 from src.broker.corridor import (
     CORRIDOR_MAX_CONTRACTS,
+    DEFAULT_CORRIDOR_MAX_CONTRACTS,
+    DEFAULT_WINDOW_STRIKES,
     CorridorContractSpec,
     CorridorLegRef,
     CorridorQuoteService,
@@ -22,6 +24,7 @@ from src.broker.corridor import (
     corridor_quote_key,
     select_wall_corridor,
 )
+from src.broker.fetcher import PAGE_PACING_CHUNK_SIZE, PAGE_PACING_PAUSE_SEC
 from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import GatewayConnectionError, PacingViolationError
 from src.services.corridor import make_bsm_greeks_fallback, wall_anchors_from_report
@@ -187,7 +190,7 @@ def _select(df: pl.DataFrame, **kwargs: Any) -> CorridorSelection:
     return select_wall_corridor(df, wall_anchors=anchors, **kwargs)
 
 
-def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> None:
+def test_select_wall_corridor_caps_at_90_and_prioritizes_walls_and_legs() -> None:
     df = _build_chain_df()
     priority_leg = CorridorLegRef(expiry="2027-01-16", strike=100.0, right="C")
 
@@ -198,6 +201,9 @@ def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> Non
         max_contracts=56,
         priority_legs=[priority_leg],
     )
+    assert CORRIDOR_MAX_CONTRACTS == 90
+    assert DEFAULT_CORRIDOR_MAX_CONTRACTS == 88
+    assert DEFAULT_WINDOW_STRIKES == 10
     assert sel.ticker == "NVDA"
     assert sel.target_expiry == "2026-12-19"
     assert sel.primary_put_wall == pytest.approx(88.0)
@@ -207,30 +213,86 @@ def test_select_wall_corridor_caps_at_60_and_prioritizes_walls_and_legs() -> Non
     keys = {corridor_quote_key(s.expiry, s.strike, s.right) for s in sel.specs}
     assert corridor_quote_key("2027-01-16", 100.0, "C") in keys
     assert corridor_quote_key("2026-12-19", 88.0, "P") in keys
+    assert corridor_quote_key("2026-12-19", 88.0, "C") in keys
     assert corridor_quote_key("2026-12-19", 112.0, "C") in keys
+    assert corridor_quote_key("2026-12-19", 112.0, "P") in keys
 
-    leg_spec = next(s for s in sel.specs if s.expiry == "2027-01-16" and s.strike == 100.0)
+    leg_spec = next(
+        s for s in sel.specs if s.expiry == "2027-01-16" and s.strike == 100.0 and s.right == "C"
+    )
     assert leg_spec.is_strategy_leg is True
     assert leg_spec.zone == "STRATEGY_LEG"
 
-    # Attempting to raise max_contracts above 60 still strictly clamps at CORRIDOR_MAX_CONTRACTS.
-    clamped = _select(
+    # Secondary DTE Tier 2 includes ±min(2, window_strikes) around secondary walls with both rights.
+    sec_specs = [
+        s for s in sel.specs if s.expiry == "2027-01-16" and s.zone in ("PUT_WALL", "CALL_WALL")
+    ]
+    assert sec_specs
+    sec_by_strike: dict[float, set[str]] = {}
+    for s in sec_specs:
+        sec_by_strike.setdefault(s.strike, set()).add(s.right)
+    assert sec_by_strike[88.0] == {"C", "P"}
+    assert sec_by_strike[112.0] == {"C", "P"}
+
+    # Exceeding CORRIDOR_MAX_CONTRACTS (e.g. 91) or <= 0 raises PacingViolationError.
+    with pytest.raises(PacingViolationError):
+        _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=91)
+    with pytest.raises(PacingViolationError):
+        _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=0)
+
+
+def test_select_wall_corridor_disjoint_walls_pairs_call_and_put_at_88_cap() -> None:
+    strikes = [float(130 + i) for i in range(91)]
+    df = _build_chain_df(
+        strikes=strikes,
+        expiries=[("2026-12-19", 38)],
+        spot=175.0,
+        put_wall=150.0,
+        call_wall=200.0,
+    )
+    priority_legs = [
+        CorridorLegRef(expiry="2026-12-19", strike=135.0, right="P"),
+        CorridorLegRef(expiry="2026-12-19", strike=215.0, right="C"),
+    ]
+    sel = _select(
         df,
         target_expiry="2026-12-19",
-        window_strikes=7,
-        max_contracts=120,
+        window_strikes=10,
+        max_contracts=88,
+        priority_legs=priority_legs,
     )
-    assert clamped.max_contracts == CORRIDOR_MAX_CONTRACTS
-    assert len(clamped.specs) <= CORRIDOR_MAX_CONTRACTS
+    assert sel.window_strikes == 10
+    assert sel.max_contracts == 88
+    assert len(sel.specs) == 88
+    assert sel.primary_put_wall == pytest.approx(150.0)
+    assert sel.primary_call_wall == pytest.approx(200.0)
+
+    tier1_strikes = set(range(140, 161)) | set(range(190, 211))
+    assert len(tier1_strikes) == 42
+
+    by_strike: dict[float, set[str]] = {}
+    for spec in sel.specs:
+        by_strike.setdefault(spec.strike, set()).add(spec.right)
+
+    tier1_specs = [s for s in sel.specs if int(round(s.strike)) in tier1_strikes]
+    assert len(tier1_specs) == 84
+    for strike_num in tier1_strikes:
+        assert by_strike[float(strike_num)] == {"C", "P"}
+
+    leg_keys = {(s.strike, s.right) for s in sel.specs if s.is_strategy_leg}
+    assert leg_keys == {(135.0, "P"), (215.0, "C")}
+
+    atm_fill = [s for s in sel.specs if s.zone == "ATM"]
+    assert [(s.strike, s.right) for s in atm_fill] == [(175.0, "C"), (175.0, "P")]
 
 
-def test_prepare_contracts_raises_pacing_error_above_60() -> None:
+def test_prepare_contracts_raises_pacing_error_above_90() -> None:
     fake_ib = _FakeIB()
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
     service = CorridorQuoteService(client, sleep=noop_sleep)
 
-    oversized_specs = tuple(
-        CorridorContractSpec(
+    def _make_spec(i: int) -> CorridorContractSpec:
+        return CorridorContractSpec(
             option_conid=1000 + i,
             symbol="NVDA",
             expiry="2026-12-19",
@@ -256,25 +318,35 @@ def test_prepare_contracts_raises_pacing_error_above_60() -> None:
             cached_vega=0.1,
             cached_greeks_source="BSM_FALLBACK",
         )
-        for i in range(CORRIDOR_MAX_CONTRACTS + 1)
-    )
-    selection = CorridorSelection(
-        ticker="NVDA",
-        underlying_conid=4815,
-        underlying_price=100.0,
-        target_expiry="2026-12-19",
-        target_dte=38,
-        window_strikes=5,
-        max_contracts=CORRIDOR_MAX_CONTRACTS,
-        primary_put_wall=90.0,
-        primary_call_wall=110.0,
-        wall_basis="OPEN_INTEREST",
-        atm_strike=100.0,
-        specs=oversized_specs,
-    )
+
+    def _make_sel(count: int) -> CorridorSelection:
+        return CorridorSelection(
+            ticker="NVDA",
+            underlying_conid=4815,
+            underlying_price=100.0,
+            target_expiry="2026-12-19",
+            target_dte=38,
+            window_strikes=10,
+            max_contracts=min(count, CORRIDOR_MAX_CONTRACTS),
+            primary_put_wall=90.0,
+            primary_call_wall=110.0,
+            wall_basis="OPEN_INTEREST",
+            atm_strike=100.0,
+            specs=tuple(_make_spec(i) for i in range(count)),
+        )
 
     with pytest.raises(PacingViolationError):
-        run_coro(service._prepare_contracts(selection))
+        run_coro(service._prepare_contracts(_make_sel(CORRIDOR_MAX_CONTRACTS + 1)))
+
+    # 88 option contracts + 1 spot = 89 <= 90 (10-line IBKR buffer preserved)
+    opts_88, spot_88 = run_coro(service._prepare_contracts(_make_sel(88)))
+    assert len(opts_88) == 88
+    assert spot_88 is not None
+
+    # 90 option contracts leaves zero room for spot -> spot_contract omitted (90 <= 90)
+    opts_90, spot_90 = run_coro(service._prepare_contracts(_make_sel(90)))
+    assert len(opts_90) == 90
+    assert spot_90 is None
 
 
 def test_fetch_corridor_quotes_reuses_conids_and_cancels_100pct() -> None:
@@ -513,10 +585,7 @@ def test_corridor_without_injected_greeks_fallback_keeps_cached_snapshot_greeks(
             snapshot_id="NVDA_20261111_160000",
         )
     )
-    cached = {
-        (r["expiry"], r["strike"], r["right"]): r
-        for r in df.filter(pl.col("expiry") == "2026-12-19").to_dicts()
-    }
+    cached = {(r["expiry"], r["strike"], r["right"]): r for r in df.to_dicts()}
     assert frame.quotes
     for q in frame.quotes:
         row = cached[(q.expiry, q.strike, q.right)]
@@ -524,3 +593,87 @@ def test_corridor_without_injected_greeks_fallback_keeps_cached_snapshot_greeks(
         assert q.delta == pytest.approx(row["delta"])
         assert q.greeks_source == row["greeks_source"]
     assert len(fake_ib.cancelled) == len(fake_ib.subscribed)
+
+
+def test_corridor_burst_pacing_20_call_chunks_and_cleanup() -> None:
+    strikes = [float(130 + i) for i in range(60)]
+    df = _build_chain_df(
+        strikes=strikes,
+        expiries=[("2026-12-19", 38)],
+        spot=160.0,
+        put_wall=150.0,
+        call_wall=170.0,
+    )
+    fake_ib = _FakeIB()
+    sleep_calls: list[float] = []
+
+    async def _record_sleep(sec: float) -> None:
+        sleep_calls.append(sec)
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=_record_sleep)
+
+    # 45 option contracts + 1 spot = 46 reqMktData calls -> chunks of [20, 20, 6] => 2 sleeps
+    sel_45 = _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=45)
+    assert len(sel_45.specs) == 45
+    frame = run_coro(service.fetch_corridor_quotes(sel_45, snapshot_id="NVDA_20261111_160000"))
+    assert frame.subscribed_count == 46
+    assert frame.subscription_cap == 90
+    assert len(fake_ib.subscribed) == 46
+    assert len(fake_ib.cancelled) == 46
+    assert sleep_calls == [PAGE_PACING_PAUSE_SEC, PAGE_PACING_PAUSE_SEC]
+    assert service.active_stream_count == 0
+
+    # Exact multiple of 20 (39 options + 1 spot = 40 calls): 1 chunk sleep, no trailing sleep
+    fake_ib.subscribed.clear()
+    fake_ib.cancelled.clear()
+    sleep_calls.clear()
+    sel_39 = _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=39)
+    frame_40 = run_coro(service.fetch_corridor_quotes(sel_39, snapshot_id="NVDA_20261111_160000"))
+    assert frame_40.subscribed_count == 40
+    assert len(fake_ib.cancelled) == 40
+    assert sleep_calls == [PAGE_PACING_PAUSE_SEC]
+
+
+def test_corridor_mid_subscribe_stop_and_disconnect_cancel_partial_batch() -> None:
+    strikes = [float(130 + i) for i in range(60)]
+    df = _build_chain_df(
+        strikes=strikes,
+        expiries=[("2026-12-19", 38)],
+        spot=160.0,
+        put_wall=150.0,
+        call_wall=170.0,
+    )
+    sel_45 = _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=45)
+
+    # 1) Stop signal arrives during first 20-call chunk pause -> breaks & cancels 20 partial subs
+    fake_ib = _FakeIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+
+    async def _stop_on_pause(sec: float) -> None:
+        if math.isclose(sec, PAGE_PACING_PAUSE_SEC):
+            for sess in service._active_sessions.values():
+                sess.stop_event.set()
+
+    service = CorridorQuoteService(client, sleep=_stop_on_pause)
+    gen = service.stream_corridor_quotes(sel_45, snapshot_id="NVDA_20261111_160000")
+    with pytest.raises(StopAsyncIteration):
+        run_coro(anext(gen))
+    assert len(fake_ib.subscribed) == PAGE_PACING_CHUNK_SIZE
+    assert len(fake_ib.cancelled) == PAGE_PACING_CHUNK_SIZE
+    assert service.active_stream_count == 0
+
+    # 2) Gateway disconnect during first chunk pause -> GatewayConnectionError & cancels 20 subs
+    fake_ib_disc = _FakeIB()
+    client_disc = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib_disc)
+
+    async def _disconnect_on_pause(sec: float) -> None:
+        if math.isclose(sec, PAGE_PACING_PAUSE_SEC):
+            fake_ib_disc.disconnect()
+
+    service_disc = CorridorQuoteService(client_disc, sleep=_disconnect_on_pause)
+    with pytest.raises(GatewayConnectionError):
+        run_coro(service_disc.fetch_corridor_quotes(sel_45, snapshot_id="NVDA_20261111_160000"))
+    assert len(fake_ib_disc.subscribed) == PAGE_PACING_CHUNK_SIZE
+    assert len(fake_ib_disc.cancelled) == PAGE_PACING_CHUNK_SIZE
+    assert service_disc.active_stream_count == 0

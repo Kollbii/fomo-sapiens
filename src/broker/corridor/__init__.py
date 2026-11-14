@@ -1,4 +1,4 @@
-"""Wall Strike Corridor: `<= 60`-contract targeted quotes around Put/Call Walls.
+"""Wall Strike Corridor: `<= 90`-contract targeted quotes around Put/Call Walls.
 
 - `models`: limits, Pydantic frames, selection dataclasses, `WallAnchors`, `GreeksFallback`.
 - `selection`: pure `select_wall_corridor` (wall anchors are supplied by the service layer).

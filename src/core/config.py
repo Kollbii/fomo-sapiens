@@ -134,6 +134,9 @@ class WatchlistSettings(_StrictModel):
 class OptionsChainSettings(_StrictModel):
     dte_min: int = Field(default=30, ge=0)
     dte_max: int = Field(default=120, ge=1)
+    include_short_dte_for_backtest: bool = True
+    short_dte_min: int = Field(default=0, ge=0)
+    short_dte_max: int = Field(default=29, ge=0, le=30)
     default_range_pct: float = Field(default=0.20, gt=0, le=1)
     allowed_range_pcts: tuple[float, ...] = (0.10, 0.15, 0.20, 0.25, 0.35, 0.50)
     default_strike_step: float | None = Field(default=None, gt=0)
@@ -148,6 +151,19 @@ class OptionsChainSettings(_StrictModel):
     contract_details_cooldown_sec: float = Field(default=0.10, ge=0)
     contract_details_cache_ttl_sec: float = Field(default=900.0, ge=0)
 
+    @model_validator(mode="after")
+    def _validate_dte_windows(self) -> OptionsChainSettings:
+        if self.dte_min > self.dte_max:
+            raise ValueError(
+                f"options_chain.dte_min ({self.dte_min}) must be <= dte_max ({self.dte_max})"
+            )
+        if self.short_dte_min > self.short_dte_max:
+            raise ValueError(
+                f"options_chain.short_dte_min ({self.short_dte_min}) must be <= "
+                f"short_dte_max ({self.short_dte_max})"
+            )
+        return self
+
 
 class AnalyticsSettings(_StrictModel):
     risk_free_rate: float = Field(default=0.0425, ge=0, le=1)
@@ -156,12 +172,21 @@ class AnalyticsSettings(_StrictModel):
 
 
 class CorridorSettings(_StrictModel):
-    default_window_strikes: int = Field(default=5, ge=1, le=12)
-    default_max_contracts: int = Field(default=56, ge=1, le=60)
-    hard_max_contracts: int = Field(default=60, ge=1, le=60)
+    default_window_strikes: int = Field(default=10, ge=1, le=15)
+    default_max_contracts: int = Field(default=88, ge=1, le=90)
+    hard_max_contracts: int = Field(default=90, ge=1, le=90)
     stream_poll_interval_sec: float = Field(default=0.75, gt=0.1, le=10.0)
     oneshot_collect_timeout_sec: float = Field(default=2.0, gt=0.1, le=15.0)
     heartbeat_interval_sec: float = Field(default=5.0, gt=0.5, le=30.0)
+
+    @model_validator(mode="after")
+    def _validate_contract_caps(self) -> CorridorSettings:
+        if self.default_max_contracts > self.hard_max_contracts:
+            raise ValueError(
+                f"corridor.default_max_contracts ({self.default_max_contracts}) must be <= "
+                f"hard_max_contracts ({self.hard_max_contracts})"
+            )
+        return self
 
 
 class StorageSettings(_StrictModel):

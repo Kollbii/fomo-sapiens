@@ -405,3 +405,217 @@ def test_fetch_exact_contracts_quotes_dedupes_and_skips_expired() -> None:
         empty_real_quote_ratio([SimpleNamespace(close=1.0), SimpleNamespace(bid=1.0, ask=1.2)])
         == 0.5
     )
+
+
+def test_two_pass_sequential_short_dte_fetch_merges_and_cleans_up() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 13, 15, 30, 0, tzinfo=UTC)  # Friday 2026-11-13
+    mkt = date(2026, 11, 13)
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (0, 7, 14, 28, 35, 63)]
+    strikes = [135.0, 140.0, 145.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+
+    active_opt_lines: set[int] = set()
+    max_concurrent_opt_lines = 0
+    stk_sub_count = 0
+    orig_req = fake_ib.reqMktData
+    orig_cancel = fake_ib.cancelMktData
+
+    def _tracking_req(contract: Any, genericTickList: str = "", *args: Any, **kwargs: Any) -> Any:  # noqa: N803
+        nonlocal max_concurrent_opt_lines, stk_sub_count
+        if getattr(contract, "secType", "") == "STK":
+            stk_sub_count += 1
+        else:
+            active_opt_lines.add(int(getattr(contract, "conId", 0)))
+            max_concurrent_opt_lines = max(max_concurrent_opt_lines, len(active_opt_lines))
+        return orig_req(contract, genericTickList, *args, **kwargs)
+
+    def _tracking_cancel(contract: Any) -> None:
+        if getattr(contract, "secType", "") != "STK":
+            active_opt_lines.discard(int(getattr(contract, "conId", 0)))
+        orig_cancel(contract)
+
+    fake_ib.reqMktData = _tracking_req  # type: ignore[method-assign]
+    fake_ib.cancelMktData = _tracking_cancel  # type: ignore[method-assign]
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=4.0,
+            ask=4.4,
+            last=4.2,
+            close=4.1,
+            volume=50,
+            callOpenInterest=100,
+            putOpenInterest=100,
+            modelGreeks=None,
+        )
+    )
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
+
+    res = run_coro(
+        fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True)
+    )
+    # 1 spot lookup total (Pass 2 reused Pass 1 underlying/spot/chains); zero active lines remain.
+    assert stk_sub_count == 1
+    assert active_opt_lines == set()
+    # Pass 1 had 2 exp * 3 strikes * 2 = 12 contracts; Pass 2 had 4 exp * 3 * 2 = 24 contracts.
+    assert res.primary_contract_count == 12
+    assert res.short_dte_contract_count == 24
+    assert res.short_dte_range == (0, 29)
+    assert len(res.rows) == 36
+    assert max_concurrent_opt_lines <= 24
+    assert sorted({r.dte for r in res.rows}) == [0, 7, 14, 28, 35, 63]
+    # All merged rows carry unified snapshot metadata and (expiry, strike, right) sort.
+    assert {r.snapshot_id for r in res.rows} == {res.snapshot_id}
+    assert {r.snapshot_ts_utc for r in res.rows} == {res.snapshot_ts_utc}
+    assert {r.market_date for r in res.rows} == {res.market_date}
+    assert {r.underlying_price for r in res.rows} == {140.0}
+    assert res.rows == sorted(res.rows, key=lambda r: (r.expiry, r.strike, r.right))
+    assert any(
+        "Synced 30–120d (12 contracts) + 0–29d for Backtest (24 contracts) -> 36 total archived"
+        in n
+        for n in res.notices
+    )
+
+
+def test_two_pass_boundary_clamping_and_nonfatal_pass2_error() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 13, 15, 30, 0, tzinfo=UTC)
+    mkt = date(2026, 11, 13)
+    # Only DTE 30 and 37 exist (nothing in [0, 29])
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (30, 37)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[135.0, 140.0, 145.0],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(contract=c, bid=5.0, ask=5.2, last=5.1, close=5.0, volume=10)
+    )
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
+
+    # Even with short_dte_max=30, boundary clamps to 29 -> no double-fetch of DTE 30.
+    res = run_coro(
+        fetcher.fetch_option_chain(
+            "NVDA",
+            range_pct=0.20,
+            strike_step=5.0,
+            include_short_dte=True,
+            short_dte_min=0,
+            short_dte_max=30,
+        )
+    )
+    assert res.primary_contract_count == 12
+    assert res.short_dte_contract_count == 0
+    assert len(res.rows) == 12
+    assert any("Backtest short-DTE [0, 29] sync skipped" in n for n in res.notices)
+
+    # Explicit dte_min=0..120 skips Pass 2 completely so no duplicate fetch occurs.
+    res_wide = run_coro(
+        fetcher.fetch_option_chain(
+            "NVDA", range_pct=0.20, strike_step=5.0, dte_min=0, dte_max=120, include_short_dte=True
+        )
+    )
+    assert res_wide.short_dte_range is None
+    assert not any("sync skipped" in n for n in res_wide.notices)
+
+
+def test_two_pass_propagates_disconnect_and_cancelled_errors() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 13, 15, 30, 0, tzinfo=UTC)
+    mkt = date(2026, 11, 13)
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (7, 37)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[140.0],
+        )
+    ]
+
+    def _drop_on_short_dte(contract: Any, _ticks: str) -> Any:
+        if getattr(contract, "secType", "") == "STK":
+            return SimpleNamespace(contract=contract, bid=139.9, ask=140.1, last=140.0, close=139.8)
+        if str(getattr(contract, "lastTradeDateOrContractMonth", "")) == exps[0]:
+            fake_ib._connected = False
+            raise ConnectionResetError("socket dropped during pass 2")
+        return SimpleNamespace(contract=contract, bid=5.0, ask=5.2, last=5.1, close=5.0)
+
+    fake_ib.ticker_factory = _drop_on_short_dte
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
+
+    with pytest.raises(GatewayConnectionError):
+        run_coro(
+            fetcher.fetch_option_chain(
+                "NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True
+            )
+        )
+
+
+def test_merge_and_dedupe_rows_prefers_better_quote_then_pass1() -> None:
+    from src.broker.fetcher import _merge_and_dedupe_rows
+    from src.storage.schema import OptionContractRow
+
+    def _make_row(
+        dte: int, expiry: str, bid: float | None, ask: float | None, conid: int
+    ) -> OptionContractRow:
+        return OptionContractRow(
+            snapshot_id="NVDA_20261113_153000",
+            snapshot_ts_utc="2026-11-13T15:30:00Z",
+            market_date="2026-11-13",
+            market_data_type=3,
+            underlying="NVDA",
+            underlying_conid=4815,
+            underlying_price=140.0,
+            option_conid=conid,
+            expiry=expiry,
+            dte=dte,
+            strike=140.0,
+            moneyness_pct=0.0,
+            right="C",
+            bid=bid,
+            ask=ask,
+            last=None,
+            close=2.0,
+            volume=10,
+            open_interest=50,
+            iv=None,
+            delta=None,
+            gamma=None,
+            theta=None,
+            vega=None,
+            greeks_source="NONE",
+        )
+
+    p1 = [_make_row(30, "2026-12-13", None, None, 101)]
+    p2 = [_make_row(30, "2026-12-13", 3.1, 3.3, 102), _make_row(0, "2026-11-13", 1.1, 1.2, 103)]
+    merged = _merge_and_dedupe_rows(p1, p2)
+    assert [r.option_conid for r in merged] == [103, 102]  # sorted by expiry; better quote wins
+
+    p1_good = [_make_row(30, "2026-12-13", 3.0, 3.2, 201)]
+    p2_tie = [_make_row(30, "2026-12-13", 3.1, 3.3, 202)]
+    merged_tie = _merge_and_dedupe_rows(p1_good, p2_tie)
+    assert [r.option_conid for r in merged_tie] == [201]  # Pass 1 wins tie

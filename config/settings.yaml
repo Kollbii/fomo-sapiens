@@ -33,6 +33,9 @@ watchlist:
 options_chain:
   dte_min: 30
   dte_max: 120           # Inclusive expiration window: dte_min <= DTE <= dte_max (30..120d)
+  include_short_dte_for_backtest: true  # Also pull 0-29d sequentially into the same Mode 1 CSV for Backtest
+  short_dte_min: 0
+  short_dte_max: 29
   default_range_pct: 0.20 # +-20% around underlying spot price
   allowed_range_pcts:
     - 0.10
@@ -64,9 +67,9 @@ analytics:
   top_walls_count: 3
 
 corridor:
-  default_window_strikes: 5      # +-5 strikes around Primary Put & Call Walls
-  default_max_contracts: 56      # Reserve headroom inside 60-contract hard ceiling
-  hard_max_contracts: 60         # Strictly <= 60 concurrent subscriptions (< 100 IBKR ceiling)
+  default_window_strikes: 10     # +-10 strikes around Primary Put & Call Walls
+  default_max_contracts: 88      # Reserve spot + 10-line buffer inside 90-contract hard ceiling
+  hard_max_contracts: 90         # Strictly <= 90 concurrent subscriptions (10-line buffer < 100 IBKR ceiling)
   stream_poll_interval_sec: 0.75 # Throttled SSE emission / tick check cadence
   oneshot_collect_timeout_sec: 2.0
   heartbeat_interval_sec: 5.0
