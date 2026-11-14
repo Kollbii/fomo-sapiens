@@ -216,3 +216,56 @@ def test_load_daily_chain_bars_attaches_latest_tracked_quotes_and_handles_corrup
             repo, "NVDA", start_date=date(2026, 11, 12), end_date=date(2026, 11, 11)
         )
     assert select_daily_bar_snapshots(repo, "AVGO")[0] == []
+
+
+def test_load_daily_chain_bars_preserves_merged_short_dte_rows(tmp_path: Path) -> None:
+    repo = CSVRepository(StorageSettings(), root=tmp_path)
+    repo.ensure_layout()
+    ts_utc = datetime(2026, 11, 13, 19, 30, 0, tzinfo=UTC)
+    mkt_date = "2026-11-13"
+    sid = make_snapshot_id("NVDA", ts_utc)
+    rows: list[dict[str, Any]] = []
+    for idx, dte in enumerate((0, 7, 14, 29, 30, 37, 65)):
+        expiry = (date.fromisoformat(mkt_date) + timedelta(days=dte)).isoformat()
+        rows.append(
+            {
+                "snapshot_id": sid,
+                "snapshot_ts_utc": ts_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "market_date": mkt_date,
+                "market_data_type": 3,
+                "underlying": "NVDA",
+                "underlying_conid": 4815,
+                "underlying_price": 140.0,
+                "option_conid": 8000 + idx,
+                "expiry": expiry,
+                "dte": dte,
+                "strike": 140.0,
+                "moneyness_pct": 0.0,
+                "right": "P",
+                "bid": 2.4,
+                "ask": 2.6,
+                "mid": 2.5,
+                "last": 2.5,
+                "close": 2.4,
+                "mark_price": 2.5,
+                "volume": 100,
+                "open_interest": 500,
+                "iv": 0.42,
+                "delta": -0.35,
+                "gamma": 0.03,
+                "theta": -0.05,
+                "vega": 0.11,
+                "greeks_source": "IBKR_MODEL",
+            }
+        )
+    repo.save_snapshot("NVDA", rows, spot_source="MID")
+
+    bars, notes = load_daily_chain_bars(
+        repo,
+        "NVDA",
+        start_date=date(2026, 11, 13),
+        end_date=date(2026, 11, 13),
+    )
+    assert notes == []
+    assert len(bars) == 1
+    assert sorted(bars[0].df["dte"].to_list()) == [0, 7, 14, 29, 30, 37, 65]

@@ -431,3 +431,94 @@ def test_greeks_for_quotes_prefers_solved_iv_then_fallback_iv_then_flags_unusabl
     assert result.iv[0] == pytest.approx(0.40, abs=1e-4)
     assert result.iv[1] == pytest.approx(0.55)
     assert 0.0 < result.delta[0] < 1.0
+
+
+def test_short_and_zero_dte_bsm_walls_anomalies_and_term_profiles() -> None:
+    t_zero = np.array([0.5 / 365.0], dtype=np.float64)
+    theo_0d = float(
+        bsm_price(
+            np.array([100.0]),
+            np.array([100.0]),
+            t_zero,
+            0.0425,
+            np.array([0.45]),
+            np.array([True]),
+        )[0]
+    )
+    rows = [
+        _make_row(
+            conid=901,
+            right="C",
+            spot=100.0,
+            strike=100.0,
+            dte=0,
+            expiry="2026-11-11",
+            mark_price=theo_0d,
+            volume=900,
+            open_interest=100,
+        ),
+        _make_row(
+            conid=902,
+            right="P",
+            spot=100.0,
+            strike=95.0,
+            dte=0,
+            expiry="2026-11-11",
+            mark_price=0.05,
+            volume=40,
+            open_interest=200,
+        ),
+        _make_row(
+            conid=903,
+            right="C",
+            spot=100.0,
+            strike=105.0,
+            dte=14,
+            expiry="2026-11-25",
+            mark_price=0.80,
+            volume=300,
+            open_interest=500,
+        ),
+        _make_row(
+            conid=904,
+            right="P",
+            spot=100.0,
+            strike=95.0,
+            dte=14,
+            expiry="2026-11-25",
+            mark_price=0.75,
+            volume=250,
+            open_interest=600,
+        ),
+    ]
+    enriched = enrich_missing_greeks(_to_df(rows), risk_free_rate=0.0425)
+    r0 = enriched.row(0, named=True)
+    assert r0["dte"] == 0
+    assert r0["greeks_source"] == "BSM_FALLBACK"
+    assert r0["iv"] == pytest.approx(0.45, abs=1e-4)
+    assert all(math.isfinite(float(r0[c])) for c in ("delta", "gamma", "theta", "vega"))
+
+    q_res = greeks_for_quotes(
+        mark_price=np.array([theo_0d]),
+        spot=np.array([100.0]),
+        strike=np.array([100.0]),
+        dte=np.array([0.0]),
+        is_call=np.array([True]),
+        fallback_iv=np.array([np.nan]),
+    )
+    assert q_res.usable.tolist() == [True]
+    assert q_res.iv[0] == pytest.approx(0.45, abs=1e-4)
+
+    walls = compute_walls(enriched)
+    assert [w.dte for w in walls.by_dte] == [0, 14]
+    assert walls.by_dte[0].primary_put_wall is not None
+    assert walls.by_dte[0].primary_put_wall.strike == 95.0
+
+    anomalies = scan_anomalies(enriched)
+    assert anomalies.vol_gt_oi_count == 1
+    assert anomalies.anomalies[0].dte == 0
+
+    profiles = build_multi_dte_profiles(enriched)
+    assert [e.dte for e in profiles.expiries] == [0, 14]
+    assert profiles.expiries[0].atm_strike == 100.0
+    assert profiles.expiries[0].atm_iv == pytest.approx(0.45, abs=1e-4)

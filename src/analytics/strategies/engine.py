@@ -17,6 +17,7 @@ from src.analytics.bsm_fallback import (
 )
 from src.analytics.strategies.builders import find_wall_for_expiry, suggest_strategy_legs_from_walls
 from src.analytics.strategies.chain import (
+    EntryPriceBasis,
     PreparedRow,
     chain_reference_iv,
     find_row,
@@ -81,6 +82,7 @@ def _evaluate_pnl_grid(
     iv_shift: float,
     qty_multiplier: int,
     risk_free_rate: float,
+    at_expiration: bool = False,
 ) -> FloatArray:
     """Compute vector P&L (in total $) across `price_grid` at `days_elapsed` & `iv_shift`."""
     total_value = np.zeros_like(price_grid, dtype=np.float64)
@@ -91,7 +93,9 @@ def _evaluate_pnl_grid(
         strike_arr = np.full_like(price_grid, row.strike, dtype=np.float64)
         is_call_arr = np.full(price_grid.shape, row.right == "C", dtype=np.bool_)
 
-        if rem_days <= 1e-9:
+        # 0-DTE Today (T+0) / Simulated curves preserve intraday BSM time value (0.5d floor);
+        # expiration curves (or legs at/past expiry) settle strictly to intrinsic payoff.
+        if rem_days <= 1e-9 and (at_expiration or row.dte > 0 or days_elapsed > 1e-9):
             leg_val = np.where(
                 is_call_arr,
                 np.maximum(0.0, price_grid - strike_arr),
@@ -156,6 +160,7 @@ def _estimate_pop_pct(
         iv_shift=0.0,
         qty_multiplier=qty_multiplier,
         risk_free_rate=risk_free_rate,
+        at_expiration=True,
     )
     pop = float(np.sum(weights[horizon_pnl > 0.0])) * 100.0
     return round(max(0.0, min(100.0, pop)), 1)
@@ -196,6 +201,9 @@ def evaluate_strategy(
     qty_multiplier: int = 1,
     risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
     walls_report: ChainWallsReport | None = None,
+    min_net_credit_dollars: float | None = None,
+    min_ror_pct: float | None = None,
+    entry_price_basis: EntryPriceBasis = "MID",
 ) -> StrategyEvaluationResponse:
     """Evaluate pricing, risk metrics, net Greeks, and BSM T+n curves for any multi-leg strategy."""
     underlying, spot, rows = prepare_rows(df)
@@ -212,6 +220,9 @@ def evaluate_strategy(
             strategy_kind,
             target_expiry=target_expiry,
             walls_report=walls,
+            min_net_credit_dollars=min_net_credit_dollars,
+            min_ror_pct=min_ror_pct,
+            entry_price_basis=entry_price_basis,
         )
         rationale.extend(auto_notes)
     else:
@@ -343,6 +354,7 @@ def evaluate_strategy(
         iv_shift=0.0,
         qty_multiplier=qty_multiplier,
         risk_free_rate=risk_free_rate,
+        at_expiration=True,
     )
 
     net_upside_call_qty = sum(
@@ -382,22 +394,22 @@ def evaluate_strategy(
     # Interactive Plotly curves: Today (T+0), 50% Decay, Short Expiry (+ custom Sim if active)
     display_grid = _build_display_grid(spot, leg_strikes)
     half_days = max(0, short_dte // 2)
-    curve_specs: list[tuple[str, int, float]] = [
-        ("Today (T+0)", 0, 0.0),
+    curve_specs: list[tuple[str, int, float, bool]] = [
+        ("Today (T+0)", 0, 0.0, False),
     ]
     if 0 < half_days < short_dte:
-        curve_specs.append((f"Midpoint (T+{half_days}d)", half_days, 0.0))
+        curve_specs.append((f"Midpoint (T+{half_days}d)", half_days, 0.0, False))
     expiry_label = (
         f"At Short Expiry ({short_dte}d)"
         if short_dte != long_dte
         else f"At Expiration ({short_dte}d)"
     )
-    curve_specs.append((expiry_label, short_dte, 0.0))
+    curve_specs.append((expiry_label, short_dte, 0.0, True))
 
     if eff_days_forward != 0 or abs(iv_shift) > 1e-6:
         iv_tag = f" IV{iv_shift:+.0%}" if abs(iv_shift) > 1e-6 else ""
         sim_label = f"Simulated (T+{eff_days_forward}d{iv_tag})"
-        curve_specs.append((sim_label, eff_days_forward, iv_shift))
+        curve_specs.append((sim_label, eff_days_forward, iv_shift, False))
 
     curves = [
         StrategyPayoffSeries(
@@ -415,10 +427,11 @@ def evaluate_strategy(
                     iv_shift=sh,
                     qty_multiplier=qty_multiplier,
                     risk_free_rate=risk_free_rate,
+                    at_expiration=is_exp,
                 )
             ],
         )
-        for label, d_el, sh in curve_specs
+        for label, d_el, sh, is_exp in curve_specs
     ]
 
     return StrategyEvaluationResponse(

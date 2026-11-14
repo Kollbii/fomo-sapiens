@@ -25,10 +25,10 @@ from src.analytics.backtest.pricing import (
     lookup_legs_on_bar,
     resolve_row_prices,
 )
+from src.analytics.strategies.builders import StrategyFilterError
 from src.analytics.strategies.engine import evaluate_strategy
 from src.analytics.strategies.models import EvaluatedLeg, StrategyLegInput
 from src.analytics.walls import compute_walls
-from src.core.calendar import is_trading_day, trading_days_between
 from src.core.exceptions import BacktestValidationError
 from src.storage.backtest_store import DailyChainBar
 from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA
@@ -49,7 +49,7 @@ class EntryBuildResult:
     max_loss_dollars: float | None
     max_loss_unbounded: bool
     initial_step: EvaluatedStepData
-    notes: list[str]
+    selection_notes: list[str]
     flags: list[str]
 
 
@@ -72,19 +72,26 @@ class ExitDecision:
     notes: list[str] = field(default_factory=list)
 
 
-def _pick_front_expiry(df: pl.DataFrame) -> str:
+def _pick_front_expiry(df: pl.DataFrame, *, target_dte_min: int, target_dte_max: int) -> str:
+    target_center = (
+        float(TARGET_DTE_CENTER)
+        if target_dte_min <= TARGET_DTE_CENTER <= target_dte_max
+        else 0.5 * float(target_dte_min + target_dte_max)
+    )
     exp_rows = df.select(["expiry", "dte"]).unique(subset=["expiry"]).iter_rows(named=True)
     best = min(
         exp_rows,
-        key=lambda r: (abs(int(r["dte"]) - TARGET_DTE_CENTER), int(r["dte"]), str(r["expiry"])),
+        key=lambda r: (abs(float(r["dte"]) - target_center), int(r["dte"]), str(r["expiry"])),
     )
     return str(best["expiry"])
 
 
-def _fail_or_skip(msg: str, *, raise_on_error: bool) -> tuple[None, list[str]]:
+def _fail_or_skip(
+    msg: str, *, raise_on_error: bool, skip_reason: str
+) -> tuple[None, list[str], str]:
     if raise_on_error:
         raise BacktestValidationError(msg)
-    return None, [msg]
+    return None, [msg], skip_reason
 
 
 def build_entry_candidate(
@@ -96,12 +103,48 @@ def build_entry_candidate(
     ctx: BarContext | None = None,
 ) -> tuple[EntryBuildResult | None, list[str]]:
     """Construct and validate a new trade candidate on `bar` using contract-filtered BSM."""
+    entry, notes, _ = build_entry_candidate_outcome(
+        bar, config, legs=legs, raise_on_error=raise_on_error, ctx=ctx
+    )
+    return entry, notes
+
+
+def build_entry_candidate_outcome(
+    bar: DailyChainBar,
+    config: BacktestConfig,
+    *,
+    legs: Sequence[StrategyLegInput] | None = None,
+    raise_on_error: bool = False,
+    ctx: BarContext | None = None,
+) -> tuple[EntryBuildResult | None, list[str], str | None]:
+    """Construct and validate a new trade candidate, returning `(entry, notes, skip_reason)`."""
     bar_ctx = ctx if ctx is not None else extract_bar_context(bar)
     if bar_ctx.spot is None or bar_ctx.spot <= 0.0:
         return _fail_or_skip(
             f"Skipped entry on {bar.market_date}: invalid underlying spot price.",
             raise_on_error=raise_on_error,
+            skip_reason="INVALID_SPOT",
         )
+
+    apply_bps_filters = legs is None and config.strategy_kind == "BULL_PUT_SPREAD"
+    eff_min_credit = (
+        config.min_entry_credit_dollars
+        if (
+            apply_bps_filters
+            and config.min_entry_credit_dollars is not None
+            and config.min_entry_credit_dollars > 0.0
+        )
+        else None
+    )
+    eff_min_ror = (
+        config.min_entry_ror_pct
+        if (
+            apply_bps_filters
+            and config.min_entry_ror_pct is not None
+            and config.min_entry_ror_pct > 0.0
+        )
+        else None
+    )
 
     eval_notes: list[str] = []
     if legs is not None:
@@ -111,6 +154,7 @@ def build_entry_candidate(
             return _fail_or_skip(
                 f"Cannot enter trade on {bar.market_date}: one or more legs are already expired.",
                 raise_on_error=raise_on_error,
+                skip_reason="ALREADY_SETTLED",
             )
         matched_raw, _ = lookup_legs_on_bar(
             bar,
@@ -128,6 +172,7 @@ def build_entry_candidate(
             return _fail_or_skip(
                 f"Contract(s) not found on {bar.market_date}: {missing_desc}",
                 raise_on_error=raise_on_error,
+                skip_reason="MISSING_CONTRACT",
             )
         leg_rows = [dict(matched_raw[i][0]) for i in range(len(legs))]
         for row in leg_rows:
@@ -147,6 +192,7 @@ def build_entry_candidate(
             return _fail_or_skip(
                 f"Strategy evaluation failed on {bar.market_date}: {exc}",
                 raise_on_error=raise_on_error,
+                skip_reason="STRATEGY_BUILD_ERROR",
             )
     else:
         if config.strategy_kind == "CUSTOM":
@@ -155,6 +201,7 @@ def build_entry_candidate(
             return _fail_or_skip(
                 f"Skipped entry on {bar.market_date}: empty option chain.",
                 raise_on_error=raise_on_error,
+                skip_reason="EMPTY_CHAIN",
             )
         front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
         if front_df.height == 0:
@@ -162,13 +209,38 @@ def build_entry_candidate(
                 f"Skipped entry on {bar.market_date}: no contracts in "
                 f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
                 raise_on_error=raise_on_error,
+                skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
             )
-        front_expiry = _pick_front_expiry(front_df)
-        scope_df = (
-            filter_df_for_dte_window(bar.df, config.target_dte_min, max(config.target_dte_max, 120))
-            if config.strategy_kind == "DIAGONAL_SPREAD"
-            else front_df
+        unsettled_front = [
+            str(exp)
+            for exp in front_df["expiry"].unique().to_list()
+            if not is_leg_settled(str(exp), bar.ts_utc)
+        ]
+        if not unsettled_front:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: "
+                "selected expiry already reached settlement cutoff.",
+                raise_on_error=raise_on_error,
+                skip_reason="ALREADY_SETTLED",
+            )
+        front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
+        front_expiry = _pick_front_expiry(
+            front_df,
+            target_dte_min=config.target_dte_min,
+            target_dte_max=config.target_dte_max,
         )
+        if config.strategy_kind == "DIAGONAL_SPREAD":
+            raw_scope = filter_df_for_dte_window(
+                bar.df, config.target_dte_min, max(config.target_dte_max, 120)
+            )
+            unsettled_scope = [
+                str(exp)
+                for exp in raw_scope["expiry"].unique().to_list()
+                if not is_leg_settled(str(exp), bar.ts_utc)
+            ]
+            scope_df = raw_scope.filter(pl.col("expiry").is_in(unsettled_scope))
+        else:
+            scope_df = front_df
         enriched_df = enrich_filtered_greeks(scope_df, risk_free_rate=config.risk_free_rate)
         walls = compute_walls(enriched_df, top_n=config.walls_top_n)
         try:
@@ -179,19 +251,36 @@ def build_entry_candidate(
                 qty_multiplier=config.qty,
                 risk_free_rate=config.risk_free_rate,
                 walls_report=walls,
+                min_net_credit_dollars=eff_min_credit,
+                min_ror_pct=eff_min_ror,
+                entry_price_basis=config.price_basis,
             )
-        except ValueError as exc:
+        except StrategyFilterError as exc:
             return _fail_or_skip(
                 f"Skipped entry on {bar.market_date}: {exc}",
                 raise_on_error=raise_on_error,
+                skip_reason=exc.skip_reason,
             )
-        eval_notes.extend(ev.rationale)
+        except ValueError as exc:
+            reason = (
+                "INSUFFICIENT_WINGS"
+                if "Insufficient wing strikes" in str(exc)
+                else "STRATEGY_BUILD_ERROR"
+            )
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: {exc}",
+                raise_on_error=raise_on_error,
+                skip_reason=reason,
+            )
+
+    eval_notes.extend(ev.rationale)
 
     if any(is_leg_settled(leg.expiry, bar.ts_utc) for leg in ev.legs):
         return _fail_or_skip(
             f"Skipped entry on {bar.market_date}: "
             "selected expiry already reached settlement cutoff.",
             raise_on_error=raise_on_error,
+            skip_reason="ALREADY_SETTLED",
         )
 
     entry_rows, _ = lookup_legs_on_bar(
@@ -213,6 +302,7 @@ def build_entry_candidate(
                 f"Skipped entry on {bar.market_date}: missing leg "
                 f"{leg.expiry} {leg.strike:g}{leg.right}.",
                 raise_on_error=raise_on_error,
+                skip_reason="MISSING_CONTRACT",
             )
         raw_row, _ = found_entry
         res = resolve_row_prices(
@@ -227,6 +317,7 @@ def build_entry_candidate(
                 f"Skipped entry on {bar.market_date}: unusable price ({reason_flag}) for "
                 f"{leg.expiry} {leg.strike:g}{leg.right}.",
                 raise_on_error=raise_on_error,
+                skip_reason="UNUSABLE_ENTRY_PRICE",
             )
         cash_sign = -1.0 if leg.side == "BUY" else 1.0
         entry_cash_mid += cash_sign * float(leg.qty) * 100.0 * res.price_used
@@ -254,6 +345,40 @@ def build_entry_candidate(
     else:
         max_loss_dollars = round(max(0.0, ev.risk.max_loss - delta_cash), 2)
 
+    if apply_bps_filters and (eff_min_credit is not None or eff_min_ror is not None):
+        per_spread_credit = round(entry_cash_mid_r / float(config.qty), 2)
+        if per_spread_credit <= 0.0:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: non-positive spread credit "
+                f"${per_spread_credit:.2f}.",
+                raise_on_error=raise_on_error,
+                skip_reason="NON_POSITIVE_CREDIT",
+            )
+        per_spread_loss = (
+            round(max_loss_dollars / float(config.qty), 2) if max_loss_dollars is not None else None
+        )
+        if per_spread_loss is None or per_spread_loss <= 0.0:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: non-positive spread max loss.",
+                raise_on_error=raise_on_error,
+                skip_reason="NON_POSITIVE_MAX_LOSS",
+            )
+        ror_pct = (per_spread_credit / per_spread_loss) * 100.0
+        bad_credit = eff_min_credit is not None and per_spread_credit < eff_min_credit - 1e-9
+        bad_ror = eff_min_ror is not None and ror_pct < eff_min_ror - 1e-9
+        if bad_credit or bad_ror:
+            skip_code = (
+                "BELOW_MIN_CREDIT_AND_ROR"
+                if (bad_credit and bad_ror)
+                else ("BELOW_MIN_CREDIT" if bad_credit else "BELOW_MIN_ROR")
+            )
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: credit=${per_spread_credit:.2f}, "
+                f"RoR={ror_pct:.1f}% below entry filter thresholds.",
+                raise_on_error=raise_on_error,
+                skip_reason=skip_code,
+            )
+
     initial_step = evaluate_trade_step_on_bar(bar, updated_legs, config, ctx=bar_ctx)
     all_flags = deduplicate_flags([*entry_flags, *initial_step.flags])
     return (
@@ -266,10 +391,11 @@ def build_entry_candidate(
             max_loss_dollars=max_loss_dollars,
             max_loss_unbounded=ev.risk.max_loss_unbounded,
             initial_step=initial_step,
-            notes=eval_notes,
+            selection_notes=deduplicate_flags(eval_notes),
             flags=all_flags,
         ),
         [],
+        None,
     )
 
 
@@ -299,13 +425,7 @@ def should_attempt_entry(
         return False
 
     target = date.fromisocalendar(iso_year, iso_week, config.entry_weekday + 1)
-    if bar_day == target:
-        return True
-    if bar_day > target and not is_trading_day(target):
-        friday = date.fromisocalendar(iso_year, iso_week, 5)
-        candidates = trading_days_between(target, friday)
-        return bool(candidates and bar_day == candidates[0])
-    return False
+    return bar_day >= target
 
 
 def record_entry_attempt(bar: DailyChainBar, bar_idx: int, state: CadenceState) -> None:
@@ -314,6 +434,48 @@ def record_entry_attempt(bar: DailyChainBar, bar_idx: int, state: CadenceState) 
     iso_year, iso_week, _ = bar_day.isocalendar()
     state.triggered_weeks.add((iso_year, iso_week))
     state.last_attempt_bar_idx = bar_idx
+
+
+def resolve_tp_sl_thresholds(
+    config: BacktestConfig,
+    *,
+    entry_basis_dollars: float,
+    max_loss_dollars: float | None,
+    max_loss_unbounded: bool,
+) -> tuple[float | None, float | None, float | None, list[str], list[str]]:
+    """Return `(denom, profit_target_dollars, stop_loss_dollars, skip_flags, skip_notes)`."""
+    if config.tp_sl_basis == "CREDIT_DEBIT_PCT":
+        if entry_basis_dollars <= DENOM_EPS:
+            return (
+                None,
+                None,
+                None,
+                ["ZERO_ENTRY_BASIS"],
+                ["TP/SL skipped: entry basis is zero under CREDIT_DEBIT_PCT."],
+            )
+        denom = entry_basis_dollars
+    else:
+        if max_loss_unbounded or max_loss_dollars is None or max_loss_dollars <= DENOM_EPS:
+            return (
+                None,
+                None,
+                None,
+                ["MAX_RISK_UNBOUNDED_SKIP_TPSL"],
+                ["TP/SL skipped: max loss is unbounded or zero under MAX_RISK_PCT."],
+            )
+        denom = max_loss_dollars
+
+    tp_dollars = (
+        round(denom * (config.profit_target_pct / 100.0), 2)
+        if config.profit_target_pct is not None
+        else None
+    )
+    sl_dollars = (
+        -round(denom * (config.stop_loss_pct / 100.0), 2)
+        if config.stop_loss_pct is not None
+        else None
+    )
+    return denom, tp_dollars, sl_dollars, [], []
 
 
 def evaluate_exit_rule(
@@ -350,22 +512,14 @@ def evaluate_exit_rule(
         return ExitDecision(should_exit=True, reason="EXIT_DTE")
 
     gross_pnl = entry_cash_mid_dollars + step.active_close_value_dollars
-    if config.tp_sl_basis == "CREDIT_DEBIT_PCT":
-        if entry_basis_dollars <= DENOM_EPS:
-            return ExitDecision(
-                should_exit=False,
-                flags=["ZERO_ENTRY_BASIS"],
-                notes=["TP/SL skipped: entry basis is zero under CREDIT_DEBIT_PCT."],
-            )
-        denom = entry_basis_dollars
-    else:
-        if max_loss_unbounded or max_loss_dollars is None or max_loss_dollars <= DENOM_EPS:
-            return ExitDecision(
-                should_exit=False,
-                flags=["MAX_RISK_UNBOUNDED_SKIP_TPSL"],
-                notes=["TP/SL skipped: max loss is unbounded or zero under MAX_RISK_PCT."],
-            )
-        denom = max_loss_dollars
+    denom, _tp_dollars, _sl_dollars, skip_flags, skip_notes = resolve_tp_sl_thresholds(
+        config,
+        entry_basis_dollars=entry_basis_dollars,
+        max_loss_dollars=max_loss_dollars,
+        max_loss_unbounded=max_loss_unbounded,
+    )
+    if denom is None:
+        return ExitDecision(should_exit=False, flags=skip_flags, notes=skip_notes)
 
     if (
         config.profit_target_pct is not None

@@ -612,3 +612,466 @@ def test_edge_guards_empty_single_strike_no_usable_snapshot_unresolved_and_valid
     )
     assert [pt.snapshot_id for pt in res_slice.equity_curve] == ["o0", "o2"]
     assert res_slice.trades[0].exit_reason == "END_OF_DATA"
+
+
+def _low_vs_high_credit_bar(
+    snapshot_id: str,
+    market_date: str,
+    *,
+    short_mid: float,
+    long_mid: float,
+    short_last: float | None = None,
+    long_last: float | None = None,
+) -> DailyChainBar:
+    ts = datetime.fromisoformat(f"{market_date}T20:00:00+00:00")
+    s_last = short_last if short_last is not None else short_mid
+    l_last = long_last if long_last is not None else long_mid
+    ov: dict[tuple[str, float, OptionRight], dict[str, Any]] = {
+        ("2026-12-18", 95.0, "P"): {
+            "bid": round(short_mid - 0.05, 2),
+            "ask": round(short_mid + 0.05, 2),
+            "mid": short_mid,
+            "last": s_last,
+            "close": s_last,
+            "open_interest": 10_000,
+        },
+        ("2026-12-18", 90.0, "P"): {
+            "bid": round(long_mid - 0.05, 2),
+            "ask": round(long_mid + 0.05, 2),
+            "mid": long_mid,
+            "last": l_last,
+            "close": l_last,
+            "open_interest": 500,
+        },
+        ("2026-12-18", 85.0, "P"): {
+            "bid": round(long_mid - 0.05, 2),
+            "ask": round(long_mid + 0.05, 2),
+            "mid": long_mid,
+            "last": l_last,
+            "close": l_last,
+            "open_interest": 100,
+        },
+    }
+    return _bar(
+        snapshot_id,
+        ts,
+        market_date,
+        _make_chain_df(
+            snapshot_id=snapshot_id,
+            ts_utc=ts,
+            market_date=market_date,
+            strikes=(85.0, 90.0, 95.0, 105.0, 110.0),
+            expiries=(("2026-12-18", -1),),
+            overrides=ov,
+        ),
+    )
+
+
+def test_entry_credit_ror_filters_per_spread_baseline_and_skip_diagnostics() -> None:
+    assert BacktestConfig().min_entry_credit_dollars == pytest.approx(100.0)
+    assert BacktestConfig().min_entry_ror_pct is None
+
+    # All 3 days offer only $50 credit ($1.00 short vs $0.50 long on 5-wide -> 11.1% RoR).
+    bars = [
+        _low_vs_high_credit_bar("d0", "2026-11-02", short_mid=1.00, long_mid=0.50),
+        _low_vs_high_credit_bar("d1", "2026-11-03", short_mid=1.00, long_mid=0.50),
+        _low_vs_high_credit_bar("d2", "2026-11-04", short_mid=1.00, long_mid=0.50),
+    ]
+
+    # Default $100 per-1-spread floor skips every day, even when qty=3 ($150 total < $100/spread).
+    res_def = run_systematic_backtest(
+        bars, BacktestConfig(entry_cadence="WHEN_FLAT", qty=3), ticker="NVDA"
+    )
+    assert res_def.summary.trade_count == 0
+    assert res_def.summary.skipped_entries_count == 3
+    assert res_def.summary.skipped_by_reason == {"BELOW_MIN_CREDIT": 3}
+    assert len(res_def.notes) == 1
+    assert "BELOW_MIN_CREDIT=3" in res_def.notes[0]
+
+    # 0.0 or None disables the credit cap; RoR filter still enforces 20% floor -> skips.
+    res_ror = run_systematic_backtest(
+        bars,
+        BacktestConfig(
+            entry_cadence="WHEN_FLAT", min_entry_credit_dollars=0.0, min_entry_ror_pct=20.0
+        ),
+        ticker="NVDA",
+    )
+    assert res_ror.summary.trade_count == 0
+    assert res_ror.summary.skipped_by_reason == {"BELOW_MIN_ROR": 3}
+
+    # Both disabled -> opens immediately on day 0 with $50 spread.
+    res_off = run_systematic_backtest(
+        bars,
+        BacktestConfig(
+            entry_cadence="WHEN_FLAT",
+            min_entry_credit_dollars=None,
+            min_entry_ror_pct=0.0,
+            profit_target_pct=None,
+            stop_loss_pct=None,
+        ),
+        ticker="NVDA",
+    )
+    assert res_off.summary.trade_count == 1
+    assert res_off.summary.skipped_entries_count == 0
+    assert res_off.trades[0].entry_cash_mid_dollars == pytest.approx(50.0)
+
+    # LAST_CLOSE_ONLY basis agreement: mid=$120 passes, last=$60 fails -> skipped cleanly.
+    bar_last_low = _low_vs_high_credit_bar(
+        "l0", "2026-11-02", short_mid=2.20, long_mid=1.00, short_last=1.60, long_last=1.00
+    )
+    res_last = run_systematic_backtest(
+        [bar_last_low],
+        BacktestConfig(
+            strategy_kind="BULL_PUT_SPREAD",
+            entry_cadence="WHEN_FLAT",
+            price_basis="LAST_CLOSE_ONLY",
+            min_entry_credit_dollars=100.0,
+        ),
+        ticker="NVDA",
+    )
+    assert res_last.summary.trade_count == 0
+    assert res_last.summary.skipped_by_reason == {"BELOW_MIN_CREDIT": 1}
+
+    # SINGLE_TRADE explicit legs replay with $50 credit is NOT rejected by default $100 floor.
+    explicit_legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    res_replay = run_single_trade_replay(
+        bars,
+        BacktestConfig(strategy_kind="BULL_PUT_SPREAD"),
+        ticker="NVDA",
+        entry_snapshot_id="d0",
+        legs=explicit_legs,
+    )
+    assert res_replay.summary.trade_count == 1
+    assert res_replay.trades[0].entry_cash_mid_dollars == pytest.approx(50.0)
+
+
+def test_next_trading_day_retry_across_weekly_every_n_days_and_when_flat() -> None:
+    # Week 1: Mon Nov 2 ($50 -> skip), Tue Nov 3 ($120 -> fill), Wed Nov 4 ($130 -> skip week)
+    # Week 2: Mon Nov 9 ($125 -> fill on target weekday!)
+    bars = [
+        _low_vs_high_credit_bar("mon1", "2026-11-02", short_mid=1.00, long_mid=0.50),
+        _low_vs_high_credit_bar("tue1", "2026-11-03", short_mid=2.20, long_mid=1.00),
+        _low_vs_high_credit_bar("wed1", "2026-11-04", short_mid=2.30, long_mid=1.00),
+        _low_vs_high_credit_bar("thu1", "2026-11-05", short_mid=2.35, long_mid=1.00),
+        _low_vs_high_credit_bar("mon2", "2026-11-09", short_mid=2.25, long_mid=1.00),
+    ]
+
+    # 1) WEEKLY_DAY (Monday=0): retries Tuesday after Monday skip, does not re-enter Wednesday
+    cfg_weekly = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        entry_cadence="WEEKLY_DAY",
+        entry_weekday=0,
+        max_open_trades=5,
+        min_entry_credit_dollars=100.0,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+    res_weekly = run_systematic_backtest(bars, cfg_weekly, ticker="NVDA")
+    assert [t.entry_date for t in res_weekly.trades] == ["2026-11-03", "2026-11-09"]
+    assert res_weekly.summary.skipped_entries_count == 1
+    assert res_weekly.summary.skipped_by_reason == {"BELOW_MIN_CREDIT": 1}
+
+    # 2) EVERY_N_DAYS (N=2): Mon skipped -> Tue fills (bar_idx=1), Wed waits, Thu fills (bar_idx=3)
+    cfg_every2 = cfg_weekly.model_copy(
+        update={"entry_cadence": "EVERY_N_DAYS", "entry_every_n_days": 2}
+    )
+    res_every2 = run_systematic_backtest(bars, cfg_every2, ticker="NVDA")
+    assert [t.entry_date for t in res_every2.trades] == ["2026-11-03", "2026-11-05"]
+    assert res_every2.summary.skipped_entries_count == 1
+
+    # 3) WHEN_FLAT: Mon skipped -> Tue fills
+    cfg_flat = cfg_weekly.model_copy(update={"entry_cadence": "WHEN_FLAT", "max_open_trades": 1})
+    res_flat = run_systematic_backtest(bars, cfg_flat, ticker="NVDA")
+    assert [t.entry_date for t in res_flat.trades] == ["2026-11-03"]
+    assert res_flat.summary.skipped_entries_count == 1
+
+
+def test_open_only_run_and_single_bar_trade_summary_and_steps() -> None:
+    # Single-bar run with an open BULL_PUT_SPREAD: 1 step, OPEN status, TP/SL targets populated,
+    # unrealized P&L populated, realized P&L = 0.0, and closed-only ratios stay None.
+    b0 = _low_vs_high_credit_bar("d0", "2026-11-02", short_mid=2.20, long_mid=1.00)
+    cfg = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        entry_cadence="WHEN_FLAT",
+        commission_per_contract=0.65,
+        tp_sl_basis="CREDIT_DEBIT_PCT",
+        profit_target_pct=50.0,
+        stop_loss_pct=100.0,
+    )
+    res = run_systematic_backtest([b0], cfg, ticker="NVDA")
+    assert res.summary.trade_count == 1
+    assert res.summary.closed_trades == 0
+    assert res.summary.open_trades == 1
+    assert res.summary.winning_trades == 0
+    assert res.summary.losing_trades == 0
+    assert res.summary.win_rate_pct is None
+    assert res.summary.profit_factor is None
+    assert res.summary.expectancy_dollars is None
+    assert res.summary.avg_win_dollars is None
+    assert res.summary.avg_loss_dollars is None
+    assert res.summary.realized_pnl_dollars == pytest.approx(0.0)
+    assert res.summary.unrealized_pnl_dollars == pytest.approx(-1.30)
+    assert res.summary.net_pnl_dollars == pytest.approx(-1.30)
+    assert res.summary.final_equity == pytest.approx(cfg.initial_capital - 1.30)
+
+    tr = res.trades[0]
+    assert tr.status == "OPEN"
+    assert tr.exit_reason == "END_OF_DATA"
+    assert tr.days_held == 0
+    assert len(tr.steps) == 1
+    assert tr.profit_target_dollars == pytest.approx(60.0)
+    assert tr.stop_loss_dollars == pytest.approx(-120.0)
+    assert tr.net_pnl_dollars == pytest.approx(-1.30)
+
+    step0 = tr.steps[0]
+    assert step0.market_date == "2026-11-02"
+    assert step0.dte_min_leg == 46
+    assert step0.spot == pytest.approx(100.0)
+    assert step0.quote_missing is False
+    assert step0.mark_source == "MID"
+    assert step0.status == "OK"
+    assert step0.net_pnl_dollars == pytest.approx(-1.30)
+
+    # Multi-bar open-only run where trade remains OPEN with positive unrealized MTM
+    b1 = _low_vs_high_credit_bar("d1", "2026-11-03", short_mid=1.90, long_mid=1.00)
+    res_open2 = run_systematic_backtest([b0, b1], cfg, ticker="NVDA")
+    assert res_open2.summary.closed_trades == 0
+    assert res_open2.summary.open_trades == 1
+    assert res_open2.summary.win_rate_pct is None
+    assert res_open2.summary.profit_factor is None
+    assert res_open2.summary.expectancy_dollars is None
+    assert res_open2.summary.realized_pnl_dollars == pytest.approx(0.0)
+    # Gross MTM = +$120 entry - $90 close = +$30; net = 30 - 1.30 = +28.70
+    assert res_open2.summary.unrealized_pnl_dollars == pytest.approx(28.70)
+    assert res_open2.summary.net_pnl_dollars == pytest.approx(28.70)
+    assert res_open2.trades[0].status == "OPEN"
+    assert len(res_open2.trades[0].steps) == 2
+
+
+def test_selection_notes_live_on_trade_not_sim_notes() -> None:
+    d0 = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+    d1 = datetime(2026, 11, 13, 20, 0, tzinfo=UTC)
+    exp = "2026-12-18"
+    b0 = _bar(
+        "s0",
+        d0,
+        "2026-11-06",
+        _make_chain_df(
+            snapshot_id="s0", ts_utc=d0, market_date="2026-11-06", spot=100.0, expiries=((exp, -1),)
+        ),
+    )
+    b1 = _bar(
+        "s1",
+        d1,
+        "2026-11-13",
+        _make_chain_df(
+            snapshot_id="s1", ts_utc=d1, market_date="2026-11-13", spot=101.0, expiries=((exp, -1),)
+        ),
+        spot=101.0,
+    )
+    cfg = BacktestConfig(
+        strategy_kind="IRON_CONDOR",
+        target_dte_min=30,
+        target_dte_max=60,
+        entry_cadence="WHEN_FLAT",
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+    res = run_systematic_backtest([b0, b1], cfg, ticker="NVDA")
+    assert len(res.trades) == 1
+    tr = res.trades[0]
+    assert len(tr.legs) == 4
+    assert len(tr.selection_notes) >= 2
+    assert any("wall" in note.lower() or "delta" in note.lower() for note in tr.selection_notes)
+    # Simulation-wide notes must stay free of per-trade wall/delta entry selection prose.
+    assert res.notes == []
+    joined_sim_notes = " ".join(res.notes).lower()
+    assert "anchored to" not in joined_sim_notes
+    assert "put wall" not in joined_sim_notes
+    assert "call wall" not in joined_sim_notes
+    assert "delta=" not in joined_sim_notes
+
+
+def test_sparse_missing_quote_days_preserve_none_mtm_and_carry_equity() -> None:
+    # Day 0: Enter 95P/90P bull put at $1.20 credit, $0 commission -> MTM = $0.00
+    # Day 1: Missing quotes (null bid/ask/last/close) -> quote_missing=True, net_pnl_dollars=None
+    # Day 2: Quotes recover (spread=$0.90) -> +$30.00 MTM (quote_missing=False)
+    # Day 3: Empty NO_USABLE_DAILY_SNAPSHOT bar -> step3 quote_missing=True, carries +$30.00
+    legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    b0 = _low_vs_high_credit_bar("q0", "2026-11-02", short_mid=2.20, long_mid=1.00)
+
+    t1 = datetime(2026, 11, 3, 20, 0, tzinfo=UTC)
+    b1_missing_quotes = _bar(
+        "q1",
+        t1,
+        "2026-11-03",
+        _make_chain_df(
+            snapshot_id="q1",
+            ts_utc=t1,
+            market_date="2026-11-03",
+            expiries=(("2026-12-18", -1),),
+            overrides={
+                ("2026-12-18", 95.0, "P"): {
+                    "bid": None,
+                    "ask": None,
+                    "mid": None,
+                    "last": None,
+                    "close": None,
+                    "mark_price": None,
+                },
+            },
+        ),
+    )
+    b2_profit = _low_vs_high_credit_bar("q2", "2026-11-04", short_mid=1.90, long_mid=1.00)
+
+    t3 = datetime(2026, 11, 5, 20, 0, tzinfo=UTC)
+    b3_empty = _bar(
+        "q3",
+        t3,
+        "2026-11-05",
+        pl.DataFrame(schema=OPTION_CHAIN_POLARS_SCHEMA),
+        spot=100.0,
+        spot_source="CLOSE",
+        selection_flags=(NO_USABLE_DAILY_SNAPSHOT,),
+    )
+
+    cfg = BacktestConfig(
+        strategy_kind="CUSTOM",
+        commission_per_contract=0.0,
+        profit_target_pct=50.0,
+        stop_loss_pct=100.0,
+    )
+    res = run_single_trade_replay(
+        [b0, b1_missing_quotes, b2_profit, b3_empty],
+        cfg,
+        ticker="NVDA",
+        entry_snapshot_id="q0",
+        legs=legs,
+    )
+    tr = res.trades[0]
+    assert tr.status == "OPEN"
+    assert len(tr.steps) == 4
+    assert tr.selection_notes == ["Evaluating 2 user-selected option leg(s)."]
+
+    s0, s1, s2, s3 = tr.steps
+    assert s0.quote_missing is False
+    assert s0.net_pnl_dollars == pytest.approx(0.0)
+    assert s0.mark_source == "MID"
+
+    assert s1.quote_missing is True
+    assert s1.net_pnl_dollars is None
+    assert s1.gross_pnl_dollars is None
+    assert s1.mark_source == "MISSING"
+    assert s1.status == "INCOMPLETE"
+
+    assert s2.quote_missing is False
+    assert s2.net_pnl_dollars == pytest.approx(30.0)
+    assert s2.mark_source == "MID"
+    assert s2.status == "OK"
+
+    assert s3.quote_missing is True
+    assert s3.net_pnl_dollars is None
+    assert s3.mark_source == "MISSING"
+    assert s3.status == "INCOMPLETE"
+
+    assert [pt.unrealized_pnl_dollars for pt in res.equity_curve] == pytest.approx(
+        [0.0, 0.0, 30.0, 30.0]
+    )
+    assert res.summary.open_trades == 1
+    assert res.summary.closed_trades == 0
+    assert res.summary.unrealized_pnl_dollars == pytest.approx(30.0)
+    assert res.summary.net_pnl_dollars == pytest.approx(30.0)
+    assert any("missing leg quotes" in n.lower() for n in res.notes)
+    assert any("no_usable_daily_snapshot" in n.lower() for n in res.notes)
+
+
+def test_short_and_zero_dte_systematic_backtest_entry_and_same_day_settlement() -> None:
+    # 1) Pure 0-DTE entry before 16:15 EST cutoff -> same-day settlement after cutoff ($0 close)
+    t_open = datetime(2026, 11, 20, 19, 30, tzinfo=UTC)  # 14:30 EST
+    t_settle = datetime(2026, 11, 20, 21, 20, tzinfo=UTC)  # 16:20 EST (past 16:15 EST cutoff)
+    ov_0d: dict[tuple[str, float, OptionRight], dict[str, Any]] = {
+        ("2026-11-20", 98.0, "P"): {"bid": 1.15, "ask": 1.25, "mid": 1.20, "open_interest": 8_000},
+        ("2026-11-20", 95.0, "P"): {"bid": 0.45, "ask": 0.55, "mid": 0.50, "open_interest": 400},
+    }
+    b_open = _bar(
+        "d0_open",
+        t_open,
+        "2026-11-20",
+        _make_chain_df(
+            snapshot_id="d0_open",
+            ts_utc=t_open,
+            market_date="2026-11-20",
+            spot=100.0,
+            strikes=(92.0, 95.0, 98.0, 100.0, 102.0, 105.0),
+            expiries=(("2026-11-20", 0),),
+            overrides=ov_0d,
+        ),
+        spot=100.0,
+    )
+    b_settle = _bar(
+        "d0_settle",
+        t_settle,
+        "2026-11-20",
+        _make_chain_df(
+            snapshot_id="d0_settle",
+            ts_utc=t_settle,
+            market_date="2026-11-20",
+            spot=99.0,
+            strikes=(92.0, 95.0, 98.0, 100.0, 102.0, 105.0),
+            expiries=(("2026-11-20", 0),),
+        ),
+        spot=99.0,
+    )
+    cfg_0d = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        target_dte_min=0,
+        target_dte_max=0,
+        entry_cadence="WHEN_FLAT",
+        commission_per_contract=0.65,
+        min_entry_credit_dollars=50.0,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+    res_0d = run_systematic_backtest([b_open, b_settle], cfg_0d, ticker="NVDA")
+    assert res_0d.summary.closed_trades == 1
+    assert res_0d.summary.skipped_by_reason == {"ALREADY_SETTLED": 1}
+    tr_0d = res_0d.trades[0]
+    assert tr_0d.exit_reason == "EXPIRY_SETTLED"
+    assert tr_0d.days_held == 0
+    assert tr_0d.commissions_dollars == pytest.approx(1.30)  # open only, $0 closing commission
+    assert tr_0d.gross_pnl_dollars == pytest.approx(70.0)
+    assert tr_0d.net_pnl_dollars == pytest.approx(68.70)
+
+    # 2) [0, 29] DTE skips settled 0d expiry on mixed bar and picks center/back for Diagonal
+    b_mixed = _bar(
+        "mix0",
+        t_settle,
+        "2026-11-20",
+        _make_chain_df(
+            snapshot_id="mix0",
+            ts_utc=t_settle,
+            market_date="2026-11-20",
+            spot=100.0,
+            strikes=(85.0, 90.0, 95.0, 100.0, 105.0, 110.0, 115.0),
+            expiries=(("2026-11-20", 0), ("2026-12-04", 14), ("2026-12-11", 21)),
+        ),
+        spot=100.0,
+    )
+    cfg_short_diag = BacktestConfig(
+        strategy_kind="DIAGONAL_SPREAD",
+        target_dte_min=0,
+        target_dte_max=29,
+        entry_cadence="WHEN_FLAT",
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+    res_diag = run_systematic_backtest([b_mixed], cfg_short_diag, ticker="NVDA")
+    assert res_diag.summary.trade_count == 1
+    diag_leg_exps = {leg.expiry for leg in res_diag.trades[0].legs}
+    assert diag_leg_exps == {"2026-12-04", "2026-12-11"}
