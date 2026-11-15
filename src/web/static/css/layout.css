@@ -124,6 +124,10 @@
   color: var(--accent-warn);
 }
 
+.badge--amber .badge-dot {
+  background: var(--accent-warn);
+}
+
 .badge--delayed {
   border-color: #1d4ed8;
   background: rgba(29, 78, 216, 0.1);

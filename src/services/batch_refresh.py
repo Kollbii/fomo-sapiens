@@ -35,7 +35,7 @@ import contextlib
 import logging
 import time
 import uuid
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Final
 
@@ -182,6 +182,7 @@ class BatchRefreshService:
         shutdown_timeout_sec: float = BATCH_SHUTDOWN_TIMEOUT_SEC,
         cancel_cleanup_sec: float = BATCH_CANCEL_CLEANUP_SEC,
         ticker_timeout_sec: float | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not shutdown_timeout_sec > 0.0:
             raise ValueError("shutdown_timeout_sec must be > 0")
@@ -197,6 +198,7 @@ class BatchRefreshService:
         self._ticker_timeout_override = (
             float(ticker_timeout_sec) if ticker_timeout_sec is not None else None
         )
+        self._sleep = sleep
         self._batch: _Batch | None = None
         self._task: asyncio.Task[None] | None = None
         # Cancelled children whose cleanup outlived `cancel_cleanup_sec` (strong references).
@@ -359,9 +361,35 @@ class BatchRefreshService:
             for position, item in enumerate(batch.items, start=1):
                 if batch.cancel_requested or batch.aborted:
                     break
+                if position > 1:
+                    await self._wait_inter_ticker_cooldown(batch)
+                    if batch.cancel_requested or batch.aborted:
+                        break
                 await self._run_item(batch, item, position, total)
         finally:
             self._finish(batch)
+
+    async def _wait_inter_ticker_cooldown(self, batch: _Batch) -> None:
+        """Pause briefly between consecutive tickers unless cancelled."""
+        cooldown = float(self.analyzer.settings.watchlist.batch_inter_ticker_cooldown_sec)
+        if cooldown <= 0.0:
+            return
+        if batch.cancel_signal is None:
+            await self._sleep(cooldown)
+            return
+        sleep_task = asyncio.ensure_future(self._sleep(cooldown))
+        try:
+            await asyncio.wait(
+                {sleep_task, batch.cancel_signal},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if sleep_task.done() and not sleep_task.cancelled():
+                sleep_task.result()
+        finally:
+            if not sleep_task.done():
+                sleep_task.cancel()
+                with contextlib.suppress(BaseException):
+                    await sleep_task
 
     async def _run_item(self, batch: _Batch, item: _BatchItem, position: int, total: int) -> None:
         self.analyzer.set_refresh_owner(batch_owner(position, total, item.ticker))
@@ -512,6 +540,19 @@ class BatchRefreshService:
         item.error_code = safe.code
         item.error = safe.message
 
+    def _recycle_broker_after_timeout(self, ticker: str) -> None:
+        client = getattr(self.analyzer, "broker_client", None)
+        if client is None:
+            return
+        stage = f"per-ticker limit ({ticker})"
+        reset_fn = getattr(client, "reset_after_timeout", None)
+        if callable(reset_fn):
+            reset_fn(stage=stage)
+            return
+        disconnect_fn = getattr(client, "disconnect", None)
+        if callable(disconnect_fn):
+            disconnect_fn()
+
     def _handle_ticker_timeout(
         self, batch: _Batch, item: _BatchItem, run: _TickerRun, limit: float
     ) -> None:
@@ -521,6 +562,7 @@ class BatchRefreshService:
             item.ticker,
             limit,
         )
+        self._recycle_broker_after_timeout(item.ticker)
         if not self._archive_interrupted(batch, item, run, "timeout"):
             item.state = "failed"
             item.error_code = GATEWAY_TIMEOUT_CODE

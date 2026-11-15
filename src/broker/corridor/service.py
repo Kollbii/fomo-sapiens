@@ -142,21 +142,16 @@ class CorridorQuoteService:
             )
 
         candidates = [contract_from_spec(spec) for spec in selection.specs]
-        unqualified = [c for c in candidates if int(getattr(c, "conId", 0) or 0) <= 0]
-        if unqualified:
-            res = list(
-                await self.client.run_stage(
-                    f"corridor contract qualification ({len(unqualified)} contracts)",
-                    self.client.ib.qualifyContractsAsync(*unqualified),
-                )
-                or []
+        missing = [i for i, c in enumerate(candidates) if int(getattr(c, "conId", 0) or 0) <= 0]
+        if missing:
+            res = await self.client.qualify_contracts(
+                [candidates[i] for i in missing],
+                stage_prefix="corridor contract qualification",
+                sleep=self.sleep,
             )
-            if res and len(res) == len(unqualified):
-                res_iter = iter(res)
-                candidates = [
-                    next(res_iter) if int(getattr(c, "conId", 0) or 0) <= 0 else c
-                    for c in candidates
-                ]
+            if len(res) == len(missing):
+                for idx, contract in zip(missing, res, strict=True):
+                    candidates[idx] = contract
 
         spot_contract: Any | None = None
         if len(candidates) < CORRIDOR_MAX_CONTRACTS:
@@ -177,7 +172,11 @@ class CorridorQuoteService:
                     )
                     or []
                 )
-                if qual_spot:
+                if (
+                    qual_spot
+                    and qual_spot[0] is not None
+                    and not isinstance(qual_spot[0], (list, tuple, set, dict, str, bytes))
+                ):
                     spot_contract = qual_spot[0]
 
         total_subs = len(candidates) + (1 if spot_contract is not None else 0)

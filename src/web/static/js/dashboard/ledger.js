@@ -1782,6 +1782,9 @@ export async function syncLedgerFromUI() {
       return;
     }
     var errTone = res.status === 503 || res.status === 422 ? "warn" : "error";
+    if (res.status === 503) {
+      await fetchStatus();
+    }
     var errMsg = extractApiErrorMessage(res.body, res.textSnippet || "Trade ledger sync failed.");
     showBanner(errTone, errMsg, {
       phase: "LEDGER_SYNC",
@@ -1792,6 +1795,7 @@ export async function syncLedgerFromUI() {
       rawBody: res.textSnippet,
     });
   } catch (err) {
+    await fetchStatus();
     showBanner("error", "Trade ledger sync failed: " + (err && err.message ? err.message : String(err || "")), {
       phase: "LEDGER_SYNC",
       elapsedMs: err && err.elapsedMs,
@@ -1885,9 +1889,13 @@ export async function refreshOpenLedgerMtm() {
         elapsedMs: res.elapsedMs,
       });
       await loadLedger();
+      await fetchStatus();
       return;
     }
     var errTone = res.status === 503 ? "warn" : "error";
+    if (res.status === 503) {
+      await fetchStatus();
+    }
     var errMsg = extractApiErrorMessage(res.body, res.textSnippet || "Open MTM refresh failed.");
     showBanner(errTone, errMsg, {
       phase: "LEDGER_MTM",
@@ -1898,6 +1906,7 @@ export async function refreshOpenLedgerMtm() {
       rawBody: res.textSnippet,
     });
   } catch (err) {
+    await fetchStatus();
     showBanner("warn", "Open MTM refresh error: " + (err && err.message ? err.message : String(err || "")), {
       phase: "LEDGER_MTM",
     });

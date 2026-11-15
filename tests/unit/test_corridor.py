@@ -12,7 +12,7 @@ from ib_async import Contract
 
 from src.analytics.bsm_fallback import DAYS_PER_YEAR, DEFAULT_RISK_FREE_RATE, bsm_greeks, bsm_price
 from src.analytics.walls import compute_walls
-from src.broker.client import IBKRBrokerClient
+from src.broker.client import QUALIFY_CHUNK_PAUSE_SEC, QUALIFY_CHUNK_SIZE, IBKRBrokerClient
 from src.broker.corridor import (
     CORRIDOR_MAX_CONTRACTS,
     DEFAULT_CORRIDOR_MAX_CONTRACTS,
@@ -817,3 +817,156 @@ def test_stream_on_register_hook_runs_after_registration_and_leads_first_frame_n
         run_coro(anext(gen_busy))
     assert fake_ib.subscribed == [] and fake_ib.cancelled == []
     assert service.active_stream_count == 0
+
+
+def test_prepare_contracts_qualifies_unqualified_options_in_chunks_of_ten() -> None:
+    specs = tuple(
+        CorridorContractSpec(
+            option_conid=0,
+            symbol="NVDA",
+            expiry="2026-12-18",
+            ib_expiry="20261218",
+            dte=37,
+            strike=90.0 + idx,
+            right="C" if idx % 2 == 0 else "P",
+            zone="PUT_WALL" if idx % 2 == 1 else "CALL_WALL",
+            is_put_wall=idx % 2 == 1,
+            is_call_wall=idx % 2 == 0,
+            is_strategy_leg=False,
+            cached_bid=2.0,
+            cached_ask=2.2,
+            cached_mid=2.1,
+            cached_last=2.1,
+            cached_close=2.0,
+            cached_volume=10,
+            cached_open_interest=50,
+            cached_iv=0.4,
+            cached_delta=0.3 if idx % 2 == 0 else -0.3,
+            cached_gamma=0.02,
+            cached_theta=-0.04,
+            cached_vega=0.1,
+            cached_greeks_source="IBKR_MODEL",
+        )
+        for idx in range(15)
+    )
+    selection = CorridorSelection(
+        ticker="NVDA",
+        underlying_conid=4815,
+        underlying_price=100.0,
+        target_expiry="2026-12-18",
+        target_dte=37,
+        window_strikes=10,
+        max_contracts=88,
+        primary_put_wall=95.0,
+        primary_call_wall=105.0,
+        wall_basis="OPEN_INTEREST",
+        atm_strike=100.0,
+        specs=specs,
+    )
+    fake_ib = _FakeIB()
+    batch_sizes: list[int] = []
+    next_conid = 90_000
+
+    async def _chunked_qualify(*contracts: Any) -> list[Any]:
+        nonlocal next_conid
+        fake_ib.qualify_calls += 1
+        batch_sizes.append(len(contracts))
+        out: list[Any] = []
+        for c in contracts:
+            next_conid += 1
+            c.conId = next_conid
+            out.append(c)
+        return out
+
+    fake_ib.qualifyContractsAsync = _chunked_qualify  # type: ignore[method-assign]
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=_rec_sleep)
+    res = run_coro(service.fetch_corridor_quotes(selection, snapshot_id="NVDA_20261111_160000"))
+    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 5]
+    assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
+    assert len(res.quotes) == 15
+    assert len(fake_ib.subscribed) == 16  # 15 options + 1 spot, well under 90 cap
+    assert len(fake_ib.cancelled) == 16
+
+
+def test_prepare_contracts_handles_partial_none_without_shifting_or_duplicating() -> None:
+    """In-place mutation of qualified contracts + None failure never shifts or duplicates legs."""
+
+    def _spec(strike: float, *, conid: int = 0) -> CorridorContractSpec:
+        return CorridorContractSpec(
+            option_conid=conid,
+            symbol="NVDA",
+            expiry="2026-12-18",
+            ib_expiry="20261218",
+            dte=37,
+            strike=strike,
+            right="P" if strike < 100.0 else "C",
+            zone="PUT_WALL" if strike < 100.0 else "CALL_WALL",
+            is_put_wall=strike == 95.0,
+            is_call_wall=strike == 105.0,
+            is_strategy_leg=False,
+            cached_bid=2.0,
+            cached_ask=2.2,
+            cached_mid=2.1,
+            cached_last=2.1,
+            cached_close=2.0,
+            cached_volume=10,
+            cached_open_interest=50,
+            cached_iv=0.4,
+            cached_delta=-0.3 if strike < 100.0 else 0.3,
+            cached_gamma=0.02,
+            cached_theta=-0.04,
+            cached_vega=0.1,
+            cached_greeks_source="IBKR_MODEL",
+        )
+
+    selection = CorridorSelection(
+        ticker="NVDA",
+        underlying_conid=4815,
+        underlying_price=100.0,
+        target_expiry="2026-12-18",
+        target_dte=37,
+        window_strikes=10,
+        max_contracts=88,
+        primary_put_wall=95.0,
+        primary_call_wall=105.0,
+        wall_basis="OPEN_INTEREST",
+        atm_strike=100.0,
+        specs=(
+            _spec(90.0, conid=10_001),
+            _spec(95.0, conid=0),
+            _spec(100.0, conid=0),
+            _spec(105.0, conid=0),
+        ),
+    )
+    fake_ib = _FakeIB()
+
+    async def _partial_none_qualify(*contracts: Any) -> list[Any]:
+        fake_ib.qualify_calls += 1
+        assert [float(c.strike) for c in contracts] == [95.0, 100.0, 105.0]
+        # Mutate first and third in place; middle contract fails with None.
+        contracts[0].conId = 90_001
+        contracts[2].conId = 90_003
+        return [contracts[0], None, contracts[2]]
+
+    fake_ib.qualifyContractsAsync = _partial_none_qualify  # type: ignore[method-assign]
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    service = CorridorQuoteService(client, sleep=noop_sleep)
+    res = run_coro(service.fetch_corridor_quotes(selection, snapshot_id="NVDA_20261111_160000"))
+
+    sub_contracts = [c for c, *_ in fake_ib.subscribed]
+    assert all(c is not None for c in sub_contracts)
+    opt_contracts = [c for c in sub_contracts if getattr(c, "secType", "") == "OPT"]
+    assert [(float(c.strike), int(c.conId)) for c in opt_contracts] == [
+        (90.0, 10_001),
+        (95.0, 90_001),
+        (100.0, 0),
+        (105.0, 90_003),
+    ]
+    assert [q.strike for q in res.quotes] == [90.0, 95.0, 100.0, 105.0]
+    assert len(fake_ib.cancelled) == len(fake_ib.subscribed)

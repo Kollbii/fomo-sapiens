@@ -10,7 +10,7 @@ import {
   parseDashboardDteWindow,
   showBanner,
 } from "./helpers.js";
-import { apiJson, loadChain } from "./network.js";
+import { apiJson, fetchStatus, loadChain } from "./network.js";
 import { snapshotEtParts } from "./snapshots.js";
 import {
   evaluateStrategyRequest,
@@ -1281,6 +1281,9 @@ function openLive() {
         mdLabel: "",
       };
       updateLiveBadge();
+      if (!state.status || !state.status.connected) {
+        fetchStatus();
+      }
     } catch (_err) {
       /* ignore malformed open */
     }
@@ -1348,11 +1351,13 @@ function openLive() {
       closeLive({ remote: false, clearOverlay: true });
       if (code === "REFRESH_BUSY") S.resumePending = true;
       updateLiveBadge();
+      fetchStatus();
       warn(msg, { errorCode: code || undefined });
       return;
     }
     closeLive({ remote: wasOpen, clearOverlay: true });
     updateLiveBadge();
+    fetchStatus();
     warn(
       wasOpen
         ? "Live screener stream interrupted; IBKR subscriptions cancelled."

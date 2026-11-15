@@ -17,7 +17,12 @@ from typing import Any
 import pytest
 
 from src.analytics.bsm_fallback import DEFAULT_RISK_FREE_RATE
-from src.broker.client import IBKRBrokerClient, SleepFn
+from src.broker.client import (
+    QUALIFY_CHUNK_PAUSE_SEC,
+    QUALIFY_CHUNK_SIZE,
+    IBKRBrokerClient,
+    SleepFn,
+)
 from src.broker.corridor import (
     CORRIDOR_MAX_CONTRACTS,
     DEFAULT_CORRIDOR_MAX_CONTRACTS,
@@ -734,3 +739,52 @@ def test_spec_budgets_outside_their_ranges_are_pacing_violations() -> None:
         spec.validate(50, option_budget=51)
     with pytest.raises(PacingViolationError, match="option line budget -1 must be between 0"):
         spec.validate(50, option_budget=-1)
+
+
+def test_live_legs_qualifies_missing_conids_in_chunks_of_ten() -> None:
+    batch_sizes: list[int] = []
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    svc, ib = _service(sleep=_rec_sleep)
+    orig_qualify = ib.qualifyContractsAsync
+
+    async def _track_qualify(*contracts: Any) -> list[Any]:
+        batch_sizes.append(len(contracts))
+        return await orig_qualify(*contracts)
+
+    ib.qualifyContractsAsync = _track_qualify  # type: ignore[method-assign]
+    options = tuple(_opt("NVDA", 90.0 + idx, conid=0) for idx in range(14))
+    spec = LiveLegsSpec(0, options, (_spot("NVDA"),))
+    frame = run_coro(_first(svc.stream_live_legs(_Source(spec), session_id="s-chunk")))
+    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 4]
+    assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
+    assert len(frame.quotes) == 14
+    _assert_all_released(svc, ib)
+
+
+def test_live_legs_replaces_none_slot_in_qualify_response() -> None:
+    svc, ib = _service()
+
+    async def _qualify_with_none(*contracts: Any) -> list[Any]:
+        contracts[0].conId = 91_001
+        return [contracts[0], None]
+
+    ib.qualifyContractsAsync = _qualify_with_none  # type: ignore[method-assign]
+    spec = LiveLegsSpec(
+        0,
+        (_opt("NVDA", 95.0, conid=0), _opt("NVDA", 100.0, conid=0)),
+        (_spot("NVDA"),),
+    )
+    frame = run_coro(_first(svc.stream_live_legs(_Source(spec), session_id="s-none")))
+    sub_contracts = [c for c, *_ in ib.subscribed]
+    assert all(c is not None for c in sub_contracts)
+    opt_subs = [c for c in sub_contracts if getattr(c, "secType", "") == "OPT"]
+    assert [(float(c.strike), int(c.conId)) for c in opt_subs] == [
+        (95.0, 91_001),
+        (100.0, 0),
+    ]
+    assert len(frame.quotes) == 2
+    _assert_all_released(svc, ib)

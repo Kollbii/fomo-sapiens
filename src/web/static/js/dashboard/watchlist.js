@@ -14,6 +14,7 @@ import {
 } from "./helpers.js";
 import {
   apiJson,
+  fetchStatus,
   loadChain,
 } from "./network.js";
 import {
@@ -360,6 +361,10 @@ function schedulePoll() {
   state.watchlistPollTimer = window.setTimeout(pollBatch, BATCH_POLL_MS);
 }
 
+function isAbortedOrFailedBatch(batch) {
+  return Boolean(batch) && (batch.state === "aborted" || Number(batch.failed_count) > 0);
+}
+
 function applyBatch(batch, source) {
   state.watchlistBatch = batch;
   var live = isLiveBatch(batch);
@@ -374,6 +379,8 @@ function applyBatch(batch, source) {
   stopPoll();
   if (source !== "attach") {
     onBatchFinished(batch);
+  } else if (isAbortedOrFailedBatch(batch)) {
+    fetchStatus();
   }
 }
 
@@ -381,7 +388,7 @@ async function onBatchFinished(batch) {
   // Lets the Best Option screener recalculate from the new snapshots and auto-resume live mode.
   document.dispatchEvent(new Event("ibkr:batch-finished"));
   document.dispatchEvent(new Event("ibkr:lock-released"));
-  await refreshWatchlist();
+  await Promise.all([refreshWatchlist(), fetchStatus()]);
   var follow = state.watchlistFollow;
   state.watchlistFollow = null;
   if (follow) {
@@ -473,10 +480,15 @@ async function pollBatch() {
 async function attachCurrentBatch() {
   try {
     var res = await apiJson("/api/refresh/batch/current");
-    if (res.ok && res.body && isLiveBatch(res.body)) {
-      state.watchlistPollFailures = 0;
-      applyBatch(res.body, "attach");
-      return true;
+    if (res.ok && res.body) {
+      if (isLiveBatch(res.body)) {
+        state.watchlistPollFailures = 0;
+        applyBatch(res.body, "attach");
+        return true;
+      }
+      if (isAbortedOrFailedBatch(res.body)) {
+        fetchStatus();
+      }
     }
   } catch (_err) {
     /* nothing to attach */

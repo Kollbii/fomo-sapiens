@@ -14,12 +14,15 @@ from ib_async import Option
 from src.broker.client import (
     DISCONNECT_CODES,
     INFO_CODES,
+    QUALIFY_CHUNK_PAUSE_SEC,
+    QUALIFY_CHUNK_SIZE,
     RESTORE_CODES,
     IBKRBrokerClient,
 )
 from src.broker.fetcher import (
     PagedOptionChainFetcher,
 )
+from src.broker.flex import MAX_SAFE_MESSAGE_CHARS
 from src.core.config import IBKRSettings, Settings
 from src.core.exceptions import (
     GatewayConnectionError,
@@ -209,8 +212,20 @@ def test_request_timeout_setting_default_and_bounds() -> None:
     assert issubclass(GatewayTimeoutError, GatewayConnectionError)
 
 
-def test_run_stage_times_out_with_gateway_timeout_error_and_keeps_socket() -> None:
-    client, _fake_ib = _connected_client()
+def _conn_state(client: IBKRBrokerClient) -> str:
+    return client.connection_state
+
+
+def test_run_stage_times_out_recycles_socket_and_tracks_connection_state() -> None:
+    fake_ib = FakeChainIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    assert _conn_state(client) == "offline"
+    assert client.connection_notice is None
+
+    run_coro(client.ensure_connected())
+    assert _conn_state(client) == "connected"
+    assert client.connection_notice is None
+
     hang = _HangingRequest()
 
     async def _run() -> float:
@@ -227,10 +242,25 @@ def test_run_stage_times_out_with_gateway_timeout_error_and_keeps_socket() -> No
 
     assert run_virtual_loop(_run()) == pytest.approx(20.0)
     assert hang.cancelled == 1
-    # A plain time-out keeps the (healthy) local API socket open; no abort future leaks.
-    assert client.is_connected
-    assert client.was_connected
+    assert not client.is_connected
+    assert not client.was_connected
+    assert _conn_state(client) == "timeout_reset"
+    assert client.connection_notice == (
+        "Socket recycled after Gateway time-out during underlying qualification (NVDA); "
+        "auto-reconnects on next pull"
+    )
     assert client._stage_aborts == set()
+
+    # Reconnecting clears timeout diagnostics; explicit disconnect returns to offline.
+    run_coro(client.ensure_connected())
+    assert _conn_state(client) == "connected"
+    assert client.connection_notice is None
+
+    client.reset_after_timeout(stage="manual check")
+    assert _conn_state(client) == "timeout_reset"
+    client.disconnect()
+    assert _conn_state(client) == "offline"
+    assert client.connection_notice is None
 
 
 def test_run_stage_honours_configured_and_explicit_timeouts() -> None:
@@ -393,8 +423,133 @@ def test_run_stage_socket_drop_still_maps_to_transport_error() -> None:
         raise ConnectionResetError("socket closed")
 
     async def _run() -> None:
+        fake_ib.errorEvent.emit(-1, 502, "Couldn't connect to TWS", None)
         with pytest.raises(GatewayConnectionError, match="connection interrupted during reqPos"):
             await client.run_stage("reqPositions", _drop())
 
     run_virtual_loop(_run())
     assert not client.was_connected
+    assert _conn_state(client) == "connection_lost"
+    assert client.connection_notice == "IBKR 502: Couldn't connect to TWS"
+    client.disconnect()
+    assert _conn_state(client) == "offline"
+    assert client.connection_notice is None
+
+
+def test_qualify_contracts_chunks_with_pacing_and_aborts_on_loss() -> None:
+    client, fake_ib = _connected_client()
+    assert run_coro(client.qualify_contracts([])) == []
+    with pytest.raises(ValueError, match="chunk_size must be >= 1"):
+        run_coro(
+            client.qualify_contracts(
+                [Option("NVDA", "20261218", 140.0, "C", "SMART")], chunk_size=0
+            )
+        )
+
+    batches: list[int] = []
+    sleeps: list[float] = []
+
+    def _chunk_qualify(*contracts: Any) -> list[Any]:
+        batches.append(len(contracts))
+        if len(batches) == 3:
+            # Partial mismatch on chunk 3: only 3 of 5 contracts qualify.
+            kept: list[Any] = []
+            for idx, c in enumerate(contracts):
+                if idx >= 3:
+                    c.conId = 0
+                    continue
+                c.conId = 7000 + len(batches) * 100 + idx
+                kept.append(c)
+            return kept
+        for idx, c in enumerate(contracts):
+            c.conId = 7000 + len(batches) * 100 + idx
+        return list(contracts)
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    fake_ib.qualify_handler = _chunk_qualify
+    contracts = [Option("NVDA", "20261218", 100.0 + idx, "C", "SMART") for idx in range(25)]
+    res = run_coro(client.qualify_contracts(contracts, sleep=_rec_sleep))
+    assert batches == [QUALIFY_CHUNK_SIZE, QUALIFY_CHUNK_SIZE, 5]
+    assert sleeps == [QUALIFY_CHUNK_PAUSE_SEC, QUALIFY_CHUNK_PAUSE_SEC]
+    assert len(res) == 25
+    assert all(c.conId > 0 for c in res[:23])
+    assert all(c.conId == 0 for c in res[23:])
+
+    # Upstream loss arriving during the inter-chunk pause aborts before the next chunk.
+    client2, fake_ib2 = _connected_client()
+    sent: list[int] = []
+
+    def _ok(*batch: Any) -> list[Any]:
+        sent.append(len(batch))
+        for idx, c in enumerate(batch):
+            c.conId = 8000 + idx
+        return list(batch)
+
+    fake_ib2.qualify_handler = _ok
+
+    async def _lose_link(_sec: float) -> None:
+        fake_ib2.errorEvent.emit(-1, 1100, "Connectivity between IB and TWS lost", None)
+
+    batch15 = [Option("NVDA", "20261218", 100.0 + idx, "C", "SMART") for idx in range(15)]
+    with pytest.raises(GatewayConnectionError, match=r"upstream connection.*IBKR 1100"):
+        run_coro(client2.qualify_contracts(batch15, sleep=_lose_link))
+    assert sent == [QUALIFY_CHUNK_SIZE]
+
+
+def test_qualify_contracts_replaces_none_and_non_contract_slots_in_same_length_chunk() -> None:
+    client, fake_ib = _connected_client()
+    c0 = Option("NVDA", "20261218", 130.0, "C", "SMART")
+    c1 = Option("NVDA", "20261218", 135.0, "C", "SMART")
+    c2 = Option("NVDA", "20261218", 140.0, "C", "SMART")
+    c3 = Option("NVDA", "20261218", 145.0, "C", "SMART")
+
+    def _same_len_with_nulls(*contracts: Any) -> list[Any]:
+        contracts[0].conId = 9001
+        contracts[3].conId = 9003
+        # Simulate ib_async returning None for an unknown contract and a list for an ambiguous one.
+        return [contracts[0], None, [contracts[2]], contracts[3]]
+
+    fake_ib.qualify_handler = _same_len_with_nulls
+    res = run_coro(client.qualify_contracts([c0, c1, c2, c3], sleep=noop_sleep))
+    assert len(res) == 4
+    assert res[0] is c0 and res[0].conId == 9001
+    assert res[1] is c1 and res[1].conId == 0
+    assert res[2] is c2 and res[2].conId == 0
+    assert res[3] is c3 and res[3].conId == 9003
+
+
+def test_connection_notice_sanitizes_secrets_controls_and_caps_length() -> None:
+    client, fake_ib = _connected_client()
+    raw_msg = (
+        "Disconnected\n\t\x00for acctId=U1234567 and account DU9876543 "
+        "https://ndcdyn.interactivebrokers.com/flex?t=tok-secret-1 token=my-secret-token\r\n"
+        "Traceback (most recent call last):\n  File '/app/secret.py', line 9\n" + "x" * 500
+    )
+    fake_ib.errorEvent.emit(-1, 1100, raw_msg, None)
+
+    async def _drop() -> None:
+        fake_ib._connected = False
+        raise ConnectionResetError("socket closed")
+
+    with pytest.raises(GatewayConnectionError):
+        run_virtual_loop(client.run_stage("reqPositions", _drop()))
+
+    assert _conn_state(client) == "connection_lost"
+    notice = client.connection_notice
+    assert notice is not None
+    assert notice.startswith("IBKR 1100:")
+    assert len(notice) <= MAX_SAFE_MESSAGE_CHARS
+    for forbidden in (
+        "U1234567",
+        "DU9876543",
+        "tok-secret-1",
+        "my-secret-token",
+        "/app/secret.py",
+        "\n",
+        "\r",
+        "\t",
+        "\x00",
+    ):
+        assert forbidden not in notice

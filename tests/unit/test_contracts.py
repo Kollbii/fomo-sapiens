@@ -30,6 +30,7 @@ from src.broker.fetcher import (
 )
 from src.core.config import OptionsChainSettings, Settings
 from src.core.exceptions import (
+    GatewayConnectionError,
     InvalidTickerError,
     OptionChainFetchError,
     UnderlyingPriceUnavailableError,
@@ -592,6 +593,7 @@ def test_select_spot_cross_check_and_resolve_spot_with_source() -> None:
     )
     settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
     client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    run_coro(client.ensure_connected())
     svc = ContractDiscoveryService(client, settings, clock=lambda: now, sleep=noop_sleep)
 
     plan = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
@@ -645,6 +647,7 @@ def test_short_dte_zero_dte_discovery_and_reuse() -> None:
 
     settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=False))
     client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    run_coro(client.ensure_connected())
     svc = ContractDiscoveryService(client, settings, clock=lambda: now, sleep=noop_sleep)
 
     plan1 = run_coro(
@@ -671,3 +674,77 @@ def test_short_dte_zero_dte_discovery_and_reuse() -> None:
     assert plan2.total_contracts <= svc.max_total_contracts
     assert qualify_calls == 1
     assert secdef_calls == 1
+
+
+def test_prefetch_exact_contracts_stops_remaining_expirations_on_first_timeout(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    market_date = date(2026, 11, 11)
+    dtes = [30, 37, 44, 51, 58]
+    exps = [(market_date + timedelta(days=d)).strftime("%Y%m%d") for d in dtes]
+    strikes = [135.0, 140.0, 145.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+
+    started: list[str] = []
+
+    async def _hanging_cd(contract: Any) -> list[Any]:
+        started.append(str(contract.lastTradeDateOrContractMonth))
+        await asyncio.get_running_loop().create_future()
+        return []  # pragma: no cover
+
+    fake_ib.contract_details_handler = _hanging_cd
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8
+    )
+    settings = Settings(
+        options_chain=OptionsChainSettings(
+            prefetch_exact_strikes=True,
+            contract_details_timeout_sec=1.0,
+            contract_details_cooldown_sec=0.0,
+        )
+    )
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    run_coro(client.ensure_connected())
+    svc = ContractDiscoveryService(client, settings, clock=lambda: now, sleep=noop_sleep)
+
+    with caplog.at_level("WARNING"):
+        plan = run_virtual_loop(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+
+    # Concurrent semaphore started at most EXACT_PREFETCH_MAX_CONCURRENCY probes; queued 3 skipped.
+    assert len(started) <= EXACT_PREFETCH_MAX_CONCURRENCY
+    assert client.is_connected
+    assert [spec.match.ib_expiry for spec in plan.expiration_specs] == exps
+    assert all(not spec.exact_strikes_verified for spec in plan.expiration_specs)
+    timeout_logs = [r for r in caplog.records if "Exact strike prefetch timed out" in r.message]
+    assert len(timeout_logs) == 1
+
+    # Sequential fallback branch (no running loop) also stops after the first timeout.
+    seq_started: list[str] = []
+
+    def _seq_timeout(contract: Any) -> list[Any]:
+        seq_started.append(str(contract.lastTradeDateOrContractMonth))
+        raise TimeoutError("wildcard stalled")
+
+    fake_ib.contract_details_handler = _seq_timeout
+    plan_seq = run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+    assert len(seq_started) == 1
+    assert all(not spec.exact_strikes_verified for spec in plan_seq.expiration_specs)
+
+    # Upstream loss still propagates immediately rather than degrading.
+    def _upstream_loss(_contract: Any) -> list[Any]:
+        fake_ib.errorEvent.emit(-1, 2110, "Connectivity broken", None)
+        return []
+
+    fake_ib.contract_details_handler = _upstream_loss
+    with pytest.raises(GatewayConnectionError, match=r"exact contract prefetch.*IBKR 2110"):
+        run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))

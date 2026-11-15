@@ -185,6 +185,10 @@ class GatewayStatusResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     connected: bool
+    connection_state: Literal["connected", "timeout_reset", "connection_lost", "offline"] = (
+        "offline"
+    )
+    connection_notice: str | None = None
     host: str
     port: int
     client_id: int

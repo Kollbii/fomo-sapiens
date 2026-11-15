@@ -27,12 +27,41 @@ export function renderStatusBadges(statusPayload) {
   state.status = statusPayload;
   if (dom.gatewayBadge) {
     var connected = Boolean(statusPayload && statusPayload.connected);
-    dom.gatewayBadge.className = "badge " + (connected ? "badge--online" : "badge--offline");
+    var connState =
+      statusPayload && typeof statusPayload.connection_state === "string"
+        ? statusPayload.connection_state
+        : "offline";
+    var connNotice =
+      statusPayload && typeof statusPayload.connection_notice === "string"
+        ? statusPayload.connection_notice.trim()
+        : "";
+    var badgeClass = "badge--offline";
+    var badgeText = "GATEWAY OFFLINE (CACHE ONLY)";
+    var badgeTitle = "IBKR Gateway target: " + gatewayAddressLabel();
+
+    if (connected) {
+      badgeClass = "badge--online";
+      badgeText = "GATEWAY ONLINE";
+    } else if (connState === "timeout_reset") {
+      badgeClass = "badge--amber";
+      badgeText = "GATEWAY TIMEOUT \u2022 SOCKET RESET";
+      badgeTitle =
+        (connNotice ||
+          "Socket recycled after IBKR Gateway time-out; auto-reconnects on next pull.") +
+        " (" +
+        gatewayAddressLabel() +
+        ")";
+    } else if (connState === "connection_lost") {
+      badgeClass = "badge--offline";
+      badgeText = "GATEWAY LINK LOST";
+      badgeTitle =
+        (connNotice || "IBKR Gateway connection lost.") + " (" + gatewayAddressLabel() + ")";
+    }
+
+    dom.gatewayBadge.className = "badge " + badgeClass;
     dom.gatewayBadge.innerHTML =
-      '<span class="badge-dot" aria-hidden="true"></span><span>' +
-      (connected ? "GATEWAY ONLINE" : "GATEWAY OFFLINE (CACHE ONLY)") +
-      "</span>";
-    dom.gatewayBadge.title = "IBKR Gateway target: " + gatewayAddressLabel();
+      '<span class="badge-dot" aria-hidden="true"></span><span>' + badgeText + "</span>";
+    dom.gatewayBadge.title = badgeTitle;
   }
   if (dom.mdTypeBadge && statusPayload) {
     var md =

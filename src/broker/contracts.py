@@ -624,6 +624,8 @@ class ContractDiscoveryService:
         symbol: str,
         exp: ExpirationMatch,
         exp_chain: OptionChainLike,
+        *,
+        on_timeout: Callable[[], None] | None = None,
     ) -> dict[tuple[float, str], Any]:
         oc = self.settings.options_chain
         req_fn = getattr(self.client.ib, "reqContractDetailsAsync", None)
@@ -650,12 +652,15 @@ class ContractDiscoveryService:
         except (GatewayTimeoutError, TimeoutError) as exc:
             if self.client.was_connected and not self.client.is_connected:
                 self.client.raise_transport_error(exc, stage=stage)
-            logger.warning(
-                "Exact strike prefetch timeout fallback for %s %s: %s",
-                symbol,
-                exp.ib_expiry,
-                exc,
-            )
+            if on_timeout is not None:
+                on_timeout()
+            else:
+                logger.warning(
+                    "Exact strike prefetch timeout fallback for %s %s: %s",
+                    symbol,
+                    exp.ib_expiry,
+                    exc,
+                )
             return {}
         except GatewayConnectionError:
             # Upstream loss / dropped socket: never degrade to the secdef fallback.
@@ -697,6 +702,18 @@ class ContractDiscoveryService:
             pending.append((exp, exp_chain, cache_key))
 
         if pending:
+            timed_out = False
+
+            def _trip_timeout() -> None:
+                nonlocal timed_out
+                if not timed_out:
+                    timed_out = True
+                    logger.warning(
+                        "Exact strike prefetch timed out for %s; skipping remaining expirations "
+                        "and falling back to secdef lookup.",
+                        symbol,
+                    )
+
             if _has_running_event_loop():
                 sem = asyncio.Semaphore(EXACT_PREFETCH_MAX_CONCURRENCY)
 
@@ -706,10 +723,21 @@ class ContractDiscoveryService:
                     exp_chain: OptionChainLike,
                     cache_key: tuple[str, str, str, str],
                 ) -> None:
+                    if timed_out:
+                        resolved[exp.ib_expiry] = (exp_chain, {})
+                        return
                     async with sem:
+                        if timed_out:
+                            resolved[exp.ib_expiry] = (exp_chain, {})
+                            return
                         if slot_idx > 0 and oc.contract_details_cooldown_sec > 0:
                             await self.sleep(oc.contract_details_cooldown_sec)
-                        exact_map = await self._query_exact_for_expiration(symbol, exp, exp_chain)
+                        if timed_out:
+                            resolved[exp.ib_expiry] = (exp_chain, {})
+                            return
+                        exact_map = await self._query_exact_for_expiration(
+                            symbol, exp, exp_chain, on_timeout=_trip_timeout
+                        )
                         self._cache_store(cache_key, exact_map)
                         resolved[exp.ib_expiry] = (exp_chain, exact_map)
 
@@ -727,9 +755,17 @@ class ContractDiscoveryService:
                     raise
             else:
                 for idx, (exp, exp_chain, cache_key) in enumerate(pending):
+                    if timed_out:
+                        resolved[exp.ib_expiry] = (exp_chain, {})
+                        continue
                     if idx > 0 and oc.contract_details_cooldown_sec > 0:
                         await self.sleep(oc.contract_details_cooldown_sec)
-                    exact_map = await self._query_exact_for_expiration(symbol, exp, exp_chain)
+                    if timed_out:
+                        resolved[exp.ib_expiry] = (exp_chain, {})
+                        continue
+                    exact_map = await self._query_exact_for_expiration(
+                        symbol, exp, exp_chain, on_timeout=_trip_timeout
+                    )
                     self._cache_store(cache_key, exact_map)
                     resolved[exp.ib_expiry] = (exp_chain, exact_map)
 

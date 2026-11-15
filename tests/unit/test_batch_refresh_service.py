@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import re
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
+from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import ChainPlan, ExpirationMatch, StrikeSelection, UnderlyingInfo
 from src.broker.fetcher import ChainFetchProgress, FetchResult
 from src.core.config import (
@@ -257,6 +258,8 @@ def _make(
     watchlist: WatchlistSettings | None = None,
     options_chain: OptionsChainSettings | None = None,
     gateway_sync_enabled: bool = False,
+    sleep: Callable[[float], Awaitable[None]] = noop_sleep,
+    broker_client: Any = None,
 ) -> tuple[AnalyzerService, BatchRefreshService, _Fetcher, _Corridor, list[str]]:
     settings = Settings(
         tracker=PaperTrackerSettings(max_active_trades=20, tracked_dir="data/tracked"),
@@ -270,7 +273,7 @@ def _make(
     svc = AnalyzerService(
         settings=settings,
         repo=CSVRepository(settings.storage, root=tmp_path),
-        broker_client=_Broker(),  # type: ignore[arg-type]
+        broker_client=broker_client if broker_client is not None else _Broker(),  # type: ignore[arg-type]
         fetcher=fetcher,  # type: ignore[arg-type]
         corridor=corridor,  # type: ignore[arg-type]
     )
@@ -288,6 +291,7 @@ def _make(
         svc,
         timer=lambda: float(next(ticks)),
         id_factory=lambda: "ab" * 16,
+        sleep=sleep,
     )
     return svc, batch, fetcher, corridor, quoted
 
@@ -1303,3 +1307,157 @@ def test_batch_item_done_when_post_save_quoting_raises(tmp_path: Path) -> None:
     assert item.snapshot_id is not None
     assert item.partial is False
     assert any("Paper-trade quoting for NVDA failed" in n for n in item.notices)
+
+
+def test_batch_inter_ticker_cooldown_pauses_and_cancels_cleanly(tmp_path: Path) -> None:
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        await asyncio.sleep(sec)
+
+    svc, batch, _, _, _ = _make(
+        tmp_path,
+        pause_sec=0.5,
+        sleep=_rec_sleep,
+    )
+
+    async def _run_full() -> tuple[BatchRefreshStatus, float]:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await batch.start(_req(["NVDA", "AVGO", "CRDO"]))
+        final = await _wait_finished(batch)
+        return final, loop.time() - t0
+
+    final, elapsed = run_virtual_loop(_run_full())
+    assert final.state == "completed"
+    # 3 tickers * 0.5s + 2 inter-ticker gaps * 1.5s default = 4.5s (no gap before 1st / after 3rd).
+    assert sleeps == [1.5, 1.5]
+    assert elapsed >= 4.5
+    assert not svc.refresh_lock.locked()
+
+    # Cancelling during the cooldown wakes at once without waiting out 1.5s.
+    svc2, batch2, _, _, _ = _make(
+        tmp_path / "cancel_cooldown",
+        pause_sec=0.5,
+        sleep=asyncio.sleep,
+    )
+
+    async def _cancel_during_cooldown() -> tuple[BatchRefreshStatus, float]:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        await batch2.start(_req(["NVDA", "AVGO"]))
+        await asyncio.sleep(0.6)  # NVDA finished at 0.5s; currently in 1.5s cooldown
+        current = batch2.current()
+        assert current is not None
+        batch2.cancel(current.batch_id)
+        final2 = await _wait_finished(batch2, step=0.05)
+        return final2, loop.time() - t0
+
+    final2, cancel_elapsed = run_virtual_loop(_cancel_during_cooldown())
+    assert final2.state == "cancelled"
+    assert [i.state for i in final2.items] == ["done", "cancelled"]
+    assert cancel_elapsed < 1.0
+    assert not svc2.refresh_lock.locked()
+
+
+def test_per_ticker_timeout_recycles_socket_and_updates_status(tmp_path: Path) -> None:
+    from tests.support.ib_fakes import FakeChainIB
+
+    fake_ib = FakeChainIB()
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    run_coro(client.ensure_connected())
+    assert client.connection_state == "connected"
+
+    svc, batch, fetcher, _, _ = _make(
+        tmp_path,
+        watchlist=WatchlistSettings(batch_ticker_timeout_sec=30.0),
+        broker_client=client,
+    )
+    assert svc.get_status().connection_state == "connected"
+    assert svc.get_status().connection_notice is None
+
+    fetcher.pages["AVGO"] = 2
+    fetcher.hang_after["AVGO"] = 1
+
+    async def _scenario() -> BatchRefreshStatus:
+        await batch.start(_req(["NVDA", "AVGO"]))
+        return await _wait_finished(batch)
+
+    final = run_virtual_loop(_scenario())
+    assert final.state == "aborted"
+    assert not client.is_connected
+    status = svc.get_status()
+    assert status.connected is False
+    assert status.connection_state == "timeout_reset"
+    assert status.connection_notice == (
+        "Socket recycled after Gateway time-out during per-ticker limit (AVGO); "
+        "auto-reconnects on next pull"
+    )
+
+    # Minimal fake broker lacking reset_after_timeout falls back to .disconnect().
+    disconnected = [False]
+
+    class _MinDisconnectBroker:
+        is_connected = True
+        current_type = 3
+
+        def get_active_market_data_type(self) -> int:
+            return 3
+
+        async def ensure_connected(self) -> None:
+            return None
+
+        def disconnect(self) -> None:
+            disconnected[0] = True
+            self.is_connected = False
+
+    svc_min, batch_min, fetcher_min, _, _ = _make(
+        tmp_path / "minimal_fallback",
+        watchlist=WatchlistSettings(batch_ticker_timeout_sec=30.0),
+        broker_client=_MinDisconnectBroker(),
+    )
+    fetcher_min.pages["AVGO"] = 1
+    fetcher_min.hang_after["AVGO"] = 0
+
+    async def _scenario_min() -> BatchRefreshStatus:
+        await batch_min.start(_req(["AVGO"]))
+        return await _wait_finished(batch_min)
+
+    final_min = run_virtual_loop(_scenario_min())
+    assert final_min.state == "aborted"
+    assert disconnected == [True]
+    assert svc_min.get_status().connection_state == "offline"
+
+
+def test_get_status_sanitizes_custom_broker_connection_notice(tmp_path: Path) -> None:
+    class _LeakyBroker:
+        is_connected = False
+        current_type = 3
+        connection_state = "connection_lost"
+        connection_notice = (
+            "Lost link\n\x00acctId=U1234567 DU9876543 ?t=tok-abc token=supersecret\r\n"
+            "Traceback (most recent call last):\n  File '/srv/app.py', line 1\n" + "z" * 400
+        )
+
+        def get_active_market_data_type(self) -> int:
+            return 3
+
+        async def ensure_connected(self) -> None:
+            return None
+
+    svc, _, _, _, _ = _make(tmp_path, broker_client=_LeakyBroker())
+    status = svc.get_status()
+    assert status.connection_state == "connection_lost"
+    assert status.connection_notice is not None
+    assert len(status.connection_notice) <= MAX_SAFE_MESSAGE_CHARS
+    for forbidden in (
+        "U1234567",
+        "DU9876543",
+        "tok-abc",
+        "supersecret",
+        "/srv/app.py",
+        "\n",
+        "\x00",
+    ):
+        assert forbidden not in status.connection_notice

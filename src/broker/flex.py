@@ -15,9 +15,8 @@ import xml.etree.ElementTree as ET
 from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
-from src.broker.client import SleepFn
 from src.core.config import LedgerSettings
 from src.core.exceptions import (
     ConfigurationError,
@@ -57,6 +56,7 @@ FLEX_API_VERSION = "3"
 FLEX_RETRY_ERROR_CODES: frozenset[str] = frozenset({"1018", "1019"})
 
 HttpFetchFn = Callable[[str], Awaitable[bytes]]
+SleepFn = Callable[[float], Awaitable[None]]
 FlexQuerySource = Literal["FLEX_ACTIVITY_365", "FLEX_MONTHLY", "FLEX_TRADE_CONF"]
 
 _MONTHS: dict[str, int] = {
@@ -124,6 +124,36 @@ def redact_flex_secrets(text: str, token: str | None = None) -> str:
         if cleaned:
             redacted = redacted.replace(cleaned, "[REDACTED]")
     return redacted
+
+
+MAX_SAFE_MESSAGE_CHARS: Final = 300
+_TRACEBACK_RE: Final = re.compile(
+    r"\bTraceback\s*\(most recent call last\):.*", re.IGNORECASE | re.DOTALL
+)
+_TOKEN_KV_QUOTED_RE: Final = re.compile(
+    r"\b(token|api_?key|secret|password|authorization)(\s*[:=]\s*)([\"'])[^\"']*\3",
+    re.IGNORECASE,
+)
+_TOKEN_KV_RE: Final = re.compile(
+    r"\b(token|api_?key|secret|password|authorization)(\s*[:=]\s*)([^\s,;>\"']+)",
+    re.IGNORECASE,
+)
+_BARE_IBKR_ACCT_RE: Final = re.compile(r"\b(?:DU|DF|U)\d{5,10}\b")
+_CONTROL_RE: Final = re.compile(r"[\x00-\x1f\x7f]+")
+_SPACE_RE: Final = re.compile(r"\s+")
+
+
+def sanitize_client_notice(text: str, *, max_chars: int = MAX_SAFE_MESSAGE_CHARS) -> str:
+    """Redact secrets/account IDs, strip tracebacks/controls, flatten to 1 line, and cap length."""
+    cleaned = _TRACEBACK_RE.sub("[REDACTED_TRACEBACK]", text)
+    cleaned = redact_flex_secrets(cleaned)
+    cleaned = _TOKEN_KV_QUOTED_RE.sub(r"\1\2\3[REDACTED]\3", cleaned)
+    cleaned = _TOKEN_KV_RE.sub(r"\1\2[REDACTED]", cleaned)
+    cleaned = _BARE_IBKR_ACCT_RE.sub("[REDACTED]", cleaned)
+    flat = _SPACE_RE.sub(" ", _CONTROL_RE.sub(" ", cleaned)).strip()
+    if len(flat) > max_chars:
+        flat = flat[: max_chars - 3].rstrip() + "..."
+    return flat
 
 
 async def _default_http_fetch(url: str, *, timeout_sec: float = 20.0) -> bytes:

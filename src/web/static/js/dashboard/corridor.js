@@ -1240,6 +1240,9 @@ export function startCorridorStream() {
 
   es.addEventListener("frame", function (ev) {
     if (!state.corridorStreaming) return;
+    if (!state.status || !state.status.connected) {
+      fetchStatus();
+    }
     try {
       var frame = JSON.parse(ev.data);
       applyCorridorFrame(frame, { mergeIntoChain: true });

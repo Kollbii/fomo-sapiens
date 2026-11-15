@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import logging
 import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
@@ -19,7 +21,7 @@ from src.core.config import IBKRSettings, Settings, StorageSettings
 from src.core.exceptions import GatewayConnectionError
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
-from tests.support.aio import noop_sleep, run_coro
+from tests.support.aio import noop_sleep, run_coro, run_virtual_loop
 from tests.support.ib_fakes import FakeEvent
 
 
@@ -182,6 +184,8 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert r_status.status_code == 200
                 st = r_status.json()
                 assert st["connected"] is False
+                assert st["connection_state"] == "offline"
+                assert st["connection_notice"] is None
                 assert st["port"] == 4001
                 assert st["market_data_mode"] == "DELAYED"
                 assert st["default_market_data_type"] == 3
@@ -440,7 +444,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115b"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115c"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -458,6 +462,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "panel-toggle-pill" in r_css.text
             assert ".badge--live" in r_css.text
             assert ".badge--amber" in r_css.text
+            assert ".badge--amber .badge-dot" in r_css.text
             assert ".badge--delayed" in r_css.text
             assert ".th-sort-btn" in r_css.text
             assert ".table-filter-row" in r_css.text
@@ -516,7 +521,11 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115b">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115c">' in html
+            assert "GATEWAY TIMEOUT \\u2022 SOCKET RESET" in r_js.text
+            assert "GATEWAY LINK LOST" in r_js.text
+            assert "timeout_reset" in r_js.text
+            assert "connection_lost" in r_js.text
             assert html.count('<option value="">Auto (Follow Walls)</option>') == 2
             assert 'id="collector-control"' not in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
@@ -1032,5 +1041,149 @@ def test_short_dte_refresh_display_isolation_and_zero_dte_chain_and_strategy(
             evals = r_strat.json()["evaluations"]
             assert len(evals) == 1
             assert all(0 <= leg["dte"] <= 29 for leg in evals[0]["legs"])
+
+    run_coro(_exercise())
+
+
+def test_status_exposes_connection_state_across_timeout_reconnect_and_disconnect(
+    tmp_path: Path,
+) -> None:
+    settings = Settings(
+        ibkr=IBKRSettings(request_timeout_sec=0.05),
+        storage=StorageSettings(),
+    )
+    repo = CSVRepository(settings.storage, root=tmp_path)
+    ts = datetime(2026, 11, 11, 15, 0, 0, tzinfo=UTC)
+    repo.save_snapshot(
+        "NVDA",
+        _seed_nvda_rows(ts),
+        range_pct=0.20,
+        strike_step=5.0,
+        requested_strike_step=5.0,
+    )
+    mock_ib = _MockIB(offline=False)
+    orig_qualify = mock_ib.qualifyContractsAsync
+    mode = {"next": "timeout"}
+
+    async def _controlled_qualify(*contracts: Any) -> list[Any]:
+        if mode["next"] == "timeout":
+            mode["next"] = "ok"
+            await asyncio.sleep(5.0)
+        if mode["next"] == "drop":
+            mode["next"] = "ok"
+            mock_ib._connected = False
+            mock_ib.errorEvent.emit(0, 1100, "Connectivity between IBKR and TWS lost", "")
+            raise ConnectionError("socket closed by peer")
+        return await orig_qualify(*contracts)
+
+    mock_ib.qualifyContractsAsync = _controlled_qualify  # type: ignore[method-assign]
+    client = IBKRBrokerClient(settings, ib_factory=lambda: mock_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        settings,
+        clock=lambda: datetime(2026, 11, 11, 16, 0, 0, tzinfo=UTC),
+        sleep=noop_sleep,
+    )
+    app = create_app(settings=settings, repo=repo, broker_client=client, fetcher=fetcher)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as http_client:
+                # 1. Initial offline state before any broker pull
+                st0 = (await http_client.get("/api/status")).json()
+                assert st0["connected"] is False
+                assert st0["connection_state"] == "offline"
+                assert st0["connection_notice"] is None
+
+                # 2. Timeout during refresh -> 503 GATEWAY_TIMEOUT & status becomes timeout_reset
+                r_timeout = await http_client.post(
+                    "/api/refresh",
+                    json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+                )
+                assert r_timeout.status_code == 503
+                assert r_timeout.json()["error_code"] == "GATEWAY_TIMEOUT"
+                st1 = (await http_client.get("/api/status")).json()
+                assert st1["connected"] is False
+                assert st1["connection_state"] == "timeout_reset"
+                assert isinstance(st1["connection_notice"], str)
+                assert "recycled" in st1["connection_notice"].lower()
+                assert "Traceback" not in st1["connection_notice"]
+
+                # 3. Subsequent successful refresh -> auto-reconnects & clears notice
+                r_ok = await http_client.post(
+                    "/api/refresh",
+                    json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+                )
+                assert r_ok.status_code == 200
+                st2 = (await http_client.get("/api/status")).json()
+                assert st2["connected"] is True
+                assert st2["connection_state"] == "connected"
+                assert st2["connection_notice"] is None
+
+                # 4. Mid-pull link loss -> 503 GATEWAY_OFFLINE & status becomes connection_lost
+                mode["next"] = "drop"
+                r_lost = await http_client.post(
+                    "/api/refresh",
+                    json={"ticker": "NVDA", "range_pct": 0.20, "strike_step": 5.0},
+                )
+                assert r_lost.status_code == 503
+                assert r_lost.json()["error_code"] == "GATEWAY_OFFLINE"
+                st3 = (await http_client.get("/api/status")).json()
+                assert st3["connected"] is False
+                assert st3["connection_state"] == "connection_lost"
+                assert isinstance(st3["connection_notice"], str)
+                assert "1100" in st3["connection_notice"]
+
+                # 5. Explicit disconnect clears diagnostics back to offline
+                app.state.service.broker_client.disconnect()
+                st4 = (await http_client.get("/api/status")).json()
+                assert st4["connected"] is False
+                assert st4["connection_state"] == "offline"
+                assert st4["connection_notice"] is None
+
+    run_virtual_loop(_exercise())
+
+
+def test_lifespan_configures_isolated_logging_and_closes_handlers_on_shutdown(
+    tmp_path: Path,
+) -> None:
+    root1 = tmp_path / "run_one"
+    root2 = tmp_path / "run_two"
+    settings = Settings(storage=StorageSettings())
+    repo1 = CSVRepository(settings.storage, root=root1)
+    client1 = IBKRBrokerClient(settings, ib_factory=lambda: _MockIB(offline=True))
+    app1 = create_app(settings=settings, repo=repo1, broker_client=client1)
+
+    def _analyzer_handlers() -> list[logging.Handler]:
+        return [h for h in logging.getLogger().handlers if h.get_name() == "analyzer"]
+
+    async def _exercise() -> None:
+        async with app1.router.lifespan_context(app1):
+            log_path1 = root1 / "data" / "logs" / "analyzer.log"
+            assert log_path1.is_file()
+            handlers = _analyzer_handlers()
+            assert len(handlers) == 2
+            for handler in handlers:
+                handler.flush()
+            assert "offline-first cache ready" in log_path1.read_text(encoding="utf-8")
+
+        # Shutdown flushed, removed, and closed all "analyzer" handlers (no Windows file lock)
+        assert _analyzer_handlers() == []
+        (root1 / "data" / "logs" / "analyzer.log").unlink()
+
+        # Subsequent create_app() writes cleanly to its own isolated tmp root
+        repo2 = CSVRepository(settings.storage, root=root2)
+        client2 = IBKRBrokerClient(settings, ib_factory=lambda: _MockIB(offline=True))
+        app2 = create_app(settings=settings, repo=repo2, broker_client=client2)
+        async with app2.router.lifespan_context(app2):
+            log_path2 = root2 / "data" / "logs" / "analyzer.log"
+            assert log_path2.is_file()
+            assert not (root1 / "data" / "logs" / "analyzer.log").exists()
+            assert len(_analyzer_handlers()) == 2
+
+        assert _analyzer_handlers() == []
 
     run_coro(_exercise())

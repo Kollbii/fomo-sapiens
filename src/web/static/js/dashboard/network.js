@@ -140,6 +140,8 @@ export async function fetchStatus(tickerOverride) {
   } catch (_err) {
     renderStatusBadges({
       connected: false,
+      connection_state: "offline",
+      connection_notice: null,
       host: bootstrap.ibkrHost || "127.0.0.1",
       port: bootstrap.ibkrPort || 4001,
       market_data_mode: configuredMarketDataMode(),
