@@ -7,6 +7,8 @@ milestones in git history.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-15
+
 ### Added
 - **Best Option screener (`#best-option-card`):** best strategy per watchlist ticker from cached complete snapshots (zero IBKR calls), with Best per ticker / Selected strategy / All combinations modes, sortable and filterable columns, EV/risk and POP, min credit / RoR / POP filters, a Columns menu, `Open in Strategy Lab`, and an opt-in `Live` checkbox that streams the top rows' legs (+/-1-strike re-picks, <= 88 option / <= 90 total lines, mutually exclusive with the Wall Corridor feed, never persisted). New routes `POST /api/screener/run`, `GET /api/screener/stream` (SSE), `POST /api/screener/stream/reallocate`, `POST /api/screener/stop`.
 - **Strategy Lab Bear Call / Bear Put presets and new risk metrics:** `BEAR_CALL_SPREAD`, `BEAR_PUT_SPREAD` (preset pills in Strategy Lab and the screener), `expected_return_on_risk_pct` (EV/risk) and `nearest_breakeven_distance_pct` in the risk metrics.
