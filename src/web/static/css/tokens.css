@@ -38,6 +38,8 @@ html[data-theme="print"] {
   --accent-atm-bg: rgba(17, 17, 17, 0.06);
   --corridor-itm-call-bg: rgba(15, 110, 79, 0.045);
   --corridor-itm-put-bg: rgba(168, 32, 32, 0.045);
+  --corridor-leg-buy-bg: rgba(15, 110, 79, 0.15);
+  --corridor-leg-sell-bg: rgba(168, 32, 32, 0.15);
   --plotly-bg: #FFFFFF;
   --plotly-grid: #E8E4DA;
   --plotly-ink: #111111;
@@ -69,6 +71,8 @@ html[data-theme="terminal"] {
   --accent-atm-bg: rgba(245, 158, 11, 0.10);
   --corridor-itm-call-bg: rgba(16, 185, 129, 0.065);
   --corridor-itm-put-bg: rgba(239, 68, 68, 0.065);
+  --corridor-leg-buy-bg: rgba(16, 185, 129, 0.18);
+  --corridor-leg-sell-bg: rgba(239, 68, 68, 0.18);
   --plotly-bg: #11161F;
   --plotly-grid: #1E2636;
   --plotly-ink: #EAECEF;

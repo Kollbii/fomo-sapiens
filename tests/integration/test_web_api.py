@@ -444,7 +444,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115c"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115d"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -521,7 +521,9 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115c">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115d">' in html
+            assert 'source === "CACHED_PREVIEW"' not in r_js.text
+            assert 'source !== "CACHED_PREVIEW"' not in r_js.text
             assert "GATEWAY TIMEOUT \\u2022 SOCKET RESET" in r_js.text
             assert "GATEWAY LINK LOST" in r_js.text
             assert "timeout_reset" in r_js.text
@@ -615,9 +617,17 @@ def test_dashboard_html_static_assets_and_csv_download(
                 "resolveGoverningExpiryInfo",
                 "resolveGoverningExpiry",
                 "resolveCorridorTargetExpiry",
+                "computeResolvedCorridorExpiry",
+                "resolveCorridorExpiryInfo",
                 "resolveStrategyTargetExpiry",
                 "formatAutoFollowLabel",
+                "formatCorridorAutoFollowLabel",
                 "syncAutoFollowOptionLabels",
+                "buildCorridorLegLookup",
+                "corridorLegSubscriptionSignature",
+                "reconcileCorridorFrameWithStrategy",
+                "syncCorridorWithStrategy",
+                "buildCorridorCellTooltip",
             ):
                 assert js_hook in r_js.text, f"Missing {js_hook} in dashboard modules"
 
@@ -669,6 +679,10 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".corridor-thead-groups" in r_css.text
             assert ".corridor-strike-cell" in r_css.text
             assert ".wall-badge-atm" in r_css.text
+            assert ".wall-badge-leg-buy" in r_css.text
+            assert ".wall-badge-leg-sell" in r_css.text
+            assert ".corridor-cell-leg-buy" in r_css.text
+            assert ".corridor-cell-leg-sell" in r_css.text
             assert ".corridor-side-itm" in r_css.text
             assert ".panel-card--strategy" in r_css.text
             assert ".chart-canvas--strategy" in r_css.text

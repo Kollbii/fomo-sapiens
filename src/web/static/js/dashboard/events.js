@@ -49,11 +49,10 @@ import {
   setActiveStrategyPresetUI,
 } from "./strategy_lab.js";
 import {
-  applyCorridorFrame,
-  buildLocalCorridorPreview,
   refreshCorridorQuotesOneShot,
   startCorridorStream,
   stopCorridorStream,
+  syncCorridorWithStrategy,
 } from "./corridor.js";
 import {
   loadChain,
@@ -193,19 +192,24 @@ export function bindEvents() {
     }
     if (ev && ev.target === dom.wallsDteSelect && state.chainData) {
       syncAutoFollowOptionLabels(state.chainData);
-      if (dom.corridorExpirySelect && !dom.corridorExpirySelect.value) {
-        if (state.corridorStreaming || state.corridorStreamSource) {
-          stopCorridorStream({ silent: true });
-        }
-        applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
-      }
-      if (
+      var willAutoBuild = Boolean(
         dom.strategyExpirySelect &&
-        !dom.strategyExpirySelect.value &&
-        state.strategyKind !== "CUSTOM" &&
-        (isStrategyAutoPopulateEnabled() || Boolean(state.strategyEvaluation))
-      ) {
+          !dom.strategyExpirySelect.value &&
+          state.strategyKind !== "CUSTOM" &&
+          (isStrategyAutoPopulateEnabled() || Boolean(state.strategyEvaluation))
+      );
+      if (willAutoBuild) {
         autoBuildStrategy(state.strategyKind, { silent: true });
+      } else if (
+        state.strategyKind !== "CUSTOM" &&
+        !state.strategyEvaluation &&
+        !state.strategyEvaluationDirty
+      ) {
+        state.strategyLegs = buildSeedLegsFromChain(state.chainData);
+        renderStrategyLegsTable();
+      }
+      if (!dom.corridorExpirySelect || !dom.corridorExpirySelect.value) {
+        syncCorridorWithStrategy();
       }
     }
   }
@@ -351,6 +355,7 @@ export function bindEvents() {
           dom.strategyRationale.textContent =
             "Custom leg builder active. Edit strikes/rights below and click Evaluate / Re-Price.";
         }
+        syncCorridorWithStrategy();
         return;
       }
       autoBuildStrategy(preset);
@@ -378,9 +383,11 @@ export function bindEvents() {
   if (dom.strategyExpirySelect) {
     dom.strategyExpirySelect.addEventListener("change", function () {
       if (!state.chainData) return;
+      syncAutoFollowOptionLabels(state.chainData);
       if (state.strategyKind !== "CUSTOM" || !state.strategyLegs.length) {
         autoBuildStrategy(state.strategyKind, { silent: true });
       }
+      syncCorridorWithStrategy();
     });
   }
 
@@ -436,7 +443,8 @@ export function bindEvents() {
       stopCorridorStream({ silent: true });
     }
     if (state.chainData) {
-      applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+      syncAutoFollowOptionLabels(state.chainData);
+      syncCorridorWithStrategy({ forcePreview: true });
     }
   }
 
@@ -468,8 +476,7 @@ export function bindEvents() {
         state.chainData &&
         state.strategyLegs.length &&
         state.corridorFrame &&
-        (state.corridorStreaming ||
-          (state.corridorFrame.mode !== "PREVIEW" && state.corridorFrame.source !== "CACHED_PREVIEW"))
+        (state.corridorStreaming || state.corridorFrame.mode !== "PREVIEW")
       ) {
         evaluateStrategyRequest({ silent: true });
       }

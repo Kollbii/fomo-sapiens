@@ -11,13 +11,14 @@ import {
   fmtInt,
   fmtMoney,
   fmtNum,
-  formatAutoFollowLabel,
+  formatCorridorAutoFollowLabel,
   formatExpiryIso,
   gatewayAddressLabel,
   resolveCorridorTargetExpiry,
   showBanner,
   snapDteValueToExpiries,
   sortedChainExpiries,
+  syncAutoFollowOptionLabels,
   themeVars,
 } from "./helpers.js";
 import {
@@ -87,12 +88,70 @@ export function syncCorridorDefaultsFromStatus() {
   updateCorridorSubsBadge(state.corridorFrame);
 }
 
-function corridorKey(expiry, strike, right) {
+export function corridorKey(expiry, strike, right) {
   return String(expiry) + "|" + Number(strike) + "|" + String(right).toUpperCase();
 }
 
 function corridorFixedKey(expiry, strike, right) {
   return String(expiry) + "|" + Number(strike).toFixed(4) + "|" + String(right).toUpperCase();
+}
+
+function normalizeCorridorLeg(leg) {
+  if (!leg || !leg.expiry || leg.strike === null || leg.strike === undefined || !leg.right) {
+    return null;
+  }
+  var expStr = String(leg.expiry).trim();
+  var strikeNum = Number(leg.strike);
+  var rightStr = String(leg.right).toUpperCase();
+  if (!expStr || !Number.isFinite(strikeNum) || (rightStr !== "C" && rightStr !== "P")) {
+    return null;
+  }
+  var rawSide = String(leg.side || "BUY").toUpperCase();
+  return {
+    side: rawSide === "SELL" ? "SELL" : "BUY",
+    right: rightStr,
+    expiry: expStr,
+    strike: strikeNum,
+    qty: Math.max(1, parseInt(leg.qty, 10) || 1),
+  };
+}
+
+export function buildCorridorLegLookup(legs) {
+  var list = Array.isArray(legs) ? legs : state.strategyLegs || [];
+  var lookup = {};
+  for (var i = 0; i < list.length; i++) {
+    var norm = normalizeCorridorLeg(list[i]);
+    if (!norm) continue;
+    var key = corridorKey(norm.expiry, norm.strike, norm.right);
+    if (!lookup[key]) lookup[key] = [];
+    lookup[key].push({
+      idx: i,
+      side: norm.side,
+      right: norm.right,
+      expiry: norm.expiry,
+      strike: norm.strike,
+      qty: norm.qty,
+    });
+  }
+  return lookup;
+}
+
+export function corridorLegSubscriptionSignature(data) {
+  var targetExp = data ? resolveCorridorTargetExpiry(data) || "" : "";
+  var defWin = getDefaultWindowStrikes();
+  var win = dom.corridorWindowSelect
+    ? Math.max(1, parseInt(dom.corridorWindowSelect.value, 10) || defWin)
+    : Number(state.corridorWindow || defWin);
+  var keySet = {};
+  var legs = Array.isArray(state.strategyLegs) ? state.strategyLegs : [];
+  for (var i = 0; i < legs.length; i++) {
+    var norm = normalizeCorridorLeg(legs[i]);
+    if (!norm) continue;
+    var k = corridorKey(norm.expiry, norm.strike, norm.right);
+    keySet[k] = true;
+  }
+  var sortedKeys = Object.keys(keySet).sort();
+  return [targetExp, String(win), sortedKeys.join(",")].join("::");
 }
 
 function fmtStrike(val) {
@@ -111,13 +170,17 @@ function fmtStrike(val) {
 
 function corridorPriorityLegsList() {
   if (!state.strategyLegs || !state.strategyLegs.length) return [];
-  return state.strategyLegs.map(function (l) {
-    return {
-      expiry: String(l.expiry),
-      strike: Number(l.strike),
-      right: String(l.right).toUpperCase(),
-    };
-  });
+  var seen = {};
+  var out = [];
+  for (var i = 0; i < state.strategyLegs.length; i++) {
+    var norm = normalizeCorridorLeg(state.strategyLegs[i]);
+    if (!norm) continue;
+    var k = corridorKey(norm.expiry, norm.strike, norm.right);
+    if (seen[k]) continue;
+    seen[k] = true;
+    out.push({ expiry: norm.expiry, strike: norm.strike, right: norm.right });
+  }
+  return out;
 }
 
 function corridorPriorityLegsParam() {
@@ -538,7 +601,83 @@ function resolveCorridorSideFlash(q, fixedKey, frame, changedSet, nextPrevMids) 
   return "";
 }
 
-function buildCorridorCellTooltip(q, row, sideLabel, roles) {
+function formatSideLegRoles(sideLegs, sideLabel, hasFallbackLeg) {
+  var out = [];
+  if (Array.isArray(sideLegs) && sideLegs.length) {
+    for (var i = 0; i < sideLegs.length; i++) {
+      var leg = sideLegs[i];
+      var qty = Math.max(1, parseInt(leg.qty, 10) || 1);
+      out.push("STRATEGY LEG: " + leg.side + " " + sideLabel + " x" + qty);
+    }
+  } else if (hasFallbackLeg) {
+    out.push("STRATEGY LEG: " + sideLabel);
+  }
+  return out;
+}
+
+function corridorSideLegClasses(legs, hasFallbackLeg) {
+  if ((!legs || !legs.length) && !hasFallbackLeg) return "";
+  var hasBuy = false;
+  var hasSell = false;
+  if (legs && legs.length) {
+    for (var i = 0; i < legs.length; i++) {
+      if (legs[i].side === "BUY") hasBuy = true;
+      else if (legs[i].side === "SELL") hasSell = true;
+    }
+  }
+  var cls = " corridor-cell-leg";
+  if (hasBuy) cls += " corridor-cell-leg-buy";
+  if (hasSell) cls += " corridor-cell-leg-sell";
+  return cls;
+}
+
+function buildSideBadgeEntries(legs, rightLabel, hasFallback) {
+  if (!legs || !legs.length) {
+    if (!hasFallback) return [];
+    return [{ cls: "wall-badge wall-badge-strategy", text: "LEG " + rightLabel }];
+  }
+  var bySide = {};
+  var sideOrder = [];
+  for (var i = 0; i < legs.length; i++) {
+    var side = legs[i].side === "SELL" ? "SELL" : "BUY";
+    var qty = Math.max(1, parseInt(legs[i].qty, 10) || 1);
+    if (!bySide[side]) {
+      bySide[side] = 0;
+      sideOrder.push(side);
+    }
+    bySide[side] += qty;
+  }
+  return sideOrder.map(function (side) {
+    var totalQty = bySide[side];
+    var sideCls = side === "SELL" ? "wall-badge-leg-sell" : "wall-badge-leg-buy";
+    var prefix = totalQty > 1 ? totalQty + "\u00D7 " : "";
+    return {
+      cls: "wall-badge wall-badge-strategy " + sideCls,
+      text: prefix + side + " " + rightLabel,
+    };
+  });
+}
+
+function buildCorridorLegBadgesHtml(callLegs, putLegs, hasCallFallback, hasPutFallback) {
+  var entries = []
+    .concat(buildSideBadgeEntries(callLegs, "C", hasCallFallback))
+    .concat(buildSideBadgeEntries(putLegs, "P", hasPutFallback));
+  var html = "";
+  for (var i = 0; i < entries.length; i++) {
+    html +=
+      '<span class="' +
+      escapeHtml(entries[i].cls) +
+      '">' +
+      escapeHtml(entries[i].text) +
+      "</span>";
+  }
+  return html;
+}
+
+export function buildCorridorCellTooltip(q, row, sideLabel, roles, sideLegs) {
+  var baseRoles = Array.isArray(roles) ? roles.slice() : [];
+  var hasFallbackLeg = Boolean(q && (q.is_strategy_leg || q.priority_tier === "PRIORITY_STRATEGY"));
+  var legRoles = formatSideLegRoles(sideLegs, sideLabel, hasFallbackLeg);
   if (!q) {
     return (
       "No " +
@@ -548,7 +687,8 @@ function buildCorridorCellTooltip(q, row, sideLabel, roles) {
       " (" +
       row.dte +
       "d) $" +
-      fmtStrike(row.strike)
+      fmtStrike(row.strike) +
+      (legRoles.length ? "\n" + legRoles.join(", ") : "")
     );
   }
   var bidStr = q.bid !== null && q.bid !== undefined ? fmtNum(q.bid, 2) : "\u2014";
@@ -563,7 +703,8 @@ function buildCorridorCellTooltip(q, row, sideLabel, roles) {
     q.open_interest !== null && q.open_interest !== undefined ? fmtInt(q.open_interest) : "\u2014";
   var ivStr = q.iv !== null && q.iv !== undefined ? fmtNum(Number(q.iv) * 100, 1) + "%" : "\u2014";
   var dStr = q.delta !== null && q.delta !== undefined ? fmtNum(q.delta, 2) : "\u2014";
-  var roleStr = roles.length ? roles.join(", ") : q.zone || "CORRIDOR";
+  var combinedRoles = baseRoles.concat(legRoles);
+  var roleStr = combinedRoles.length ? combinedRoles.join(", ") : q.zone || "CORRIDOR";
   return [
     (state.ticker ? state.ticker + " " : "") +
       formatExpiryIso(q.expiry) +
@@ -594,7 +735,8 @@ export function renderCorridorTable(frame) {
     return;
   }
 
-  var primaryExpiry = findDominantExpiry(frame.quotes) || String(frame.target_expiry || "");
+  var primaryExpiry = String(frame.target_expiry || "") || findDominantExpiry(frame.quotes);
+  var legLookup = buildCorridorLegLookup(state.strategyLegs);
   var changedSet = {};
   if (Array.isArray(frame.changed_keys)) {
     for (var ck = 0; ck < frame.changed_keys.length; ck++) {
@@ -687,9 +829,14 @@ export function renderCorridorTable(frame) {
           frame.primary_call_wall !== undefined &&
           Math.abs(row.strike - Number(frame.primary_call_wall)) < 1e-4)
     );
+    var callLegs = legLookup[corridorKey(row.expiry, row.strike, "C")] || [];
+    var putLegs = legLookup[corridorKey(row.expiry, row.strike, "P")] || [];
+    var hasCallFallback =
+      !callLegs.length && Boolean(c && (c.is_strategy_leg || c.priority_tier === "PRIORITY_STRATEGY"));
+    var hasPutFallback =
+      !putLegs.length && Boolean(p && (p.is_strategy_leg || p.priority_tier === "PRIORITY_STRATEGY"));
     var isLeg = Boolean(
-      (c && (c.is_strategy_leg || c.priority_tier === "PRIORITY_STRATEGY")) ||
-        (p && (p.is_strategy_leg || p.priority_tier === "PRIORITY_STRATEGY"))
+      callLegs.length || putLegs.length || hasCallFallback || hasPutFallback
     );
     var isAtm = row.key === atmRowKey;
 
@@ -699,19 +846,20 @@ export function renderCorridorTable(frame) {
     if (isAtm) rowClasses.push("corridor-row-atm");
     if (isLeg) rowClasses.push("corridor-row-strategy");
 
-    var roles = [];
-    if (isPutWall) roles.push("PUT WALL");
-    if (isCallWall) roles.push("CALL WALL");
-    if (isAtm) roles.push("ATM");
-    if (isLeg) roles.push("STRATEGY LEG");
+    var wallRoles = [];
+    if (isPutWall) wallRoles.push("PUT WALL");
+    if (isCallWall) wallRoles.push("CALL WALL");
+    if (isAtm) wallRoles.push("ATM");
 
     var callItm = spot !== null && spot > row.strike;
     var putItm = spot !== null && spot < row.strike;
-    var callClsBase = "num corridor-call-cell" + (callItm ? " corridor-side-itm" : "");
-    var putClsBase = "num corridor-put-cell" + (putItm ? " corridor-side-itm" : "");
+    var callLegCls = corridorSideLegClasses(callLegs, hasCallFallback);
+    var putLegCls = corridorSideLegClasses(putLegs, hasPutFallback);
+    var callClsBase = "num corridor-call-cell" + (callItm ? " corridor-side-itm" : "") + callLegCls;
+    var putClsBase = "num corridor-put-cell" + (putItm ? " corridor-side-itm" : "") + putLegCls;
 
-    var callTipAttr = escapeHtml(buildCorridorCellTooltip(c, row, "CALL", roles));
-    var putTipAttr = escapeHtml(buildCorridorCellTooltip(p, row, "PUT", roles));
+    var callTipAttr = escapeHtml(buildCorridorCellTooltip(c, row, "CALL", wallRoles, callLegs));
+    var putTipAttr = escapeHtml(buildCorridorCellTooltip(p, row, "PUT", wallRoles, putLegs));
 
     var cIv = c && c.iv !== null && c.iv !== undefined ? fmtNum(Number(c.iv) * 100, 1) + "%" : "\u2014";
     var cDelta = c && c.delta !== null && c.delta !== undefined ? fmtNum(c.delta, 2) : "\u2014";
@@ -729,20 +877,23 @@ export function renderCorridorTable(frame) {
     if (isPutWall) badgesHtml += '<span class="wall-badge wall-badge-put">PUT WALL</span>';
     if (isCallWall) badgesHtml += '<span class="wall-badge wall-badge-call">CALL WALL</span>';
     if (isAtm) badgesHtml += '<span class="wall-badge wall-badge-atm">ATM</span>';
-    if (isLeg) badgesHtml += '<span class="wall-badge wall-badge-strategy">LEG</span>';
+    badgesHtml += buildCorridorLegBadgesHtml(callLegs, putLegs, hasCallFallback, hasPutFallback);
 
     var offExpHtml =
       row.expiry !== primaryExpiry
         ? '<span class="corridor-off-expiry-tag">\u2022 ' + escapeHtml(String(row.dte)) + "d</span>"
         : "";
 
+    var strikeRoles = wallRoles
+      .concat(formatSideLegRoles(callLegs, "CALL", hasCallFallback))
+      .concat(formatSideLegRoles(putLegs, "PUT", hasPutFallback));
     var strikeTitle = escapeHtml(
       formatExpiryIso(row.expiry) +
         " (" +
         row.dte +
         "d) \u2022 $" +
         fmtStrike(row.strike) +
-        (roles.length ? " \u2022 " + roles.join(" / ") : "")
+        (strikeRoles.length ? " \u2022 " + strikeRoles.join(" / ") : "")
     );
 
     html.push(
@@ -840,6 +991,103 @@ export function renderCorridorTable(frame) {
   state.corridorPrevMids = nextPrevMids;
 }
 
+function resolveCorridorChartLegs(frame, chartExp) {
+  var quoteByKey = {};
+  var dteByExp = {};
+  for (var i = 0; i < frame.quotes.length; i++) {
+    var fq = frame.quotes[i];
+    var fk = corridorKey(fq.expiry, fq.strike, fq.right);
+    quoteByKey[fk] = fq;
+    if (fq.expiry && fq.dte !== null && fq.dte !== undefined) {
+      dteByExp[String(fq.expiry)] = Number(fq.dte);
+    }
+  }
+  if (state.chainData && Array.isArray(state.chainData.contracts)) {
+    for (var ci = 0; ci < state.chainData.contracts.length; ci++) {
+      var cr = state.chainData.contracts[ci];
+      if (cr.expiry && !Object.prototype.hasOwnProperty.call(dteByExp, String(cr.expiry))) {
+        dteByExp[String(cr.expiry)] = Number(cr.dte);
+      }
+    }
+  }
+
+  var resolved = [];
+  if (Array.isArray(state.strategyLegs) && state.strategyLegs.length) {
+    for (var l = 0; l < state.strategyLegs.length; l++) {
+      var norm = normalizeCorridorLeg(state.strategyLegs[l]);
+      if (!norm) continue;
+      var q = quoteByKey[corridorKey(norm.expiry, norm.strike, norm.right)] || null;
+      var legDte =
+        q && q.dte !== null && q.dte !== undefined && Number.isFinite(Number(q.dte))
+          ? Number(q.dte)
+          : Object.prototype.hasOwnProperty.call(dteByExp, norm.expiry)
+            ? dteByExp[norm.expiry]
+            : null;
+      resolved.push({
+        side: norm.side,
+        right: norm.right,
+        expiry: norm.expiry,
+        strike: norm.strike,
+        qty: norm.qty,
+        quote: q,
+        dte: legDte,
+        isOffExpiry: Boolean(chartExp && norm.expiry !== String(chartExp)),
+      });
+    }
+    return resolved;
+  }
+
+  for (var qi = 0; qi < frame.quotes.length; qi++) {
+    var fqLeg = frame.quotes[qi];
+    if (!(fqLeg && (fqLeg.is_strategy_leg || fqLeg.priority_tier === "PRIORITY_STRATEGY"))) {
+      continue;
+    }
+    var fExp = fqLeg.expiry ? String(fqLeg.expiry).trim() : "";
+    var fRight = fqLeg.right ? String(fqLeg.right).toUpperCase() : "";
+    var fStrike = Number(fqLeg.strike);
+    if (!fExp || !Number.isFinite(fStrike) || (fRight !== "C" && fRight !== "P")) continue;
+    resolved.push({
+      side: "",
+      right: fRight,
+      expiry: fExp,
+      strike: fStrike,
+      qty: 1,
+      quote: fqLeg,
+      dte:
+        fqLeg.dte !== null && fqLeg.dte !== undefined && Number.isFinite(Number(fqLeg.dte))
+          ? Number(fqLeg.dte)
+          : null,
+      isOffExpiry: Boolean(chartExp && fExp !== String(chartExp)),
+    });
+  }
+  return resolved;
+}
+
+function formatCorridorLegMarkerHover(leg) {
+  var sidePrefix = leg.side ? leg.side + " " : "LEG ";
+  var qtySuffix = leg.qty > 1 ? " x" + leg.qty : "";
+  var dteTxt = leg.dte !== null && leg.dte !== undefined ? " (" + leg.dte + "d)" : "";
+  var lines = [
+    "<b>" +
+      escapeHtml(sidePrefix + leg.right + qtySuffix) +
+      "</b> $" +
+      escapeHtml(fmtStrike(leg.strike)),
+    "Expiry: " + escapeHtml(formatExpiryIso(leg.expiry) + dteTxt),
+  ];
+  var q = leg.quote;
+  if (q) {
+    var bidStr = q.bid !== null && q.bid !== undefined ? fmtNum(q.bid, 2) : "\u2014";
+    var askStr = q.ask !== null && q.ask !== undefined ? fmtNum(q.ask, 2) : "\u2014";
+    var midStr = q.mid !== null && q.mid !== undefined ? "$" + fmtNum(q.mid, 2) : "\u2014";
+    lines.push("Bid/Ask: " + escapeHtml(bidStr + " / " + askStr));
+    lines.push("Mid: " + escapeHtml(midStr));
+    if (q.delta !== null && q.delta !== undefined) {
+      lines.push("\u0394: " + escapeHtml(fmtNum(q.delta, 2)));
+    }
+  }
+  return lines.join("<br>");
+}
+
 export function renderCorridorChart(frame, t) {
   var el = dom.corridorChartEl;
   if (!el || typeof window.Plotly === "undefined") return;
@@ -897,7 +1145,86 @@ export function renderCorridorChart(frame, t) {
     }
   }
 
-  if (!callX.length && !putX.length) {
+  function anchorMidForLeg(leg) {
+    var lq = leg.quote;
+    if (lq && lq.mid !== null && lq.mid !== undefined && Number.isFinite(Number(lq.mid))) {
+      return Number(lq.mid);
+    }
+    var primaryX = leg.right === "P" ? putX : callX;
+    var primaryY = leg.right === "P" ? putY : callY;
+    var secondaryX = leg.right === "P" ? callX : putX;
+    var secondaryY = leg.right === "P" ? callY : putY;
+    var pools = [
+      { xs: primaryX, ys: primaryY },
+      { xs: secondaryX, ys: secondaryY },
+    ];
+    var bestY = null;
+    var bestDist = Infinity;
+    for (var pi = 0; pi < pools.length; pi++) {
+      var xs = pools[pi].xs;
+      var ys = pools[pi].ys;
+      for (var xi = 0; xi < xs.length; xi++) {
+        var d = Math.abs(xs[xi] - leg.strike);
+        if (d < bestDist) {
+          bestDist = d;
+          bestY = ys[xi];
+        }
+      }
+      if (bestDist < 1e-6 && bestY !== null) return bestY;
+    }
+    return bestY !== null && Number.isFinite(bestY) ? bestY : 0;
+  }
+
+  var chartLegs = resolveCorridorChartLegs(frame, chartExp);
+  var onExpX = [];
+  var onExpY = [];
+  var onExpSymbols = [];
+  var onExpColors = [];
+  var onExpHover = [];
+  var offExpX = [];
+  var offExpY = [];
+  var offExpSymbols = [];
+  var offExpColors = [];
+  var offExpHover = [];
+  var markerGroupMap = {};
+
+  for (var li = 0; li < chartLegs.length; li++) {
+    var leg = chartLegs[li];
+    var gk = leg.strike.toFixed(4) + "|" + (leg.isOffExpiry ? "1" : "0");
+    if (!markerGroupMap[gk]) {
+      markerGroupMap[gk] = {
+        strike: leg.strike,
+        isOffExpiry: leg.isOffExpiry,
+        legs: [],
+      };
+    }
+    markerGroupMap[gk].legs.push(leg);
+
+    var legY = anchorMidForLeg(leg);
+    var legColor =
+      leg.side === "SELL"
+        ? chartTheme.put
+        : leg.side === "BUY"
+          ? chartTheme.call
+          : chartTheme.warn;
+    if (leg.isOffExpiry) {
+      offExpX.push(leg.strike);
+      offExpY.push(legY);
+      offExpSymbols.push("diamond-open");
+      offExpColors.push(legColor);
+      offExpHover.push(formatCorridorLegMarkerHover(leg));
+    } else {
+      onExpX.push(leg.strike);
+      onExpY.push(legY);
+      onExpSymbols.push(
+        leg.side === "SELL" ? "triangle-down" : leg.side === "BUY" ? "triangle-up" : "circle"
+      );
+      onExpColors.push(legColor);
+      onExpHover.push(formatCorridorLegMarkerHover(leg));
+    }
+  }
+
+  if (!callX.length && !putX.length && !onExpX.length && !offExpX.length) {
     renderCorridorEmptyPlaceholder();
     return;
   }
@@ -952,6 +1279,40 @@ export function renderCorridorChart(frame, t) {
       hovertemplate: "%{text}<extra></extra>",
     });
   }
+  if (onExpX.length) {
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: "Strategy Legs",
+      x: onExpX,
+      y: onExpY,
+      marker: {
+        symbol: onExpSymbols,
+        color: onExpColors,
+        size: 12,
+        line: { color: chartTheme.ink, width: 1.8 },
+      },
+      text: onExpHover,
+      hovertemplate: "%{text}<extra></extra>",
+    });
+  }
+  if (offExpX.length) {
+    traces.push({
+      type: "scatter",
+      mode: "markers",
+      name: "Strategy Legs (Other Exp)",
+      x: offExpX,
+      y: offExpY,
+      marker: {
+        symbol: offExpSymbols,
+        color: offExpColors,
+        size: 12,
+        line: { color: offExpColors, width: 2.2 },
+      },
+      text: offExpHover,
+      hovertemplate: "%{text}<extra></extra>",
+    });
+  }
 
   var markers = [
     makeVerticalMarker(frame.underlying_price, "SPOT $" + fmtNum(frame.underlying_price, 2), chartTheme.ink, 0.99, "dash", chartTheme),
@@ -964,6 +1325,70 @@ export function renderCorridorChart(frame, t) {
   if (frame.primary_call_wall) {
     markers.push(
       makeVerticalMarker(frame.primary_call_wall, "CW $" + fmtNum(frame.primary_call_wall, 0), chartTheme.call, 0.75, "dot", chartTheme)
+    );
+  }
+
+  var markerGroups = Object.keys(markerGroupMap).map(function (k) {
+    return markerGroupMap[k];
+  });
+  markerGroups.sort(function (a, b) {
+    if (a.strike !== b.strike) return a.strike - b.strike;
+    return Number(a.isOffExpiry) - Number(b.isOffExpiry);
+  });
+
+  for (var gi = 0; gi < markerGroups.length; gi++) {
+    var grp = markerGroups[gi];
+    var partsByKey = {};
+    var partOrder = [];
+    var hasBuy = false;
+    var hasSell = false;
+    var hasUnknown = false;
+    var dteTags = {};
+
+    for (var gli = 0; gli < grp.legs.length; gli++) {
+      var gLeg = grp.legs[gli];
+      if (gLeg.side === "BUY") hasBuy = true;
+      else if (gLeg.side === "SELL") hasSell = true;
+      else hasUnknown = true;
+
+      var pk = (gLeg.side || "LEG") + "|" + gLeg.right;
+      if (!partsByKey[pk]) {
+        partsByKey[pk] = { side: gLeg.side, right: gLeg.right, qty: 0 };
+        partOrder.push(pk);
+      }
+      partsByKey[pk].qty += gLeg.qty;
+      if (grp.isOffExpiry) {
+        if (gLeg.dte !== null && gLeg.dte !== undefined) {
+          dteTags[gLeg.dte + "d"] = true;
+        } else if (gLeg.expiry) {
+          dteTags[formatExpiryIso(gLeg.expiry)] = true;
+        }
+      }
+    }
+
+    var legDesc = partOrder
+      .map(function (pk) {
+        var entry = partsByKey[pk];
+        var prefix = entry.qty > 1 ? entry.qty + "\u00D7 " : "";
+        return prefix + (entry.side ? entry.side + " " : "LEG ") + entry.right;
+      })
+      .join(" + ");
+    var dteList = Object.keys(dteTags);
+    var markerLabel = escapeHtml(
+      legDesc +
+        " $" +
+        fmtStrike(grp.strike) +
+        (grp.isOffExpiry && dteList.length ? " (" + dteList.join(", ") + ")" : "")
+    );
+    var markerColor =
+      hasBuy && !hasSell && !hasUnknown
+        ? chartTheme.call
+        : hasSell && !hasBuy && !hasUnknown
+          ? chartTheme.put
+          : chartTheme.warn;
+    var yPos = Number((0.62 - (gi % 5) * 0.1).toFixed(2));
+    markers.push(
+      makeVerticalMarker(grp.strike, markerLabel, markerColor, yPos, "dashdot", chartTheme)
     );
   }
 
@@ -1063,6 +1488,141 @@ export function applyCorridorFrame(frame, options) {
   }
 }
 
+function copyLiveQuoteOverlay(srcQuote, dstQuote) {
+  if (!srcQuote || !dstQuote) return dstQuote;
+  var out = Object.assign({}, dstQuote);
+  var fields = [
+    "option_conid",
+    "bid",
+    "ask",
+    "mid",
+    "last",
+    "close",
+    "spread_pct",
+    "volume",
+    "open_interest",
+    "iv",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+    "greeks_source",
+    "updated_ts_utc",
+  ];
+  for (var i = 0; i < fields.length; i++) {
+    var f = fields[i];
+    if (srcQuote[f] !== undefined) {
+      out[f] = srcQuote[f];
+    }
+  }
+  return out;
+}
+
+export function reconcileCorridorFrameWithStrategy(prevFrame, preview, strategyLegs) {
+  if (!preview) return prevFrame || null;
+  var legLookup = buildCorridorLegLookup(strategyLegs);
+  if (!prevFrame || prevFrame.mode === "PREVIEW" || !Array.isArray(prevFrame.quotes)) {
+    return preview;
+  }
+
+  var prevByKey = {};
+  for (var i = 0; i < prevFrame.quotes.length; i++) {
+    var pq = prevFrame.quotes[i];
+    if (!pq) continue;
+    prevByKey[corridorKey(pq.expiry, pq.strike, pq.right)] = pq;
+  }
+
+  var sameTargetExpiry = String(prevFrame.target_expiry || "") === String(preview.target_expiry || "");
+  var allCovered = sameTargetExpiry && preview.quotes.length > 0;
+  if (allCovered) {
+    for (var j = 0; j < preview.quotes.length; j++) {
+      var q = preview.quotes[j];
+      if (!prevByKey[corridorKey(q.expiry, q.strike, q.right)]) {
+        allCovered = false;
+        break;
+      }
+    }
+  }
+
+  var mergedQuotes = [];
+  for (var k = 0; k < preview.quotes.length; k++) {
+    var pqNext = preview.quotes[k];
+    var pKey = corridorKey(pqNext.expiry, pqNext.strike, pqNext.right);
+    var prevQ = prevByKey[pKey];
+    var baseQ = prevQ ? copyLiveQuoteOverlay(prevQ, pqNext) : Object.assign({}, pqNext);
+    baseQ.is_strategy_leg = Boolean(legLookup[pKey]);
+    baseQ.zone = pqNext.zone;
+    baseQ.is_put_wall = pqNext.is_put_wall;
+    baseQ.is_call_wall = pqNext.is_call_wall;
+    mergedQuotes.push(baseQ);
+  }
+
+  if (allCovered) {
+    return Object.assign({}, prevFrame, {
+      window_strikes: preview.window_strikes,
+      max_contracts: preview.max_contracts,
+      quotes: mergedQuotes,
+    });
+  }
+
+  return Object.assign({}, preview, { quotes: mergedQuotes });
+}
+
+export function syncCorridorWithStrategy(options) {
+  var opts = options || {};
+  if (!state.chainData) return null;
+  syncAutoFollowOptionLabels(state.chainData);
+
+  if (state.corridorStreaming) {
+    var frame = state.corridorFrame;
+    if (frame && Array.isArray(frame.quotes)) {
+      var legLookup = buildCorridorLegLookup(state.strategyLegs);
+      for (var i = 0; i < frame.quotes.length; i++) {
+        var q = frame.quotes[i];
+        if (!q) continue;
+        q.is_strategy_leg = Boolean(legLookup[corridorKey(q.expiry, q.strike, q.right)]);
+      }
+      renderCorridorTable(frame);
+      if (isPanelVisible("corridor")) {
+        renderCorridorChart(frame, themeVars());
+      }
+    }
+
+    var nextSig = corridorLegSubscriptionSignature(state.chainData);
+    if (nextSig === state.corridorStreamSignature) {
+      if (state.corridorStreamSyncTimer) {
+        clearTimeout(state.corridorStreamSyncTimer);
+        state.corridorStreamSyncTimer = null;
+      }
+      return frame || null;
+    }
+
+    if (state.corridorStreamSyncTimer) {
+      clearTimeout(state.corridorStreamSyncTimer);
+      state.corridorStreamSyncTimer = null;
+    }
+    state.corridorStreamSyncTimer = setTimeout(function () {
+      state.corridorStreamSyncTimer = null;
+      if (
+        state.corridorStreaming &&
+        state.chainData &&
+        corridorLegSubscriptionSignature(state.chainData) !== state.corridorStreamSignature
+      ) {
+        startCorridorStream();
+      }
+    }, 400);
+    return frame || null;
+  }
+
+  var preview = buildLocalCorridorPreview(state.chainData);
+  var nextFrame =
+    !state.corridorFrame || state.corridorFrame.mode === "PREVIEW" || opts.forcePreview
+      ? preview
+      : reconcileCorridorFrameWithStrategy(state.corridorFrame, preview, state.strategyLegs);
+  applyCorridorFrame(nextFrame, { mergeIntoChain: false });
+  return nextFrame;
+}
+
 export function syncCorridorFromChain(data) {
   if (state.corridorStreaming || state.corridorStreamSource) {
     stopCorridorStream({ silent: true });
@@ -1075,7 +1635,7 @@ export function syncCorridorFromChain(data) {
     dom.corridorExpirySelect.innerHTML = "";
     var autoOpt = document.createElement("option");
     autoOpt.value = "";
-    autoOpt.textContent = formatAutoFollowLabel(data);
+    autoOpt.textContent = formatCorridorAutoFollowLabel(data);
     dom.corridorExpirySelect.appendChild(autoOpt);
     var exps = sortedChainExpiries(data);
     var snappedCorridorExp = snapDteValueToExpiries(prev, exps, {
@@ -1111,8 +1671,8 @@ export async function refreshCorridorQuotesOneShot() {
   var defWin = getDefaultWindowStrikes();
   var maxContracts = getDefaultMaxContracts();
   var winVal = dom.corridorWindowSelect
-    ? parseInt(dom.corridorWindowSelect.value, 10) || defWin
-    : defWin;
+    ? Math.max(1, parseInt(dom.corridorWindowSelect.value, 10) || defWin)
+    : Number(state.corridorWindow || defWin);
   var expVal = resolveCorridorTargetExpiry(state.chainData);
   try {
     var res = await apiJson("/api/corridor/quotes", {
@@ -1179,8 +1739,34 @@ export async function refreshCorridorQuotesOneShot() {
   }
 }
 
+function postCorridorStop() {
+  var prior = state.corridorStopPromise;
+  var runStop = function () {
+    try {
+      return Promise.resolve(
+        window.fetch("/api/corridor/stop", { method: "POST", keepalive: true })
+      ).catch(function () {});
+    } catch (_err) {
+      return Promise.resolve();
+    }
+  };
+  var p = (prior ? prior.then(runStop, runStop) : runStop()).finally(function () {
+    if (state.corridorStopPromise === p) {
+      state.corridorStopPromise = null;
+    }
+  });
+  state.corridorStopPromise = p;
+  return p;
+}
+
 export function stopCorridorStream(options) {
   var opts = options || {};
+  if (state.corridorStreamSyncTimer) {
+    clearTimeout(state.corridorStreamSyncTimer);
+    state.corridorStreamSyncTimer = null;
+  }
+  state.corridorStreamEpoch += 1;
+  state.corridorStreamSignature = "";
   var wasActive = Boolean(state.corridorStreaming || state.corridorStreamSource);
   state.corridorStreaming = false;
   if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = false;
@@ -1193,11 +1779,7 @@ export function stopCorridorStream(options) {
     state.corridorStreamSource = null;
   }
   if (wasActive && !opts.skipRemoteStop) {
-    try {
-      window.fetch("/api/corridor/stop", { method: "POST", keepalive: true }).catch(function () {});
-    } catch (_err) {
-      /* ignore */
-    }
+    postCorridorStop();
   }
   updateCorridorStatusUI(state.corridorFrame, opts.modeLabel || null);
   if (wasActive) {
@@ -1208,19 +1790,49 @@ export function stopCorridorStream(options) {
   }
 }
 
-export function startCorridorStream() {
+export async function startCorridorStream() {
   if (!state.chainData) {
     if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = false;
     showBanner("warn", "Load or refresh an option snapshot before enabling Live Streaming.");
     return;
   }
-  stopCorridorStream({ silent: true });
+  if (state.corridorStreamSyncTimer) {
+    clearTimeout(state.corridorStreamSyncTimer);
+    state.corridorStreamSyncTimer = null;
+  }
 
+  var myEpoch = ++state.corridorStreamEpoch;
+  var wasActive = Boolean(state.corridorStreaming || state.corridorStreamSource);
+  if (state.corridorStreamSource) {
+    try {
+      state.corridorStreamSource.close();
+    } catch (_err) {
+      /* ignore */
+    }
+    state.corridorStreamSource = null;
+  }
+
+  state.corridorStreaming = true;
+  state.corridorStreamSignature = corridorLegSubscriptionSignature(state.chainData);
+  if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = true;
+  updateCorridorStatusUI(state.corridorFrame, "CONNECTING STREAM...");
+
+  if (wasActive) {
+    postCorridorStop();
+  }
+  while (state.corridorStopPromise) {
+    await state.corridorStopPromise;
+    if (!state.corridorStreaming || state.corridorStreamEpoch !== myEpoch || !state.chainData) {
+      return;
+    }
+  }
+
+  state.corridorStreamSignature = corridorLegSubscriptionSignature(state.chainData);
   var defWin = getDefaultWindowStrikes();
   var maxContracts = getDefaultMaxContracts();
   var winVal = dom.corridorWindowSelect
-    ? parseInt(dom.corridorWindowSelect.value, 10) || defWin
-    : defWin;
+    ? Math.max(1, parseInt(dom.corridorWindowSelect.value, 10) || defWin)
+    : Number(state.corridorWindow || defWin);
   var expVal = resolveCorridorTargetExpiry(state.chainData) || "";
   var params = new URLSearchParams();
   if (state.snapshotId) params.set("snapshot_id", state.snapshotId);
@@ -1231,15 +1843,17 @@ export function startCorridorStream() {
   if (legParam) params.set("priority_legs", legParam);
 
   var url = "/api/corridor/stream/" + encodeURIComponent(state.ticker) + "?" + params.toString();
-  state.corridorStreaming = true;
-  if (dom.corridorStreamToggle) dom.corridorStreamToggle.checked = true;
-  updateCorridorStatusUI(state.corridorFrame, "CONNECTING STREAM...");
-
   var es = new window.EventSource(url);
   state.corridorStreamSource = es;
 
   es.addEventListener("frame", function (ev) {
-    if (!state.corridorStreaming) return;
+    if (
+      !state.corridorStreaming ||
+      state.corridorStreamSource !== es ||
+      state.corridorStreamEpoch !== myEpoch
+    ) {
+      return;
+    }
     if (!state.status || !state.status.connected) {
       fetchStatus();
     }
@@ -1252,6 +1866,7 @@ export function startCorridorStream() {
   });
 
   es.addEventListener("error", function (ev) {
+    if (state.corridorStreamSource !== es || state.corridorStreamEpoch !== myEpoch) return;
     if (ev && ev.data) {
       var msg = "IBKR Gateway error during live corridor stream.";
       try {
@@ -1267,7 +1882,13 @@ export function startCorridorStream() {
   });
 
   es.onerror = function () {
-    if (!state.corridorStreaming) return;
+    if (
+      !state.corridorStreaming ||
+      state.corridorStreamSource !== es ||
+      state.corridorStreamEpoch !== myEpoch
+    ) {
+      return;
+    }
     stopCorridorStream({ silent: true, modeLabel: "STREAM DISCONNECTED" });
     fetchStatus();
     showBanner(

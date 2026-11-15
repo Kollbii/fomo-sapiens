@@ -482,8 +482,101 @@ function resolveTileTargetExpiry(selectEl, data) {
   return resolveGoverningExpiry(data);
 }
 
+export function computeResolvedCorridorExpiry(data, options) {
+  var exps = sortedChainExpiries(data);
+  if (!exps.length) return null;
+  var opts = options || {};
+  var dteByExp = {};
+  for (var i = 0; i < exps.length; i++) {
+    dteByExp[exps[i].expiry] = exps[i].dte;
+  }
+
+  var wallsInfo = resolveGoverningExpiryInfo(data, opts.wallsDte);
+  var wallsExpiry = wallsInfo ? wallsInfo.expiry : exps[0].expiry;
+  var wallsDte = wallsInfo ? wallsInfo.dte : exps[0].dte;
+
+  var strategyExplicit = String(opts.strategyExpiry || "").trim();
+  var legs = Array.isArray(opts.strategyLegs) ? opts.strategyLegs : [];
+
+  var autoTarget = null;
+  if (strategyExplicit && Object.prototype.hasOwnProperty.call(dteByExp, strategyExplicit)) {
+    autoTarget = {
+      expiry: strategyExplicit,
+      dte: dteByExp[strategyExplicit],
+      source: "strategy",
+    };
+  } else {
+    var validLegCounts = {};
+    var hasValidLeg = false;
+    for (var j = 0; j < legs.length; j++) {
+      var legExp = legs[j] && legs[j].expiry ? String(legs[j].expiry).trim() : "";
+      if (!legExp || !Object.prototype.hasOwnProperty.call(dteByExp, legExp)) continue;
+      hasValidLeg = true;
+      validLegCounts[legExp] = (validLegCounts[legExp] || 0) + 1;
+    }
+    if (hasValidLeg) {
+      if (wallsExpiry && Object.prototype.hasOwnProperty.call(validLegCounts, wallsExpiry)) {
+        autoTarget = {
+          expiry: wallsExpiry,
+          dte: dteByExp[wallsExpiry],
+          source: "walls",
+        };
+      } else {
+        var legExps = Object.keys(validLegCounts);
+        legExps.sort(function (a, b) {
+          if (validLegCounts[b] !== validLegCounts[a]) {
+            return validLegCounts[b] - validLegCounts[a];
+          }
+          if (dteByExp[a] !== dteByExp[b]) {
+            return dteByExp[a] - dteByExp[b];
+          }
+          return a.localeCompare(b);
+        });
+        var chosen = legExps[0];
+        autoTarget = {
+          expiry: chosen,
+          dte: dteByExp[chosen],
+          source: "strategy",
+        };
+      }
+    } else {
+      autoTarget = {
+        expiry: wallsExpiry,
+        dte: wallsDte,
+        source: "walls",
+      };
+    }
+  }
+
+  var corridorExplicit = String(opts.corridorExpiry || "").trim();
+  if (corridorExplicit && Object.prototype.hasOwnProperty.call(dteByExp, corridorExplicit)) {
+    return {
+      expiry: corridorExplicit,
+      dte: dteByExp[corridorExplicit],
+      source: "manual",
+      autoTarget: autoTarget,
+    };
+  }
+  return {
+    expiry: autoTarget.expiry,
+    dte: autoTarget.dte,
+    source: autoTarget.source,
+    autoTarget: autoTarget,
+  };
+}
+
+export function resolveCorridorExpiryInfo(data) {
+  return computeResolvedCorridorExpiry(data, {
+    corridorExpiry: dom.corridorExpirySelect ? dom.corridorExpirySelect.value : "",
+    strategyExpiry: dom.strategyExpirySelect ? dom.strategyExpirySelect.value : "",
+    strategyLegs: state.strategyLegs,
+    wallsDte: dom.wallsDteSelect ? dom.wallsDteSelect.value : "ALL",
+  });
+}
+
 export function resolveCorridorTargetExpiry(data) {
-  return resolveTileTargetExpiry(dom.corridorExpirySelect, data);
+  var info = resolveCorridorExpiryInfo(data);
+  return info ? info.expiry : null;
 }
 
 export function resolveStrategyTargetExpiry(data) {
@@ -495,17 +588,33 @@ export function formatAutoFollowLabel(data) {
   return info ? "Auto (Follow Walls \u2022 " + info.dte + "d)" : "Auto (Follow Walls)";
 }
 
+export function formatCorridorAutoFollowLabel(data) {
+  var info = resolveCorridorExpiryInfo(data);
+  var auto = info && info.autoTarget ? info.autoTarget : info;
+  if (!auto) return "Auto (Follow Walls)";
+  var targetName = auto.source === "strategy" ? "Follow Strategy" : "Follow Walls";
+  return "Auto (" + targetName + " \u2022 " + auto.dte + "d)";
+}
+
 export function syncAutoFollowOptionLabels(data) {
-  var labelText = formatAutoFollowLabel(data);
-  [dom.corridorExpirySelect, dom.strategyExpirySelect].forEach(function (sel) {
-    if (!sel || !sel.options) return;
-    for (var i = 0; i < sel.options.length; i++) {
-      if (sel.options[i].value === "") {
-        sel.options[i].textContent = labelText;
+  var strategyLabel = formatAutoFollowLabel(data);
+  var corridorLabel = formatCorridorAutoFollowLabel(data);
+  if (dom.strategyExpirySelect && dom.strategyExpirySelect.options) {
+    for (var i = 0; i < dom.strategyExpirySelect.options.length; i++) {
+      if (dom.strategyExpirySelect.options[i].value === "") {
+        dom.strategyExpirySelect.options[i].textContent = strategyLabel;
         break;
       }
     }
-  });
+  }
+  if (dom.corridorExpirySelect && dom.corridorExpirySelect.options) {
+    for (var j = 0; j < dom.corridorExpirySelect.options.length; j++) {
+      if (dom.corridorExpirySelect.options[j].value === "") {
+        dom.corridorExpirySelect.options[j].textContent = corridorLabel;
+        break;
+      }
+    }
+  }
 }
 
 export function buildActivePullScopeText() {

@@ -18,7 +18,7 @@ import {
   setActiveStrategyPresetUI,
 } from "./strategy_lab.js";
 import { applyPanelVisibility } from "./panels.js";
-import { stopCorridorStream } from "./corridor.js";
+import { stopCorridorStream, syncCorridorWithStrategy } from "./corridor.js";
 
 // ------------------------------------------------------------------ Constants
 var PANEL_ID = "best_option";
@@ -1508,6 +1508,7 @@ async function openInStrategyLab(rowId) {
   });
   setActiveStrategyPresetUI(base.strategy_kind);
   renderStrategyLegsTable();
+  syncCorridorWithStrategy();
   await evaluateStrategyRequest({ silent: false });
   var card = document.querySelector('.chart-grid .panel-card[data-panel-id="strategy"]');
   if (card && card.scrollIntoView) card.scrollIntoView({ behavior: "smooth", block: "start" });

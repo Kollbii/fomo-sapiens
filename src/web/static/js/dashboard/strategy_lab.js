@@ -29,8 +29,7 @@ import {
   isPanelVisible,
 } from "./panels.js";
 import {
-  applyCorridorFrame,
-  buildLocalCorridorPreview,
+  syncCorridorWithStrategy,
 } from "./corridor.js";
 import {
   apiJson,
@@ -322,7 +321,8 @@ function markStrategyEvaluationDirty() {
   syncStrategyActionButtons();
 }
 
-export function resetStrategyEvaluationUI(keepChainLegs) {
+export function resetStrategyEvaluationUI(keepChainLegs, options) {
+  var opts = options || {};
   state.strategyEvaluation = null;
   state.strategyEvaluationDirty = false;
   state.strategyPendingEvaluate = null;
@@ -352,6 +352,9 @@ export function resetStrategyEvaluationUI(keepChainLegs) {
   }
   renderStrategyLegsTable();
   renderStrategyEmptyPlaceholder();
+  if (!opts.skipCorridorSync && state.chainData) {
+    syncCorridorWithStrategy();
+  }
 }
 
 export function syncStrategySelectors(data) {
@@ -406,7 +409,7 @@ export function syncStrategySelectors(data) {
   if (!sameTicker && state.strategyKind === "CUSTOM") {
     setActiveStrategyPresetUI("BULL_PUT_SPREAD");
   }
-  resetStrategyEvaluationUI(false);
+  resetStrategyEvaluationUI(false, { skipCorridorSync: true });
 }
 
 export function renderStrategyLegsTable() {
@@ -462,6 +465,7 @@ export function renderStrategyLegsTable() {
         setActiveStrategyPresetUI("CUSTOM");
         markStrategyEvaluationDirty();
         renderStrategyLegsTable();
+        syncCorridorWithStrategy();
       });
       tdSide.appendChild(selSide);
       tr.appendChild(tdSide);
@@ -488,6 +492,7 @@ export function renderStrategyLegsTable() {
         setActiveStrategyPresetUI("CUSTOM");
         markStrategyEvaluationDirty();
         renderStrategyLegsTable();
+        syncCorridorWithStrategy();
       });
       tdRight.appendChild(selRight);
       tr.appendChild(tdRight);
@@ -511,6 +516,7 @@ export function renderStrategyLegsTable() {
         setActiveStrategyPresetUI("CUSTOM");
         markStrategyEvaluationDirty();
         renderStrategyLegsTable();
+        syncCorridorWithStrategy();
       });
       tdExp.appendChild(selExp);
       tr.appendChild(tdExp);
@@ -536,6 +542,7 @@ export function renderStrategyLegsTable() {
         setActiveStrategyPresetUI("CUSTOM");
         markStrategyEvaluationDirty();
         renderStrategyLegsTable();
+        syncCorridorWithStrategy();
       });
       tdStrike.appendChild(selStrike);
       tr.appendChild(tdStrike);
@@ -556,6 +563,7 @@ export function renderStrategyLegsTable() {
           state.strategyLegs[idx].qty = Math.min(100, parsed);
           setActiveStrategyPresetUI("CUSTOM");
           markStrategyEvaluationDirty();
+          syncCorridorWithStrategy();
         }
       });
       inpQty.addEventListener("change", function () {
@@ -564,6 +572,7 @@ export function renderStrategyLegsTable() {
         state.strategyLegs[idx].qty = v;
         setActiveStrategyPresetUI("CUSTOM");
         markStrategyEvaluationDirty();
+        syncCorridorWithStrategy();
       });
       tdQty.appendChild(inpQty);
       tr.appendChild(tdQty);
@@ -615,6 +624,7 @@ export function renderStrategyLegsTable() {
           markStrategyEvaluationDirty();
         }
         renderStrategyLegsTable();
+        syncCorridorWithStrategy();
       });
       tdDel.appendChild(delBtn);
       tr.appendChild(tdDel);
@@ -783,8 +793,8 @@ function renderStrategyEvaluation(ev) {
         : "Strategy evaluated.";
   }
 
-  if (state.corridorFrame && state.corridorFrame.source === "CACHED_PREVIEW" && state.chainData) {
-    applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+  if (state.chainData) {
+    syncCorridorWithStrategy();
   }
   if (isPanelVisible("strategy")) {
     renderStrategyPayoffChart(ev, themeVars());
@@ -1149,6 +1159,7 @@ export function addCustomStrategyLegRow() {
   setActiveStrategyPresetUI("CUSTOM");
   markStrategyEvaluationDirty();
   renderStrategyLegsTable();
+  syncCorridorWithStrategy();
 }
 
 export function addSpecificStrategyLeg(expiry, right, strike) {
@@ -1179,8 +1190,8 @@ export function addSpecificStrategyLeg(expiry, right, strike) {
   setActiveStrategyPresetUI("CUSTOM");
   markStrategyEvaluationDirty();
   renderStrategyLegsTable();
-  if (state.corridorFrame && state.corridorFrame.source === "CACHED_PREVIEW") {
-    applyCorridorFrame(buildLocalCorridorPreview(state.chainData), { mergeIntoChain: false });
+  if (state.chainData) {
+    syncCorridorWithStrategy();
   }
   if (state.strategyEvaluation || isStrategyAutoPopulateEnabled()) {
     evaluateStrategyRequest({ silent: true });
