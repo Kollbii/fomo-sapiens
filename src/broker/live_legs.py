@@ -407,12 +407,10 @@ class LiveLegQuoteService:
         contracts: list[Any] = [*spot_contracts, *(contract_from_spec(o) for o in options)]
         missing = [i for i, c in enumerate(contracts) if int(getattr(c, "conId", 0) or 0) <= 0]
         if missing:
-            qualified = list(
-                await self.client.run_stage(
-                    f"live screener contract qualification ({len(missing)} contracts)",
-                    self.client.ib.qualifyContractsAsync(*(contracts[i] for i in missing)),
-                )
-                or []
+            qualified = await self.client.qualify_contracts(
+                [contracts[i] for i in missing],
+                stage_prefix="live screener contract qualification",
+                sleep=self.sleep,
             )
             if len(qualified) == len(missing):
                 for idx, contract in zip(missing, qualified, strict=True):

@@ -11,6 +11,7 @@ from src.core.config import (
     PROJECT_ROOT,
     CorridorSettings,
     LedgerSettings,
+    OptionsChainSettings,
     PaperTrackerSettings,
     Settings,
     StorageSettings,
@@ -81,12 +82,13 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.watchlist.hardcoded_tickers == SEED_WATCHLIST
     assert s.watchlist.default_ticker == "NVDA"
     assert s.watchlist.max_size == 20
+    assert s.watchlist.batch_inter_ticker_cooldown_sec == 1.5
     assert s.options_chain.max_contracts_per_page == 80
     assert s.options_chain.dte_min == 30
     assert s.options_chain.dte_max == 120
     assert s.options_chain.default_strike_step is None
     assert s.options_chain.prefetch_exact_strikes is True
-    assert s.options_chain.contract_details_timeout_sec == 5.0
+    assert s.options_chain.contract_details_timeout_sec == 15.0
     assert s.options_chain.contract_details_cooldown_sec == 0.10
     assert s.options_chain.contract_details_cache_ttl_sec == 900.0
     assert s.corridor.default_window_strikes == 10
@@ -355,7 +357,22 @@ def test_watchlist_settings_defaults_max_size_bounds_and_seed_cap(tmp_path: Path
     assert wl.hardcoded_tickers == DEFAULT_WATCHLIST
     assert wl.default_ticker == "NVDA"
     assert wl.max_size == 20
+    assert wl.batch_inter_ticker_cooldown_sec == 1.5
+    assert OptionsChainSettings().contract_details_timeout_sec == 15.0
     assert load_settings(tmp_path / "nope.yaml", tmp_path / "nope.env").watchlist == wl
+
+    assert (
+        WatchlistSettings(batch_inter_ticker_cooldown_sec=0.0).batch_inter_ticker_cooldown_sec
+        == 0.0
+    )
+    assert (
+        WatchlistSettings(batch_inter_ticker_cooldown_sec=30.0).batch_inter_ticker_cooldown_sec
+        == 30.0
+    )
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_inter_ticker_cooldown_sec=-0.1)
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_inter_ticker_cooldown_sec=30.1)
 
     assert WatchlistSettings(hardcoded_tickers=("NVDA",), max_size=1).max_size == 1
     assert WatchlistSettings(max_size=50).max_size == 50

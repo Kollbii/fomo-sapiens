@@ -154,6 +154,8 @@ class WatchlistSettings(_StrictModel):
     max_size: int = Field(default=20, ge=1, le=WATCHLIST_MAX_SIZE_LIMIT)
     # Per-ticker wall-clock cap inside a batch refresh; exceeding it stops the batch (`aborted`).
     batch_ticker_timeout_sec: float = Field(default=240.0, ge=30.0, le=1800.0)
+    # Inter-ticker cooldown inside a batch refresh to give IB Gateway pacing slots time to recover.
+    batch_inter_ticker_cooldown_sec: float = Field(default=1.5, ge=0.0, le=30.0)
 
     @model_validator(mode="after")
     def _check_seed_fits_max_size(self) -> WatchlistSettings:
@@ -181,7 +183,7 @@ class OptionsChainSettings(_StrictModel):
     page_poll_interval_sec: float = Field(default=0.25, gt=0)
     inter_page_cooldown_sec: float = Field(default=0.35, ge=0)
     prefetch_exact_strikes: bool = True
-    contract_details_timeout_sec: float = Field(default=5.0, gt=0)
+    contract_details_timeout_sec: float = Field(default=15.0, gt=0)
     contract_details_cooldown_sec: float = Field(default=0.10, ge=0)
     contract_details_cache_ttl_sec: float = Field(default=900.0, ge=0)
 

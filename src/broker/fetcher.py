@@ -14,6 +14,7 @@ from typing import Any, Literal
 from ib_async import Option, Stock
 
 from src.broker.client import (
+    QUALIFY_CHUNK_SIZE,
     IBKRBrokerClient,
     SleepFn,
     market_data_type_label,
@@ -357,7 +358,7 @@ class PagedOptionChainFetcher:
         )
 
     async def qualify_option_contracts(self, candidates: Sequence[Any]) -> list[Any]:
-        """Qualify any un-qualified `Option` contracts in micro-batches (`<= 80` per call)."""
+        """Qualify un-qualified `Option` contracts in bounded micro-batches (`<= 10` per call)."""
         if not candidates:
             raise OptionChainFetchError("No candidate option contracts to qualify")
 
@@ -371,24 +372,19 @@ class PagedOptionChainFetcher:
 
         extra_qualified: list[Any] = []
         if unqualified_items:
-            pages = paginate_contracts(
-                unqualified_items, max_per_page=self.max_contracts_per_page, max_pages=None
+            raw_batch = [contract for _, contract in unqualified_items]
+            res = await self.client.qualify_contracts(
+                raw_batch,
+                stage_prefix="contract qualification",
+                chunk_size=min(QUALIFY_CHUNK_SIZE, self.max_contracts_per_page),
+                sleep=self.sleep,
             )
-            for batch in pages:
-                raw_batch = [contract for _, contract in batch]
-                res = list(
-                    await self.client.run_stage(
-                        f"contract qualification ({len(raw_batch)} contracts)",
-                        self.client.ib.qualifyContractsAsync(*raw_batch),
-                    )
-                    or []
-                )
-                if len(res) == len(batch):
-                    for (orig_idx, _), item in zip(batch, res, strict=True):
-                        if _is_qualified_contract(item):
-                            qualified_by_idx[orig_idx] = item
-                else:
-                    extra_qualified.extend(item for item in res if _is_qualified_contract(item))
+            if len(res) == len(unqualified_items):
+                for (orig_idx, _), item in zip(unqualified_items, res, strict=True):
+                    if _is_qualified_contract(item):
+                        qualified_by_idx[orig_idx] = item
+            else:
+                extra_qualified.extend(item for item in res if _is_qualified_contract(item))
 
         qualified = [
             qualified_by_idx[idx] for idx in range(len(candidates)) if idx in qualified_by_idx

@@ -46,6 +46,7 @@ from src.broker.corridor import (
     select_wall_corridor,
 )
 from src.broker.fetcher import ChainFetchProgress, FetchResult, PagedOptionChainFetcher
+from src.broker.flex import sanitize_client_notice
 from src.broker.live_legs import LiveLegQuoteService
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
@@ -423,8 +424,22 @@ class AnalyzerService:
         avail_steps = list(caps[0]) if caps else list(oc.allowed_strike_steps)
         avail_ranges = list(caps[1]) if caps else list(oc.allowed_range_pcts)
         ledger_status = self.ledger.get_ledger_status()
+        conn_state_raw = getattr(self.broker_client, "connection_state", None)
+        conn_state: Literal["connected", "timeout_reset", "connection_lost", "offline"] = (
+            conn_state_raw
+            if conn_state_raw in ("connected", "timeout_reset", "connection_lost", "offline")
+            else ("connected" if self.broker_client.is_connected else "offline")
+        )
+        raw_notice = getattr(self.broker_client, "connection_notice", None)
+        conn_notice = (
+            (sanitize_client_notice(raw_notice) or None)
+            if isinstance(raw_notice, str) and raw_notice.strip()
+            else None
+        )
         return GatewayStatusResponse(
             connected=self.broker_client.is_connected,
+            connection_state=conn_state,
+            connection_notice=conn_notice,
             host=ibkr.host,
             port=ibkr.port,
             client_id=ibkr.client_id,

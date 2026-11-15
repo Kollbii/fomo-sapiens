@@ -44,6 +44,7 @@ watchlist:
   custom_ticker_regex: "^[A-Z]{1,5}$"
   max_size: 20           # Server-persisted watchlist cap (data/watchlist.json); 1..50, >= len(hardcoded_tickers)
   batch_ticker_timeout_sec: 240.0  # Batch per-ticker cap (s); exceeding it saves finished pages + stops the batch; 30..1800
+  batch_inter_ticker_cooldown_sec: 1.5  # Cooldown (s) between consecutive tickers in a batch refresh; 0..30
 
 options_chain:
   dte_min: 30
@@ -72,7 +73,7 @@ options_chain:
   page_poll_interval_sec: 0.25
   inter_page_cooldown_sec: 0.35
   prefetch_exact_strikes: true
-  contract_details_timeout_sec: 5.0
+  contract_details_timeout_sec: 15.0
   contract_details_cooldown_sec: 0.10
   contract_details_cache_ttl_sec: 900.0
 

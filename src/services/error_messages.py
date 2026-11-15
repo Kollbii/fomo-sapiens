@@ -11,10 +11,11 @@ Callers log the original exception server-side.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Final
 
+from src.broker.flex import MAX_SAFE_MESSAGE_CHARS as MAX_SAFE_MESSAGE_CHARS
+from src.broker.flex import sanitize_client_notice
 from src.core.config import IBKRSettings
 from src.core.exceptions import (
     AnalyzerError,
@@ -44,7 +45,6 @@ GENERIC_ERROR_CODE: Final = "INTERNAL_ERROR"
 GATEWAY_TIMEOUT_CODE: Final = "GATEWAY_TIMEOUT"
 """`GatewayTimeoutError`: the local socket may be up while the Gateway lost its IBKR upstream."""
 GENERIC_ERROR_MESSAGE: Final = "Unexpected internal error; details were logged on the server."
-MAX_SAFE_MESSAGE_CHARS: Final = 300
 
 # Most specific first: the first `isinstance` match wins.
 _DOMAIN_CODES: Final[tuple[tuple[type[AnalyzerError], str], ...]] = (
@@ -70,9 +70,6 @@ _DOMAIN_CODES: Final[tuple[tuple[type[AnalyzerError], str], ...]] = (
     (RefreshBusyError, "REFRESH_BUSY"),
 )
 
-_CONTROL_RE: Final = re.compile(r"[\x00-\x1f\x7f]+")
-_SPACE_RE: Final = re.compile(r"\s+")
-
 
 @dataclass(frozen=True, slots=True)
 class SafeError:
@@ -83,10 +80,7 @@ class SafeError:
 
 
 def _single_line(text: str) -> str:
-    flat = _SPACE_RE.sub(" ", _CONTROL_RE.sub(" ", text)).strip()
-    if len(flat) > MAX_SAFE_MESSAGE_CHARS:
-        flat = flat[: MAX_SAFE_MESSAGE_CHARS - 3].rstrip() + "..."
-    return flat
+    return sanitize_client_notice(text)
 
 
 def describe_error(exc: BaseException, *, ibkr: IBKRSettings | None = None) -> SafeError:

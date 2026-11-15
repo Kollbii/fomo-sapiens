@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from ib_async import Option, OptionComputation
 
-from src.broker.client import IBKRBrokerClient
+from src.broker.client import QUALIFY_CHUNK_PAUSE_SEC, QUALIFY_CHUNK_SIZE, IBKRBrokerClient
 from src.broker.fetcher import (
     DELAYED_GENERIC_TICKS,
     LIVE_OPRA_GENERIC_TICKS,
@@ -800,7 +800,12 @@ def test_upstream_loss_mid_page_fails_fast_and_keeps_finished_pages() -> None:
         polls.append(sec)
 
     fake_ib.ticker_factory = _factory
-    settings = _small_page_settings()
+    settings = Settings(
+        options_chain=OptionsChainSettings(
+            max_contracts_per_page=6,
+            page_poll_interval_sec=0.17,
+        )
+    )
     client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
     fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=_rec_sleep)
     progress = ChainFetchProgress()
@@ -885,5 +890,61 @@ def test_stage_timeout_in_fetch_raises_gateway_timeout_error_with_cleanup() -> N
         )
     assert progress.plan is not None  # plan kept for metadata, but no page finished
     assert fetcher.build_partial_result(progress) is None
-    assert client.is_connected
+    assert not client.is_connected
+    assert client.connection_state == "timeout_reset"
+    assert "contract qualification (6 contracts)" in (client.connection_notice or "")
     _assert_every_line_cancelled(fake_ib)
+
+
+def test_qualify_option_contracts_chunks_above_ten_with_pacing() -> None:
+    fake_ib = FakeChainIB()
+    market_date = date(2026, 11, 11)
+    exps = [(market_date + timedelta(days=37)).strftime("%Y%m%d")]
+    strikes = [125.0, 130.0, 135.0, 140.0, 145.0, 150.0, 155.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+    opt_batch_sizes: list[int] = []
+    sleeps: list[float] = []
+    orig_qualify = fake_ib.qualifyContractsAsync
+
+    async def _track_qualify(*contracts: Any) -> list[Any]:
+        if contracts and getattr(contracts[0], "secType", "") == "OPT":
+            opt_batch_sizes.append(len(contracts))
+        return await orig_qualify(*contracts)
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+
+    fake_ib.qualifyContractsAsync = _track_qualify  # type: ignore[method-assign]
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=139.9, ask=140.1, last=140.0, close=139.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=5.0,
+            ask=5.4,
+            last=5.2,
+            close=5.1,
+            volume=20,
+            callOpenInterest=100,
+            putOpenInterest=100,
+            modelGreeks=None,
+        )
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        clock=lambda: datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC),
+        sleep=_rec_sleep,
+    )
+    res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    assert opt_batch_sizes == [QUALIFY_CHUNK_SIZE, 4]
+    assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
+    assert len(res.rows) == 14

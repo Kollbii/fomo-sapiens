@@ -13,6 +13,7 @@ from typing import Any, Literal, NoReturn, TypeVar
 
 from ib_async import IB
 
+from src.broker.flex import sanitize_client_notice
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
     ConfigurationError,
@@ -51,6 +52,11 @@ MARKET_DATA_TYPE_LABELS: dict[int, str] = {
     3: "Delayed",
     4: "Delayed-Frozen",
 }
+
+#: Max contracts sent in one `ib.qualifyContractsAsync` call to avoid Gateway pacing lockups.
+QUALIFY_CHUNK_SIZE = 10
+#: Pacing pause (seconds) between consecutive `qualify_contracts` micro-batches.
+QUALIFY_CHUNK_PAUSE_SEC = 0.25
 
 
 def market_data_type_label(data_type: int) -> str:
@@ -115,6 +121,52 @@ def _consume_task_outcome(task: asyncio.Future[Any]) -> None:
         task.exception()
 
 
+def _contract_match_key(contract: Any) -> tuple[str, str, str, float, str]:
+    """Build a matching key to align partial qualification responses back to input chunks."""
+    raw_strike = getattr(contract, "strike", 0.0) or 0.0
+    try:
+        strike = round(float(raw_strike), 6)
+    except (TypeError, ValueError):
+        strike = 0.0
+    return (
+        str(getattr(contract, "secType", "") or "").upper(),
+        str(getattr(contract, "symbol", "") or "").upper(),
+        str(getattr(contract, "lastTradeDateOrContractMonth", "") or ""),
+        strike,
+        str(getattr(contract, "right", "") or "").upper(),
+    )
+
+
+def _is_usable_contract(item: Any) -> bool:
+    """True when `qualifyContractsAsync` returned a concrete contract instead of None/list."""
+    return item is not None and not isinstance(item, (list, tuple, set, dict, str, bytes))
+
+
+def _merge_chunk_results(chunk: Sequence[Any], res: Sequence[Any]) -> list[Any]:
+    """Preserve positional alignment on a qualification chunk even on partial/empty responses."""
+    if len(res) == len(chunk):
+        return [
+            item if _is_usable_contract(item) else original
+            for original, item in zip(chunk, res, strict=True)
+        ]
+    merged = list(chunk)
+    qualified_by_id: dict[int, Any] = {}
+    qualified_by_key: dict[tuple[str, str, str, float, str], Any] = {}
+    for item in res:
+        if not _is_usable_contract(item):
+            continue
+        qualified_by_id[id(item)] = item
+        qualified_by_key.setdefault(_contract_match_key(item), item)
+    for idx, original in enumerate(chunk):
+        if id(original) in qualified_by_id:
+            merged[idx] = qualified_by_id[id(original)]
+            continue
+        matched = qualified_by_key.get(_contract_match_key(original))
+        if matched is not None:
+            merged[idx] = matched
+    return merged
+
+
 class IBKRBrokerClient:
     """Owns the single guarded `ib_async.IB` instance. Feature modules never create `IB()`."""
 
@@ -156,6 +208,8 @@ class IBKRBrokerClient:
         self._pacing_warning = False
         self._was_connected = False
         self._last_disconnect_notice: str | None = None
+        self._last_disconnect_reason: Literal["timeout", "connection_lost"] | None = None
+        self._last_timeout_notice: str | None = None
         self._connect_lock = asyncio.Lock()
         # Upstream-loss generation counter (bumped by every DISCONNECT_CODES notice), the
         # generation at which the current link-watch scope began, and abort futures of the
@@ -173,6 +227,54 @@ class IBKRBrokerClient:
     def was_connected(self) -> bool:
         return self._was_connected
 
+    @property
+    def connection_state(
+        self,
+    ) -> Literal["connected", "timeout_reset", "connection_lost", "offline"]:
+        """Return current socket lifecycle state for status and UI banners."""
+        if self.is_connected:
+            return "connected"
+        if self._last_disconnect_reason == "timeout":
+            return "timeout_reset"
+        if self._last_disconnect_reason == "connection_lost":
+            return "connection_lost"
+        return "offline"
+
+    @property
+    def connection_notice(self) -> str | None:
+        """Return a non-sensitive notice describing the latest timeout or disconnect."""
+        state = self.connection_state
+        if state == "timeout_reset":
+            return (
+                sanitize_client_notice(self._last_timeout_notice) or None
+                if self._last_timeout_notice
+                else None
+            )
+        if state == "connection_lost":
+            return (
+                sanitize_client_notice(self._last_disconnect_notice) or None
+                if self._last_disconnect_notice
+                else None
+            )
+        return None
+
+    def _clear_disconnect_state(self) -> None:
+        self._last_disconnect_reason = None
+        self._last_timeout_notice = None
+        self._last_disconnect_notice = None
+
+    def reset_after_timeout(self, *, stage: str) -> None:
+        """Recycle the local Gateway socket after a timeout so orphaned queues drop."""
+        self._last_disconnect_reason = "timeout"
+        self._last_timeout_notice = sanitize_client_notice(
+            f"Socket recycled after Gateway time-out during {stage}; auto-reconnects on next pull"
+        )
+        logger.warning(
+            "Recycling IBKR Gateway socket after timeout during %s; next pull will reconnect",
+            stage,
+        )
+        self._safe_disconnect()
+
     async def ensure_connected(self) -> None:
         """Connect (once) to `IBKR_HOST:IBKR_PORT` and apply the primary market data type.
 
@@ -181,10 +283,10 @@ class IBKRBrokerClient:
         updates, which this read-only analytics app must never query.
         """
         async with self._connect_lock:
+            self._clear_disconnect_state()
             if self.is_connected:
                 self._was_connected = True
                 return
-            self._last_disconnect_notice = None
             cfg = self.settings.ibkr
             self.ib.wrapper.clientId = cfg.client_id
             try:
@@ -207,12 +309,14 @@ class IBKRBrokerClient:
         """Raise `GatewayConnectionError` if an active Gateway socket dropped mid-batch."""
         if self._was_connected and not self.is_connected:
             detail = f" ({self._last_disconnect_notice})" if self._last_disconnect_notice else ""
+            self._last_disconnect_reason = "connection_lost"
             self._safe_disconnect()
             raise GatewayConnectionError(f"IBKR Gateway socket disconnected during {stage}{detail}")
 
     def raise_transport_error(self, exc: BaseException, *, stage: str) -> NoReturn:
         """Close a broken Gateway session cleanly and raise a structured domain error."""
         detail = f" ({self._last_disconnect_notice})" if self._last_disconnect_notice else ""
+        self._last_disconnect_reason = "connection_lost"
         self._safe_disconnect()
         raise GatewayConnectionError(
             f"IBKR Gateway connection interrupted during {stage}{detail}: {exc!r}"
@@ -221,11 +325,16 @@ class IBKRBrokerClient:
     def handle_stage_error(self, exc: BaseException, *, stage: str) -> None:
         """Translate socket/timeout errors (or lost active links) into `GatewayConnectionError`.
 
-        An existing `GatewayConnectionError` (incl. `GatewayTimeoutError`) is left untouched,
-        except that a socket that really dropped is still closed cleanly.
+        A `GatewayTimeoutError` recycles the socket via `reset_after_timeout`. A non-timeout
+        `GatewayConnectionError` is left untouched except that a dropped socket sets
+        `connection_lost` and closes cleanly (plain upstream-loss keeps the local socket open).
         """
+        if isinstance(exc, GatewayTimeoutError):
+            self.reset_after_timeout(stage=stage)
+            return
         if isinstance(exc, GatewayConnectionError):
             if self._was_connected and not self.is_connected:
+                self._last_disconnect_reason = "connection_lost"
                 self._safe_disconnect()
             return
         if isinstance(exc, (OSError, ConnectionError, TimeoutError)) or (
@@ -328,18 +437,54 @@ class IBKRBrokerClient:
                 task.cancel()
                 task.add_done_callback(_consume_task_outcome)
 
+    async def qualify_contracts(
+        self,
+        contracts: Sequence[Any],
+        *,
+        stage_prefix: str = "contract qualification",
+        chunk_size: int = QUALIFY_CHUNK_SIZE,
+        pause_sec: float = QUALIFY_CHUNK_PAUSE_SEC,
+        sleep: SleepFn = asyncio.sleep,
+    ) -> list[Any]:
+        """Qualify IBKR contracts in bounded micro-batches (`<= chunk_size`) with pacing pauses."""
+        if chunk_size < 1:
+            raise ValueError(f"chunk_size must be >= 1, got {chunk_size}")
+        if not contracts:
+            return []
+
+        since = self.link_checkpoint()
+        qualified: list[Any] = []
+        for idx, start in enumerate(range(0, len(contracts), chunk_size)):
+            if idx > 0:
+                self.ensure_still_connected(stage=stage_prefix)
+                self.ensure_link_alive(stage=stage_prefix, since=since)
+                if pause_sec > 0:
+                    await sleep(pause_sec)
+                self.ensure_still_connected(stage=stage_prefix)
+                self.ensure_link_alive(stage=stage_prefix, since=since)
+
+            chunk = list(contracts[start : start + chunk_size])
+            stage = f"{stage_prefix} ({len(chunk)} contracts)"
+            res = list(await self.run_stage(stage, self.ib.qualifyContractsAsync(*chunk)) or [])
+            qualified.extend(_merge_chunk_results(chunk, res))
+        return qualified
+
     async def run_stage(
         self, stage: str, coro: Awaitable[_T], *, timeout_sec: float | None = None
     ) -> _T:
         """Await a broker I/O coroutine (bounded) and translate transport interruptions cleanly.
 
         The wait is limited to `timeout_sec` (default `ibkr.request_timeout_sec`). A timeout
-        raises `GatewayTimeoutError` WITHOUT closing the socket (the local API link is usually
-        healthy when the Gateway's upstream is dead); a dropped socket is still closed.
+        raises `GatewayTimeoutError` after calling `reset_after_timeout(stage=stage)` so IB
+        Gateway tears down orphaned `client_id` request queues; the next pull reconnects.
+        Non-timeout dropped sockets and transport errors set `connection_lost` and close cleanly.
         """
         limit = self.settings.ibkr.request_timeout_sec if timeout_sec is None else timeout_sec
         try:
             res = await self.await_guarded(coro, stage=stage, timeout_sec=limit)
+        except GatewayTimeoutError:
+            self.reset_after_timeout(stage=stage)
+            raise
         except Exception as exc:
             self.handle_stage_error(exc, stage=stage)
             raise
@@ -347,7 +492,8 @@ class IBKRBrokerClient:
         return res
 
     def disconnect(self) -> None:
-        """Gracefully close the socket; never raises."""
+        """Gracefully close the socket on explicit request; clears disconnect diagnostics."""
+        self._clear_disconnect_state()
         self._safe_disconnect()
 
     def _safe_disconnect(self) -> None:
@@ -471,8 +617,9 @@ class IBKRBrokerClient:
                 self._pacing_warning = True
                 logger.warning("IBKR pacing warning %s: %s", code, message)
             elif code in DISCONNECT_CODES:
-                self._last_disconnect_notice = f"IBKR {code}: {message}"
-                logger.warning("IBKR connection notice %s (reqId=%s): %s", code, req_id, message)
+                sanitized = sanitize_client_notice(f"IBKR {code}: {message}")
+                self._last_disconnect_notice = sanitized or f"IBKR {code}"
+                logger.warning("IBKR connection notice %s (reqId=%s): %s", code, req_id, sanitized)
                 self._signal_link_loss()
             else:
                 logger.warning("IBKR error %s (reqId=%s): %s", code, req_id, message)
