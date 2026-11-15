@@ -19,6 +19,8 @@ owns:
   - tests/integration/test_screener_api.py
   - tests/integration/test_offline_fixture_smoke.py
   - tests/unit/test_js_check.py
+  - tests/unit/test_corridor_strategy_sync_js.py
+  - tests/unit/test_watchlist_marquee_js.py
 reads:
   - docs/UI_UX_GUIDELINES.md (the UI contract — tokens, layout rows, behavioral rules; always)
   - docs/reference/IMPLEMENTATION_NOTES.md §5.1 (only the row you are changing)
@@ -62,5 +64,5 @@ Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (21 ES modul
 
 ## 4. Testing
 - Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
-- Frontend has no full browser test suite: after JS edits run `make js-check` (`tests/unit/test_js_check.py` covers `scripts/js_check.py`), optionally run `node --input-type=module` smoke checks on pure helpers in `src/web/static/js/dashboard/helpers.js`, and describe a manual verification path in `notes:`.
+- Frontend has no full browser test suite: after JS edits run `make js-check` (`tests/unit/test_js_check.py` covers `scripts/js_check.py`) plus the Node.js ES-module unit suites (`tests/unit/test_corridor_strategy_sync_js.py`, `tests/unit/test_watchlist_marquee_js.py`), optionally run `node --input-type=module` smoke checks on pure helpers in `src/web/static/js/dashboard/helpers.js`, and describe a manual verification path in `notes:`.
 - Offline end-to-end smoke coverage lives in `tests/integration/test_offline_fixture_smoke.py` (golden CSV in `tests/fixtures/snapshots/`); extend it when adding page-level features.

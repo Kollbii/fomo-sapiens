@@ -26,12 +26,146 @@ import {
 
 var BATCH_POLL_MS = 1500;
 var BATCH_POLL_WARN_AFTER = 3;
+var MARQUEE_DRAG_THRESHOLD_PX = 5;
+var MARQUEE_EDGE_ZONE_PX = 24;
+var MARQUEE_MAX_SCROLL_STEP_PX = 12;
 var lastNoticeShown = "";
+
+var dragState = null;
+var activeDragCleanup = null;
+var lastCheckedAnchorSym = null;
+var suppressPostDragClick = false;
+var suppressPostDragCheckChange = false;
+var suppressPostDragTimer = null;
+var shiftHandledSym = null;
+var shiftHandledTimer = null;
 
 var SYM_FRESH = "\u25CF";
 var SYM_NONE = "\u25CB";
 var SYM_PENDING = "\u25D0";
 var SYM_FAILED = "\u2715";
+
+// ------------------------------------------------------------------ Pure Marquee & Range Helpers
+export function clampPointToRect(x, y, width, height) {
+  var maxW = Math.max(0, Number(width) || 0);
+  var maxH = Math.max(0, Number(height) || 0);
+  var cx = Number(x);
+  var cy = Number(y);
+  return {
+    x: Math.max(0, Math.min(maxW, Number.isFinite(cx) ? cx : 0)),
+    y: Math.max(0, Math.min(maxH, Number.isFinite(cy) ? cy : 0)),
+  };
+}
+
+export function computeMarqueeRect(anchor, current, bounds) {
+  var w = bounds ? bounds.width : 0;
+  var h = bounds ? bounds.height : 0;
+  var a = clampPointToRect(anchor ? anchor.x : 0, anchor ? anchor.y : 0, w, h);
+  var c = clampPointToRect(current ? current.x : 0, current ? current.y : 0, w, h);
+  var left = Math.min(a.x, c.x);
+  var top = Math.min(a.y, c.y);
+  var right = Math.max(a.x, c.x);
+  var bottom = Math.max(a.y, c.y);
+  return {
+    left: left,
+    top: top,
+    right: right,
+    bottom: bottom,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+export function rectsIntersect(a, b) {
+  return Boolean(
+    a &&
+      b &&
+      a.left < b.right &&
+      a.right > b.left &&
+      a.top < b.bottom &&
+      a.bottom > b.top
+  );
+}
+
+export function clientToRowsPoint(clientX, clientY, rowsRect, scrollLeft, scrollTop) {
+  var left = rowsRect ? Number(rowsRect.left) || 0 : 0;
+  var top = rowsRect ? Number(rowsRect.top) || 0 : 0;
+  return {
+    x: (Number(clientX) || 0) - left + (Number(scrollLeft) || 0),
+    y: (Number(clientY) || 0) - top + (Number(scrollTop) || 0),
+  };
+}
+
+export function marqueeLocalToClientRect(marqueeRect, rowsRect, scrollLeft, scrollTop) {
+  var originX = (rowsRect ? Number(rowsRect.left) || 0 : 0) - (Number(scrollLeft) || 0);
+  var originY = (rowsRect ? Number(rowsRect.top) || 0 : 0) - (Number(scrollTop) || 0);
+  return {
+    left: originX + marqueeRect.left,
+    top: originY + marqueeRect.top,
+    right: originX + marqueeRect.right,
+    bottom: originY + marqueeRect.bottom,
+  };
+}
+
+export function computeMarqueePreview(watchlist, preDragChecked, highlightedMap, additive) {
+  var out = {};
+  var list = Array.isArray(watchlist) ? watchlist : [];
+  var pre = preDragChecked || {};
+  var hi = highlightedMap || {};
+  for (var i = 0; i < list.length; i++) {
+    var sym = list[i];
+    var base = Object.prototype.hasOwnProperty.call(pre, sym) ? Boolean(pre[sym]) : true;
+    out[sym] = hi[sym] ? (additive ? true : !base) : base;
+  }
+  return out;
+}
+
+export function computeRangeSelection(watchlist, anchorSym, targetSym, checked, currentCheckedMap) {
+  var list = Array.isArray(watchlist) ? watchlist : [];
+  var cur = currentCheckedMap || {};
+  var out = {};
+  for (var i = 0; i < list.length; i++) {
+    var sym = list[i];
+    out[sym] = Object.prototype.hasOwnProperty.call(cur, sym) ? Boolean(cur[sym]) : true;
+  }
+  var i0 = anchorSym ? list.indexOf(anchorSym) : -1;
+  var i1 = targetSym ? list.indexOf(targetSym) : -1;
+  if (i1 === -1) return out;
+  var val = Boolean(checked);
+  if (i0 === -1) {
+    out[targetSym] = val;
+    return out;
+  }
+  var lo = Math.min(i0, i1);
+  var hi = Math.max(i0, i1);
+  for (var k = lo; k <= hi; k++) {
+    out[list[k]] = val;
+  }
+  return out;
+}
+
+export function computeAutoScrollStep(clientY, panelRect, scrollTop, scrollHeight, clientHeight) {
+  if (!panelRect) return 0;
+  var sh = Number(scrollHeight) || 0;
+  var ch = Number(clientHeight) || 0;
+  if (sh <= ch) return 0;
+  var st = Number(scrollTop) || 0;
+  var y = Number(clientY);
+  if (!Number.isFinite(y)) return 0;
+  var maxScroll = Math.max(0, sh - ch);
+  if (y < panelRect.top + MARQUEE_EDGE_ZONE_PX && st > 0) {
+    var ratioUp = Math.min(1, (panelRect.top + MARQUEE_EDGE_ZONE_PX - y) / MARQUEE_EDGE_ZONE_PX);
+    return -Math.max(1, Math.round(ratioUp * MARQUEE_MAX_SCROLL_STEP_PX));
+  }
+  if (y > panelRect.bottom - MARQUEE_EDGE_ZONE_PX && st < maxScroll) {
+    var ratioDown = Math.min(
+      1,
+      (y - (panelRect.bottom - MARQUEE_EDGE_ZONE_PX)) / MARQUEE_EDGE_ZONE_PX
+    );
+    return Math.max(1, Math.round(ratioDown * MARQUEE_MAX_SCROLL_STEP_PX));
+  }
+  return 0;
+}
 
 // ------------------------------------------------------------------ Helpers
 function isLiveBatch(batch) {
@@ -64,6 +198,29 @@ function isChecked(sym) {
 
 function selectedTickers() {
   return state.watchlist.filter(isChecked);
+}
+
+function effectiveIsChecked(sym) {
+  if (
+    dragState &&
+    dragState.active &&
+    dragState.previewChecked &&
+    Object.prototype.hasOwnProperty.call(dragState.previewChecked, sym)
+  ) {
+    return Boolean(dragState.previewChecked[sym]);
+  }
+  return isChecked(sym);
+}
+
+function effectiveSelectedCount() {
+  if (dragState && dragState.active) {
+    var count = 0;
+    for (var i = 0; i < state.watchlist.length; i++) {
+      if (effectiveIsChecked(state.watchlist[i])) count += 1;
+    }
+    return count;
+  }
+  return selectedTickers().length;
 }
 
 function readSelection() {
@@ -191,6 +348,7 @@ function buildRow(sym) {
 
 function updateRows() {
   if (!dom.watchlistRows) return;
+  var marqueeActive = Boolean(dragState && dragState.active);
   var rows = dom.watchlistRows.querySelectorAll("[data-wl-row]");
   for (var i = 0; i < rows.length; i++) {
     var li = rows[i];
@@ -207,30 +365,48 @@ function updateRows() {
       ? "Partial snapshot: only finished pages were saved; needs a complete re-fetch."
       : "";
     li.querySelector(".sr-only").textContent = m.sr;
-    li.querySelector("[data-wl-check]").checked = isChecked(sym);
+    li.querySelector("[data-wl-check]").checked = effectiveIsChecked(sym);
     var item = batchItem(sym);
     var inFlight = Boolean(item) && isLiveBatch(state.watchlistBatch) &&
       (item.state === "queued" || item.state === "running");
     li.querySelector("[data-wl-remove]").disabled = !state.watchlistWritable || inFlight;
     li.classList.toggle("is-active", sym === state.ticker);
+    li.classList.toggle("is-marquee", Boolean(marqueeActive && dragState.highlighted && dragState.highlighted[sym]));
   }
 }
 
 function renderRows() {
   if (!dom.watchlistRows) return;
+  var activeDs = dragState && dragState.active ? dragState : null;
+  var overlayEl = activeDs ? activeDs.overlayEl : null;
   dom.watchlistRows.innerHTML = "";
   for (var i = 0; i < state.watchlist.length; i++) {
-    dom.watchlistRows.appendChild(buildRow(state.watchlist[i]));
+    var sym = state.watchlist[i];
+    if (
+      activeDs &&
+      activeDs.preDragChecked &&
+      !Object.prototype.hasOwnProperty.call(activeDs.preDragChecked, sym)
+    ) {
+      activeDs.preDragChecked[sym] = isChecked(sym);
+    }
+    dom.watchlistRows.appendChild(buildRow(sym));
+  }
+  if (overlayEl) {
+    dom.watchlistRows.appendChild(overlayEl);
   }
   if (dom.watchlistEmpty) dom.watchlistEmpty.hidden = state.watchlist.length > 0;
   if (dom.watchlistCount) dom.watchlistCount.textContent = String(state.watchlist.length);
   updateRows();
-  syncControls();
+  if (activeDs) {
+    updateMarqueeFrame();
+  } else {
+    syncControls();
+  }
 }
 
 function syncControls() {
   var busy = Boolean(state.watchlistBatchBusy);
-  var n = selectedTickers().length;
+  var n = effectiveSelectedCount();
   if (dom.watchlistSelectedCount) dom.watchlistSelectedCount.textContent = String(n);
   var loadDisabled = busy || n === 0 || Boolean(state.loading);
   if (dom.watchlistLoadBarCount) dom.watchlistLoadBarCount.textContent = String(n);
@@ -641,9 +817,302 @@ async function addAndLoadTicker(raw) {
   await startBatch([sym], { ticker: sym, notice: notice });
 }
 
+// ------------------------------------------------------------------ Marquee Drag & Range Selection
+function clearPostDragSuppression() {
+  if (suppressPostDragTimer) {
+    window.clearTimeout(suppressPostDragTimer);
+    suppressPostDragTimer = null;
+  }
+  suppressPostDragClick = false;
+  suppressPostDragCheckChange = false;
+}
+
+function armPostDragSuppression() {
+  clearPostDragSuppression();
+  suppressPostDragClick = true;
+  suppressPostDragTimer = window.setTimeout(function () {
+    suppressPostDragTimer = null;
+    suppressPostDragClick = false;
+    suppressPostDragCheckChange = false;
+  }, 0);
+}
+
+function consumePostDragClick(isCheckbox) {
+  if (!suppressPostDragClick) return false;
+  suppressPostDragClick = false;
+  if (isCheckbox) {
+    suppressPostDragCheckChange = true;
+  }
+  return true;
+}
+
+function clearShiftHandled() {
+  if (shiftHandledTimer) {
+    window.clearTimeout(shiftHandledTimer);
+    shiftHandledTimer = null;
+  }
+  shiftHandledSym = null;
+}
+
+function applyCheckedMap(checkedMap) {
+  var nextUnchecked = {};
+  for (var i = 0; i < state.watchlist.length; i++) {
+    var sym = state.watchlist[i];
+    if (!checkedMap[sym]) nextUnchecked[sym] = true;
+  }
+  state.watchlistUnchecked = nextUnchecked;
+  writeSelection();
+  updateRows();
+  syncControls();
+}
+
+function snapshotPreDragChecked() {
+  var snap = {};
+  for (var i = 0; i < state.watchlist.length; i++) {
+    var sym = state.watchlist[i];
+    snap[sym] = isChecked(sym);
+  }
+  return snap;
+}
+
+function getRowsDimensions(rowsEl) {
+  var rect = rowsEl && typeof rowsEl.getBoundingClientRect === "function"
+    ? rowsEl.getBoundingClientRect()
+    : { left: 0, top: 0, width: 0, height: 0, right: 0, bottom: 0 };
+  var w = rowsEl && Number(rowsEl.clientWidth) > 0
+    ? Number(rowsEl.clientWidth)
+    : Number(rect.width) || 0;
+  var h = rowsEl && Number(rowsEl.clientHeight) > 0
+    ? Number(rowsEl.clientHeight)
+    : Number(rect.height) || 0;
+  return { rect: rect, width: w, height: h };
+}
+
+function stopAutoScrollLoop(ds) {
+  if (!ds || !ds.rafId) return;
+  var cancelRaf =
+    (typeof window !== "undefined" && window.cancelAnimationFrame) ||
+    globalThis.cancelAnimationFrame;
+  if (typeof cancelRaf === "function") {
+    cancelRaf(ds.rafId);
+  }
+  ds.rafId = null;
+}
+
+function detachDragListeners() {
+  if (typeof activeDragCleanup === "function") {
+    activeDragCleanup();
+    activeDragCleanup = null;
+  }
+}
+
+function teardownDragVisuals(ds) {
+  stopAutoScrollLoop(ds);
+  if (ds && ds.overlayEl) {
+    if (typeof ds.overlayEl.remove === "function") {
+      ds.overlayEl.remove();
+    } else if (
+      ds.overlayEl.parentNode &&
+      typeof ds.overlayEl.parentNode.removeChild === "function"
+    ) {
+      ds.overlayEl.parentNode.removeChild(ds.overlayEl);
+    }
+  }
+  if (dom.watchlistPanel) {
+    dom.watchlistPanel.classList.remove("is-marquee-active", "is-marquee-dragging");
+  }
+  if (typeof document !== "undefined" && document.body && document.body.classList) {
+    document.body.classList.remove("is-marquee-dragging");
+  }
+  if (dom.watchlistRows) {
+    var rowEls = dom.watchlistRows.querySelectorAll("[data-wl-row]");
+    for (var i = 0; i < rowEls.length; i++) {
+      rowEls[i].classList.remove("is-marquee");
+    }
+  }
+}
+
+function applyMarqueePreview(ds) {
+  if (!ds || !ds.active) return;
+  ds.previewChecked = computeMarqueePreview(
+    state.watchlist,
+    ds.preDragChecked,
+    ds.highlighted,
+    ds.additive
+  );
+  if (dom.watchlistRows) {
+    var rowEls = dom.watchlistRows.querySelectorAll("[data-wl-row]");
+    for (var i = 0; i < rowEls.length; i++) {
+      var li = rowEls[i];
+      var sym = li.getAttribute("data-wl-row");
+      var check = li.querySelector("[data-wl-check]");
+      if (check && sym) {
+        check.checked = Object.prototype.hasOwnProperty.call(ds.previewChecked, sym)
+          ? Boolean(ds.previewChecked[sym])
+          : isChecked(sym);
+      }
+    }
+  }
+  syncControls();
+}
+
+function updateMarqueeFrame() {
+  var ds = dragState;
+  var rowsEl = dom.watchlistRows;
+  if (!ds || !ds.active || !rowsEl) return;
+
+  var dims = getRowsDimensions(rowsEl);
+  var curPoint = clientToRowsPoint(
+    ds.lastClientX,
+    ds.lastClientY,
+    dims.rect,
+    rowsEl.scrollLeft,
+    rowsEl.scrollTop
+  );
+  var marqueeRect = computeMarqueeRect(
+    ds.anchorPoint,
+    curPoint,
+    { width: dims.width, height: dims.height }
+  );
+
+  if (ds.overlayEl) {
+    ds.overlayEl.style.left = marqueeRect.left + "px";
+    ds.overlayEl.style.top = marqueeRect.top + "px";
+    ds.overlayEl.style.width = marqueeRect.width + "px";
+    ds.overlayEl.style.height = marqueeRect.height + "px";
+  }
+
+  var marqueeClientRect = marqueeLocalToClientRect(
+    marqueeRect,
+    dims.rect,
+    rowsEl.scrollLeft,
+    rowsEl.scrollTop
+  );
+
+  var highlighted = {};
+  var rowEls = rowsEl.querySelectorAll("[data-wl-row]");
+  for (var i = 0; i < rowEls.length; i++) {
+    var li = rowEls[i];
+    var sym = li.getAttribute("data-wl-row");
+    if (!sym || typeof li.getBoundingClientRect !== "function") continue;
+    var hit = rectsIntersect(marqueeClientRect, li.getBoundingClientRect());
+    if (hit) highlighted[sym] = true;
+    li.classList.toggle("is-marquee", hit);
+  }
+
+  ds.highlighted = highlighted;
+  applyMarqueePreview(ds);
+}
+
+function scheduleAutoScrollLoop() {
+  var ds = dragState;
+  var panel = dom.watchlistPanel;
+  if (!ds || !ds.active || !panel || panel.hidden) {
+    stopAutoScrollLoop(ds);
+    return;
+  }
+  var stepDelta = computeAutoScrollStep(
+    ds.lastClientY,
+    typeof panel.getBoundingClientRect === "function" ? panel.getBoundingClientRect() : null,
+    panel.scrollTop,
+    panel.scrollHeight,
+    panel.clientHeight
+  );
+  if (stepDelta === 0) {
+    stopAutoScrollLoop(ds);
+    return;
+  }
+  if (ds.rafId) return;
+  var raf =
+    (typeof window !== "undefined" && window.requestAnimationFrame) ||
+    globalThis.requestAnimationFrame;
+  if (typeof raf !== "function") return;
+
+  function tick() {
+    var cur = dragState;
+    if (!cur || !cur.active || !dom.watchlistPanel || dom.watchlistPanel.hidden) {
+      if (cur) cur.rafId = null;
+      return;
+    }
+    cur.rafId = null;
+    var p = dom.watchlistPanel;
+    var pRect = typeof p.getBoundingClientRect === "function" ? p.getBoundingClientRect() : null;
+    var delta = computeAutoScrollStep(
+      cur.lastClientY,
+      pRect,
+      p.scrollTop,
+      p.scrollHeight,
+      p.clientHeight
+    );
+    if (delta === 0) return;
+    var maxScroll = Math.max(0, (Number(p.scrollHeight) || 0) - (Number(p.clientHeight) || 0));
+    var prevTop = Number(p.scrollTop) || 0;
+    var nextTop = Math.max(0, Math.min(maxScroll, prevTop + delta));
+    if (nextTop !== prevTop) {
+      p.scrollTop = nextTop;
+      updateMarqueeFrame();
+    }
+    if (nextTop > 0 && nextTop < maxScroll) {
+      cur.rafId = raf(tick);
+    }
+  }
+
+  ds.rafId = raf(tick);
+}
+
+function cancelActiveDrag(opts) {
+  var ds = dragState;
+  if (!ds) return false;
+  var wasActive = Boolean(ds.active);
+  teardownDragVisuals(ds);
+  if (wasActive && opts && opts.keepUntilMouseUp) {
+    ds.active = false;
+    ds.cancelled = true;
+    ds.overlayEl = null;
+    ds.highlighted = {};
+    ds.previewChecked = {};
+  } else {
+    detachDragListeners();
+    dragState = null;
+  }
+  if (wasActive) {
+    updateRows();
+    syncControls();
+  }
+  return wasActive;
+}
+
+function activateMarquee(ds) {
+  ds.active = true;
+  ds.preDragChecked = snapshotPreDragChecked();
+  if (typeof window !== "undefined" && typeof window.getSelection === "function") {
+    var sel = window.getSelection();
+    if (sel && typeof sel.removeAllRanges === "function") sel.removeAllRanges();
+  }
+  if (dom.watchlistPanel) {
+    dom.watchlistPanel.classList.add("is-marquee-active", "is-marquee-dragging");
+  }
+  if (typeof document !== "undefined" && document.body && document.body.classList) {
+    document.body.classList.add("is-marquee-dragging");
+  }
+  if (dom.watchlistRows) {
+    var overlay = document.createElement("div");
+    overlay.className = "wl-marquee";
+    overlay.setAttribute("aria-hidden", "true");
+    dom.watchlistRows.appendChild(overlay);
+    ds.overlayEl = overlay;
+  }
+}
+
 // ------------------------------------------------------------------ Panel wiring
 function setPanelOpen(open) {
   if (!dom.watchlistPanel || !dom.watchlistToggle) return;
+  if (!open) {
+    cancelActiveDrag({ keepUntilMouseUp: false });
+    clearPostDragSuppression();
+    clearShiftHandled();
+    lastCheckedAnchorSym = null;
+  }
   dom.watchlistPanel.hidden = !open;
   dom.watchlistToggle.setAttribute("aria-expanded", open ? "true" : "false");
 }
@@ -654,37 +1123,305 @@ export function wireWatchlist() {
   var toggle = dom.watchlistToggle;
   if (!picker || !panel || !toggle) return;
 
+  cancelActiveDrag({ keepUntilMouseUp: false });
+  clearPostDragSuppression();
+  clearShiftHandled();
+  lastCheckedAnchorSym = null;
+
   toggle.addEventListener("click", function () {
     setPanelOpen(panel.hidden);
   });
 
   document.addEventListener("click", function (ev) {
-    if (!panel.hidden && ev.target instanceof Node && !picker.contains(ev.target)) {
+    if (panel.hidden) return;
+    if (ev.target instanceof Node && picker.contains(ev.target)) return;
+    if (consumePostDragClick(false)) return;
+    if (ev.target instanceof Node) {
       setPanelOpen(false);
     }
   });
 
+  picker.addEventListener("click", function (ev) {
+    var t = ev.target instanceof Element ? ev.target : null;
+    var isCheck = Boolean(t && t.closest("[data-wl-check]"));
+    if (consumePostDragClick(isCheck)) {
+      if (typeof ev.preventDefault === "function") ev.preventDefault();
+      if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+    }
+  }, true);
+
   picker.addEventListener("keydown", function (ev) {
     if (ev.key === "Escape" && !panel.hidden) {
       ev.preventDefault();
+      if (cancelActiveDrag({ keepUntilMouseUp: true })) {
+        return;
+      }
       setPanelOpen(false);
       toggle.focus();
     }
   });
 
+  function attachDragListeners() {
+    detachDragListeners();
+
+    function onDragMove(ev) {
+      var ds = dragState;
+      if (!ds || ds.cancelled) return;
+      if (panel.hidden) {
+        cancelActiveDrag({ keepUntilMouseUp: false });
+        return;
+      }
+      var cx = Number(ev.clientX);
+      var cy = Number(ev.clientY);
+      if (!Number.isFinite(cx)) cx = ds.lastClientX;
+      if (!Number.isFinite(cy)) cy = ds.lastClientY;
+      ds.lastClientX = cx;
+      ds.lastClientY = cy;
+      if (typeof ev.ctrlKey === "boolean" || typeof ev.metaKey === "boolean") {
+        ds.additive = Boolean(ev.ctrlKey || ev.metaKey);
+      }
+
+      if (!ds.active) {
+        if (Math.hypot(cx - ds.startClientX, cy - ds.startClientY) < MARQUEE_DRAG_THRESHOLD_PX) {
+          return;
+        }
+        activateMarquee(ds);
+      }
+      if (typeof ev.preventDefault === "function") ev.preventDefault();
+      updateMarqueeFrame();
+      scheduleAutoScrollLoop();
+    }
+
+    function onDragUp(ev) {
+      if (typeof ev.button === "number" && ev.button !== 0) return;
+      var ds = dragState;
+      if (!ds) {
+        detachDragListeners();
+        return;
+      }
+      if (ds.cancelled) {
+        detachDragListeners();
+        dragState = null;
+        armPostDragSuppression();
+        return;
+      }
+      if (!ds.active) {
+        detachDragListeners();
+        dragState = null;
+        return;
+      }
+
+      if (typeof ev.ctrlKey === "boolean" || typeof ev.metaKey === "boolean") {
+        ds.additive = Boolean(ev.ctrlKey || ev.metaKey);
+      }
+      var cx = Number(ev.clientX);
+      var cy = Number(ev.clientY);
+      if (Number.isFinite(cx) && Number.isFinite(cy)) {
+        ds.lastClientX = cx;
+        ds.lastClientY = cy;
+      }
+      updateMarqueeFrame();
+
+      var finalChecked = computeMarqueePreview(
+        state.watchlist,
+        ds.preDragChecked,
+        ds.highlighted,
+        ds.additive
+      );
+      teardownDragVisuals(ds);
+      detachDragListeners();
+      dragState = null;
+      applyCheckedMap(finalChecked);
+      armPostDragSuppression();
+    }
+
+    function onDragKeyDown(ev) {
+      var ds = dragState;
+      if (!ds || !ds.active) return;
+      if (ev.key === "Escape") {
+        if (typeof ev.preventDefault === "function") ev.preventDefault();
+        cancelActiveDrag({ keepUntilMouseUp: true });
+        return;
+      }
+      if (ev.key === "Control" || ev.key === "Meta") {
+        ds.additive = true;
+        applyMarqueePreview(ds);
+      }
+    }
+
+    function onDragKeyUp(ev) {
+      var ds = dragState;
+      if (!ds || !ds.active) return;
+      if (ev.key === "Control" || ev.key === "Meta") {
+        ds.additive = Boolean(ev.ctrlKey || ev.metaKey);
+        applyMarqueePreview(ds);
+      }
+    }
+
+    function onDragBlur() {
+      cancelActiveDrag({ keepUntilMouseUp: false });
+    }
+
+    function onPanelScroll() {
+      if (dragState && dragState.active) {
+        updateMarqueeFrame();
+      }
+    }
+
+    document.addEventListener("mousemove", onDragMove);
+    document.addEventListener("mouseup", onDragUp);
+    document.addEventListener("keydown", onDragKeyDown);
+    document.addEventListener("keyup", onDragKeyUp);
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("blur", onDragBlur);
+    }
+    panel.addEventListener("scroll", onPanelScroll);
+
+    activeDragCleanup = function () {
+      if (typeof document.removeEventListener === "function") {
+        document.removeEventListener("mousemove", onDragMove);
+        document.removeEventListener("mouseup", onDragUp);
+        document.removeEventListener("keydown", onDragKeyDown);
+        document.removeEventListener("keyup", onDragKeyUp);
+      }
+      if (typeof window.removeEventListener === "function") {
+        window.removeEventListener("blur", onDragBlur);
+      }
+      if (typeof panel.removeEventListener === "function") {
+        panel.removeEventListener("scroll", onPanelScroll);
+      }
+    };
+  }
+
   if (dom.watchlistRows) {
+    dom.watchlistRows.addEventListener("mousedown", function (ev) {
+      if (panel.hidden) return;
+      if (ev.button !== 0) return;
+      if (!state.watchlist.length) return;
+      var t = ev.target instanceof Element ? ev.target : null;
+      if (t && t.closest("[data-wl-remove]")) return;
+
+      if (dragState && dragState.cancelled) {
+        detachDragListeners();
+        dragState = null;
+      }
+      clearPostDragSuppression();
+
+      var dims = getRowsDimensions(dom.watchlistRows);
+      var anchorPoint = clientToRowsPoint(
+        ev.clientX,
+        ev.clientY,
+        dims.rect,
+        dom.watchlistRows.scrollLeft,
+        dom.watchlistRows.scrollTop
+      );
+      dragState = {
+        active: false,
+        cancelled: false,
+        startClientX: Number(ev.clientX) || 0,
+        startClientY: Number(ev.clientY) || 0,
+        lastClientX: Number(ev.clientX) || 0,
+        lastClientY: Number(ev.clientY) || 0,
+        anchorPoint: clampPointToRect(anchorPoint.x, anchorPoint.y, dims.width, dims.height),
+        preDragChecked: snapshotPreDragChecked(),
+        highlighted: {},
+        previewChecked: {},
+        additive: Boolean(ev.ctrlKey || ev.metaKey),
+        overlayEl: null,
+        rafId: null,
+      };
+      attachDragListeners();
+    });
+
     dom.watchlistRows.addEventListener("change", function (ev) {
       var t = ev.target instanceof Element ? ev.target : null;
       var sym = t ? t.getAttribute("data-wl-check") : null;
       if (!sym) return;
+      if (dragState && dragState.active) {
+        t.checked = effectiveIsChecked(sym);
+        return;
+      }
+      if (suppressPostDragCheckChange) {
+        suppressPostDragCheckChange = false;
+        t.checked = isChecked(sym);
+        return;
+      }
+      if (shiftHandledSym === sym) {
+        clearShiftHandled();
+        t.checked = isChecked(sym);
+        return;
+      }
+      if (
+        !panel.hidden &&
+        ev.shiftKey &&
+        lastCheckedAnchorSym &&
+        state.watchlist.indexOf(lastCheckedAnchorSym) !== -1
+      ) {
+        var curMap = {};
+        for (var i = 0; i < state.watchlist.length; i++) {
+          var s = state.watchlist[i];
+          curMap[s] = isChecked(s);
+        }
+        applyCheckedMap(
+          computeRangeSelection(
+            state.watchlist,
+            lastCheckedAnchorSym,
+            sym,
+            Boolean(t.checked),
+            curMap
+          )
+        );
+        return;
+      }
       if (t.checked) delete state.watchlistUnchecked[sym];
       else state.watchlistUnchecked[sym] = true;
+      if (!panel.hidden) {
+        lastCheckedAnchorSym = sym;
+      }
       writeSelection();
       syncControls();
     });
     dom.watchlistRows.addEventListener("click", function (ev) {
       var t = ev.target instanceof Element ? ev.target : null;
       if (!t) return;
+      var checkInput = t.closest("[data-wl-check]");
+      if (consumePostDragClick(Boolean(checkInput))) {
+        if (typeof ev.preventDefault === "function") ev.preventDefault();
+        if (typeof ev.stopPropagation === "function") ev.stopPropagation();
+        return;
+      }
+      if (checkInput) {
+        if (!panel.hidden && ev.shiftKey) {
+          var sym = checkInput.getAttribute("data-wl-check");
+          if (sym) {
+            var curChecked = isChecked(sym);
+            var targetChecked = checkInput.checked !== curChecked
+              ? Boolean(checkInput.checked)
+              : !curChecked;
+            checkInput.checked = targetChecked;
+            if (lastCheckedAnchorSym && state.watchlist.indexOf(lastCheckedAnchorSym) !== -1) {
+              var currentMap = {};
+              for (var j = 0; j < state.watchlist.length; j++) {
+                var s2 = state.watchlist[j];
+                currentMap[s2] = isChecked(s2);
+              }
+              applyCheckedMap(
+                computeRangeSelection(
+                  state.watchlist,
+                  lastCheckedAnchorSym,
+                  sym,
+                  targetChecked,
+                  currentMap
+                )
+              );
+              clearShiftHandled();
+              shiftHandledSym = sym;
+              shiftHandledTimer = window.setTimeout(clearShiftHandled, 0);
+            }
+          }
+        }
+        return;
+      }
       var viewBtn = t.closest("[data-wl-view]");
       if (viewBtn) {
         setPanelOpen(false);

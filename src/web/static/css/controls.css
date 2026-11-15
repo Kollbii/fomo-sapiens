@@ -145,6 +145,16 @@
   font-size: 12px;
 }
 
+.wl-picker__panel.is-marquee-active {
+  border-color: var(--accent-focus);
+}
+
+.is-marquee-dragging,
+.is-marquee-dragging * {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
 .wl-picker__panel[hidden],
 .wl-picker__notice[hidden],
 .wl-picker__empty[hidden],
@@ -169,6 +179,7 @@
 }
 
 .wl-picker__rows {
+  position: relative;
   list-style: none;
   margin: 0;
   padding: 0;
@@ -184,6 +195,22 @@
 
 .wl-row:hover {
   background: var(--bg-hover);
+}
+
+.wl-row.is-marquee {
+  background: var(--wl-marquee-bg);
+  box-shadow: inset 2px 0 0 var(--wl-marquee-border);
+}
+
+.wl-marquee {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+  min-width: 1px;
+  min-height: 1px;
+  background: var(--wl-marquee-bg);
+  border: 1px solid var(--wl-marquee-border);
+  border-radius: var(--radius-xs);
 }
 
 .wl-row.is-active .wl-row__sym {

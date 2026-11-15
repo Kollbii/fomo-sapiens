@@ -587,7 +587,7 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert "Daily Mark-to-Market Step History" in html
                 assert 'value="CLOSED"' in html
                 assert 'id="backtest-paper-sync-ledger-btn"' in html
-                assert "?v=20261115c" in html
+                assert "?v=20261115e" in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200

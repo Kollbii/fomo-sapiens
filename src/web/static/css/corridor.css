@@ -267,6 +267,8 @@
 
 .corridor-strike-badges {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
   gap: 3px;
   margin-left: 5px;
@@ -312,6 +314,18 @@
   background: var(--accent-warn-bg);
 }
 
+.wall-badge-strategy.wall-badge-leg-buy {
+  border-color: var(--accent-call);
+  color: var(--accent-call);
+  background: var(--corridor-leg-buy-bg);
+}
+
+.wall-badge-strategy.wall-badge-leg-sell {
+  border-color: var(--accent-put);
+  color: var(--accent-put);
+  background: var(--corridor-leg-sell-bg);
+}
+
 .corridor-ladder-table tbody tr:hover td {
   background-color: var(--bg-hover);
 }
@@ -339,7 +353,25 @@
   box-shadow: inset 3px 0 0 var(--accent-call);
 }
 
-.corridor-ladder-table tbody tr.corridor-row-strategy td {
+.corridor-ladder-table tbody td.corridor-cell-leg {
+  border-top: 1px dashed var(--accent-warn);
+  border-bottom: 1px dashed var(--accent-warn);
+}
+
+.corridor-ladder-table tbody td.corridor-cell-leg-buy {
+  background-image: linear-gradient(var(--corridor-leg-buy-bg), var(--corridor-leg-buy-bg));
+  border-top: 1px dashed var(--accent-call);
+  border-bottom: 1px dashed var(--accent-call);
+}
+
+.corridor-ladder-table tbody td.corridor-cell-leg-sell {
+  background-image: linear-gradient(var(--corridor-leg-sell-bg), var(--corridor-leg-sell-bg));
+  border-top: 1px dashed var(--accent-put);
+  border-bottom: 1px dashed var(--accent-put);
+}
+
+.corridor-ladder-table tbody td.corridor-cell-leg-buy.corridor-cell-leg-sell {
+  background-image: linear-gradient(90deg, var(--corridor-leg-buy-bg), var(--corridor-leg-sell-bg));
   border-top: 1px dashed var(--accent-warn);
   border-bottom: 1px dashed var(--accent-warn);
 }
