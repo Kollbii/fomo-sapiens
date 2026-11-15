@@ -8,9 +8,13 @@ milestones in git history.
 ## [Unreleased]
 
 ### Fixed
+- **Bounded IBKR contract qualification pacing (`src/broker/client.py`, `fetcher.py`, `corridor/service.py`, `live_legs.py`):** Added `IBKRBrokerClient.qualify_contracts()` (`QUALIFY_CHUNK_SIZE = 10`, `QUALIFY_CHUNK_PAUSE_SEC = 0.25`) with positional partial-response alignment and inter-chunk connection/link checks across option-chain, Wall Corridor, and live-screener qualification paths.
+- **Gateway timeout socket recycling & connection-state diagnostics (`src/broker/client.py`, `src/services/{analyzer,batch_refresh,schemas}.py`, `src/web/`):** `IBKRBrokerClient.run_stage()` and `BatchRefreshService` per-ticker timeout handling now recycle the local socket via `reset_after_timeout()` so IB Gateway tears down orphaned `client_id` queues and auto-reconnects on the next pull. `GatewayStatusResponse` (`GET /api/status`) adds `connection_state` (`connected` | `timeout_reset` | `connection_lost` | `offline`) and `connection_notice`, driving distinct `#gateway-badge` states (including amber `.badge--amber` `GATEWAY TIMEOUT • SOCKET RESET` and `GATEWAY LINK LOST`) with status refreshes across Corridor, Screener, Ledger, and Batch UI paths.
+- **Exact-strike prefetch timeout fallback & pacing defaults (`config/settings.yaml`, `src/core/config.py`, `src/broker/contracts.py`, `src/services/batch_refresh.py`):** Raised `options_chain.contract_details_timeout_sec` default from `5.0` to `15.0` and short-circuited remaining expirations to `reqSecDefOptParams` on the first prefetch timeout; added `watchlist.batch_inter_ticker_cooldown_sec` (default `1.5`, `0..30`, interruptible on cancel) between batch tickers.
+- **Isolated lifespan logging cleanup (`src/main.py`):** `create_app()` now resolves the log directory against `repo.root` / `logs_dir` and flushes, removes, and closes `"analyzer"` root log handlers on shutdown.
 - **Paper trade forward-compatibility (`extra="ignore"`):** Relaxed model configurations on `PaperTrade`, `PaperTradeLeg`, and `PaperQuoteRecord` to `extra="ignore"` so legacy/newer persisted metadata fields do not break registry deserialization or quote logging.
 - **Post-save paper-trade quoting fault isolation:** In `PaperTradeService.quote_active_trades_for_refresh()` and `BatchRefreshService._run_one()`, paper-trade quoting errors (or quote log write issues) after a snapshot has already been written to disk no longer cause chain refresh or batch execution to revert the completed snapshot to failed; the saved complete snapshot remains preserved with a clear diagnostic notice.
-- **Frontend cache-buster:** Bumped asset query strings to `?v=20261115b` across CSS/JS imports.
+- **Frontend cache-buster:** Bumped asset query strings to `?v=20261115c` across CSS/JS imports.
 
 ## [0.4.1] - 2026-11-15
 
