@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -16,7 +17,7 @@ from starlette.types import Scope
 
 from src.broker.client import IBKRBrokerClient
 from src.broker.fetcher import PagedOptionChainFetcher
-from src.core.config import Settings, get_settings
+from src.core.config import Settings, configure_logging, get_settings
 from src.services.analyzer import AnalyzerService
 from src.services.batch_refresh import BatchRefreshService
 from src.services.ledger import LedgerService
@@ -55,6 +56,33 @@ def _format_feed_summary(cfg: Settings) -> str:
     return f"{mode_lbl} Type {def_t} Feed"
 
 
+def _resolve_log_dir(cfg: Settings, repo: object) -> Path:
+    """Resolve the log directory against `repo.root` so test repos stay isolated."""
+    raw = getattr(repo, "logs_dir", None)
+    if raw is None:
+        raw = cfg.storage.logs_dir
+    path = Path(raw)
+    if path.is_absolute():
+        return path
+    root = getattr(repo, "root", None)
+    return (Path(root) / path) if root is not None else path
+
+
+def _close_analyzer_log_handlers() -> None:
+    """Flush, remove, and close root handlers created by `configure_logging()`."""
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if handler.get_name() != "analyzer":
+            continue
+        try:
+            with contextlib.suppress(Exception):
+                handler.flush()
+        finally:
+            root.removeHandler(handler)
+            with contextlib.suppress(Exception):
+                handler.close()
+
+
 def create_app(
     settings: Settings | None = None,
     repo: CSVRepository | None = None,
@@ -79,22 +107,23 @@ def create_app(
         app_instance.state.service = service
         app_instance.state.batch_refresh = batch
         service.ensure_layout()
+        configure_logging(cfg, log_dir=_resolve_log_dir(cfg, service.repo))
         try:
-            await service.watchlist.get_watchlist()
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("watchlist cache priming failed; serving seed list")
-        try:
-            service.repo.load_index()
-        except Exception:  # pragma: no cover - defensive
-            logger.warning("snapshot index initialization warning; continuing in offline mode")
-        logger.info(
-            "starting %s (offline-first cache ready; IBKR target=%s:%d mode=%s)",
-            cfg.app.name,
-            cfg.ibkr.host,
-            cfg.ibkr.port,
-            cfg.ibkr.market_data_mode,
-        )
-        try:
+            try:
+                await service.watchlist.get_watchlist()
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("watchlist cache priming failed; serving seed list")
+            try:
+                service.repo.load_index()
+            except Exception:  # pragma: no cover - defensive
+                logger.warning("snapshot index initialization warning; continuing in offline mode")
+            logger.info(
+                "starting %s (offline-first cache ready; IBKR target=%s:%d mode=%s)",
+                cfg.app.name,
+                cfg.ibkr.host,
+                cfg.ibkr.port,
+                cfg.ibkr.market_data_mode,
+            )
             yield
         finally:
             try:
@@ -118,6 +147,7 @@ def create_app(
                 except Exception:  # pragma: no cover - defensive shutdown
                     logger.exception("error force-stopping live screener during shutdown")
                 service.broker_client.disconnect()
+                _close_analyzer_log_handlers()
 
     application = FastAPI(
         title=cfg.app.name,
