@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.analytics.backtest.context import expiry_settlement_cutoff_utc, is_leg_settled
 from src.analytics.backtest.engine import run_single_trade_replay, run_systematic_backtest
 from src.analytics.backtest.models import (
+    FLAG_BROKER_FILL_ENTRY,
     FLAG_CLOSE_SPOT_ONLY,
     FLAG_EMPTY_CHAIN,
     FLAG_FROZEN_MARKET_DATA,
@@ -46,6 +47,11 @@ from src.analytics.backtest.pricing import (
     filter_df_for_legs,
     resolve_row_prices,
 )
+from src.analytics.backtest.rules import (
+    BrokerFillAnchor,
+    build_broker_fill_entry,
+    resolve_broker_leg_prices,
+)
 
 __all__ = [
     "BacktestConfig",
@@ -53,10 +59,12 @@ __all__ = [
     "BacktestMode",
     "BacktestSimulationResult",
     "BacktestTradeRecord",
+    "BrokerFillAnchor",
     "ClosePriceMode",
     "EntryCadence",
     "EquityCurvePoint",
     "ExitReason",
+    "FLAG_BROKER_FILL_ENTRY",
     "FLAG_CLOSE_SPOT_ONLY",
     "FLAG_EMPTY_CHAIN",
     "FLAG_FROZEN_MARKET_DATA",
@@ -81,12 +89,14 @@ __all__ = [
     "TpSlBasis",
     "TradeDailyStep",
     "TradeStatus",
+    "build_broker_fill_entry",
     "enrich_filtered_greeks",
     "evaluate_trade_step_on_bar",
     "expiry_settlement_cutoff_utc",
     "filter_df_for_dte_window",
     "filter_df_for_legs",
     "is_leg_settled",
+    "resolve_broker_leg_prices",
     "resolve_row_prices",
     "run_single_trade_replay",
     "run_systematic_backtest",

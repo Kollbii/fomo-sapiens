@@ -1279,3 +1279,27 @@ def test_watchlist_freshness_ignores_partial_snapshot(tmp_path: Path) -> None:
     assert entries["NVDA"].is_today_et is False  # today's partial does not count as fresh
     assert entries["AVGO"].latest_snapshot_id is None  # only a partial exists
     assert entries["AVGO"].is_today_et is False
+
+
+def test_batch_item_done_when_post_save_quoting_raises(tmp_path: Path) -> None:
+    """If paper-trade quoting fails after on_saved fired, item is marked done with a notice."""
+    svc, batch, _fetcher, _, _ = _make(tmp_path, pause_sec=0.0)
+
+    async def _failing_quote(ticker: str, *, underlying_conid: int = 0) -> tuple[None, list[str]]:
+        raise StorageSchemaError("paper_trades.json unreadable")
+
+    svc.paper_trades.quote_active_trades_for_refresh = _failing_quote  # type: ignore[method-assign]
+
+    async def _scenario() -> BatchRefreshStatus:
+        await batch.start(_req(["NVDA"]))
+        return await _wait_finished(batch)
+
+    final = run_virtual_loop(_scenario())
+    assert final.state == "completed"
+    assert len(final.items) == 1
+    item = final.items[0]
+    assert item.ticker == "NVDA"
+    assert item.state == "done"
+    assert item.snapshot_id is not None
+    assert item.partial is False
+    assert any("Paper-trade quoting for NVDA failed" in n for n in item.notices)

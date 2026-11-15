@@ -1375,3 +1375,118 @@ def test_orphan_close_strategy_classification_across_lifecycle_and_trade_closes(
     assert by_ticker["MSFT"].steps[0].summary.startswith("STC ")
     assert by_ticker["MSFT"].steps[0].cashflow_ex_fee == pytest.approx(525.0)
     assert by_ticker["MSFT"].realized_pnl_ex_fee == pytest.approx(125.0)
+
+
+def test_open_position_view_populates_conid_and_opened_at() -> None:
+    execs = _exec_df(
+        [
+            # Two OPT lots for same NVDA contract at different timestamps -> earliest opened_at
+            {
+                "exec_id": "op-1",
+                "underlying": "NVDA",
+                "conid": 700111,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.0,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "op-2",
+                "underlying": "NVDA",
+                "conid": 700111,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.5,
+                "open_close": "O",
+                "executed_at": _ts(4),
+            },
+            # Two STK lots for NVDA at different timestamps -> earliest executed_at
+            {
+                "exec_id": "stk-1",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 4815747,
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 120.0,
+                "open_close": "O",
+                "executed_at": _ts(12),
+            },
+            {
+                "exec_id": "stk-2",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 4815747,
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 125.0,
+                "open_close": "O",
+                "executed_at": _ts(6),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            # Matched STK (overrides/confirms conid)
+            {
+                "conid": 4815747,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 100.0,
+                "avg_cost": 122.5,
+                "mark_price": 130.0,
+                "updated_at": _ts(1),
+            },
+            # Unmatched OPT position (no executions) -> uses pos_row.conid and pos_row.updated_at
+            {
+                "conid": 990001,
+                "underlying": "AVGO",
+                "asset_class": "OPT",
+                "expiry": "20270115",
+                "strike": 180.0,
+                "right": "P",
+                "position": -1.0,
+                "avg_cost": 4.0,
+                "mark_price": 3.2,
+                "updated_at": "2026-11-11T18:30:00Z",
+            },
+            # Unmatched STK position with blank updated_at -> opened_at=None
+            {
+                "conid": 880002,
+                "underlying": "PLTR",
+                "asset_class": "STK",
+                "position": 100.0,
+                "avg_cost": 40.0,
+                "mark_price": 45.0,
+                "updated_at": "",
+            },
+        ]
+    )
+
+    rep = build_ledger_report(
+        execs, pos, window="ALL", view="open_mtm", include_stock_gain=True, as_of=AS_OF
+    )
+    by_key = {p.position_key: p for p in rep.open_positions}
+
+    nvda_opt = by_key["OPT:NVDA:20261218:140:C"]
+    assert nvda_opt.conid == 700111
+    assert nvda_opt.opened_at == _ts(10)
+
+    nvda_stk = by_key["STK:NVDA"]
+    assert nvda_stk.conid == 4815747
+    assert nvda_stk.opened_at == _ts(12)
+
+    avgo_opt = by_key["OPT:AVGO:20270115:180:P"]
+    assert avgo_opt.conid == 990001
+    assert avgo_opt.opened_at == "2026-11-11T18:30:00Z"
+
+    pltr_stk = by_key["STK:PLTR"]
+    assert pltr_stk.conid == 880002
+    assert pltr_stk.opened_at is None

@@ -10,8 +10,12 @@ import polars as pl
 import pytest
 
 from src.analytics.backtest import (
+    FLAG_BROKER_FILL_ENTRY,
     FLAG_NO_USABLE_DAILY_SNAPSHOT,
+    FLAG_TRACKED_LEG_USED,
     BacktestConfig,
+    BrokerFillAnchor,
+    resolve_broker_leg_prices,
     run_single_trade_replay,
     run_systematic_backtest,
 )
@@ -1075,3 +1079,518 @@ def test_short_and_zero_dte_systematic_backtest_entry_and_same_day_settlement() 
     assert res_diag.summary.trade_count == 1
     diag_leg_exps = {leg.expiry for leg in res_diag.trades[0].legs}
     assert diag_leg_exps == {"2026-12-04", "2026-12-11"}
+
+
+def test_broker_fill_anchor_single_bar_preceding_entry_and_same_day_spot() -> None:
+    legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    t_later = datetime(2026, 11, 5, 20, 0, tzinfo=UTC)
+    b_later = _bar(
+        "s_later",
+        t_later,
+        "2026-11-05",
+        _make_chain_df(
+            snapshot_id="s_later",
+            ts_utc=t_later,
+            market_date="2026-11-05",
+            spot=102.0,
+            expiries=(("2026-12-18", 43),),
+            overrides={
+                ("2026-12-18", 95.0, "P"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0},
+                ("2026-12-18", 90.0, "P"): {"bid": 0.9, "ask": 1.1, "mid": 1.0, "last": 1.0},
+            },
+        ),
+        spot=102.0,
+    )
+    anchor = BrokerFillAnchor(
+        entry_date="2026-11-02",
+        entry_ts_utc="2026-11-02T15:30:00Z",
+        entry_snapshot_id="NVDA_20261102_153000",
+        entry_net_cash_dollars=150.0,
+        leg_entry_prices=(2.50, 1.00),
+    )
+    cfg = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        qty=1,
+        commission_per_contract=0.65,
+        profit_target_pct=50.0,
+        stop_loss_pct=100.0,
+    )
+    res = run_single_trade_replay(
+        [b_later],
+        cfg,
+        ticker="NVDA",
+        legs=legs,
+        broker_fill_anchor=anchor,
+        trade_id="NVDA-20261102-deadbeef",
+    )
+    assert res.summary.trade_count == 1
+    assert res.summary.open_trades == 1
+    assert len(res.equity_curve) == 2
+
+    tr = res.trades[0]
+    assert tr.trade_id == "NVDA-20261102-deadbeef"
+    assert tr.entry_date == "2026-11-02"
+    assert tr.entry_snapshot_id == "NVDA_20261102_153000"
+    assert tr.entry_cash_mid_dollars == pytest.approx(150.0)
+    assert tr.entry_cash_natural_dollars == pytest.approx(150.0)
+    assert tr.entry_basis_dollars == pytest.approx(150.0)
+    assert tr.max_profit_dollars == pytest.approx(150.0)
+    assert tr.max_loss_dollars == pytest.approx(350.0)
+    assert not tr.max_loss_unbounded
+    assert tr.days_held == 3
+    assert len(tr.steps) == 2
+
+    step0 = tr.steps[0]
+    assert step0.market_date == "2026-11-02"
+    assert step0.snapshot_id == "NVDA_20261102_153000"
+    assert step0.spot is None
+    assert step0.dte_min_leg == 46
+    assert step0.mark_source == "BROKER_FILL"
+    assert step0.status == "OK"
+    assert step0.flags == [FLAG_BROKER_FILL_ENTRY]
+    assert step0.gross_pnl_dollars == pytest.approx(0.0)
+    assert step0.net_pnl_dollars == pytest.approx(-1.30)
+    assert all(
+        m.price_source == "BROKER_FILL" and m.quote_source == "BROKER_FILL" for m in step0.legs
+    )
+    assert [m.price_used for m in step0.legs] == pytest.approx([2.50, 1.00])
+
+    step1 = tr.steps[1]
+    assert step1.market_date == "2026-11-05"
+    assert step1.mark_source == "MID"
+    assert step1.gross_pnl_dollars == pytest.approx(50.0)
+    assert step1.net_pnl_dollars == pytest.approx(48.70)
+
+    # Same entry_date as bars[0].market_date copies spot into Day-0 step and equity curve
+    same_day_anchor = BrokerFillAnchor(
+        entry_date="2026-11-05",
+        entry_ts_utc="2026-11-05T14:45:00Z",
+        entry_snapshot_id="NVDA_20261105_144500",
+        entry_net_cash_dollars=300.0,
+        leg_entry_prices=(2.50, 1.00),
+    )
+    res_same = run_single_trade_replay(
+        [b_later],
+        cfg.model_copy(update={"qty": 2}),
+        ticker="NVDA",
+        legs=legs,
+        broker_fill_anchor=same_day_anchor,
+    )
+    assert res_same.trades[0].steps[0].spot == pytest.approx(102.0)
+    assert res_same.equity_curve[0].underlying_price == pytest.approx(102.0)
+    assert res_same.trades[0].steps[0].net_pnl_dollars == pytest.approx(-2.60)
+    assert [leg.qty for leg in res_same.trades[0].legs] == [2, 2]
+
+
+def test_broker_fill_anchor_tracked_only_bar_and_inferred_leg_prices() -> None:
+    legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    t0 = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+    t1 = datetime(2026, 11, 9, 20, 0, tzinfo=UTC)
+    tracked_df = _make_chain_df(
+        snapshot_id="trk_0",
+        ts_utc=t0,
+        market_date="2026-11-06",
+        spot=101.0,
+        strikes=(90.0, 95.0),
+        expiries=(("2026-12-18", 42),),
+        overrides={
+            ("2026-12-18", 95.0, "P"): {"bid": 1.65, "ask": 1.75, "mid": 1.70, "last": 1.70},
+            ("2026-12-18", 90.0, "P"): {"bid": 0.75, "ask": 0.85, "mid": 0.80, "last": 0.80},
+        },
+    ).filter(pl.col("right") == "P")
+    b0_tracked_only = DailyChainBar(
+        snapshot_id="chain_empty_0",
+        ts_utc=t0,
+        market_date="2026-11-06",
+        df=pl.DataFrame(schema=OPTION_CHAIN_POLARS_SCHEMA),
+        meta=None,
+        selection_flags=(FLAG_NO_USABLE_DAILY_SNAPSHOT,),
+        tracked_df=tracked_df,
+        tracked_snapshot_ids=("trk_0",),
+    )
+    b1 = _low_vs_high_credit_bar("chain_1", "2026-11-09", short_mid=1.50, long_mid=0.70)
+
+    # Infer leg prices proportionally when omitted / partial
+    anchor = BrokerFillAnchor(
+        entry_date="2026-11-06",
+        entry_ts_utc="2026-11-06T14:35:00Z",
+        entry_snapshot_id="NVDA_20261106_143500",
+        entry_net_cash_dollars=140.0,
+        leg_entry_prices=(2.40, None),
+    )
+    cfg = BacktestConfig(
+        strategy_kind="CUSTOM",
+        commission_per_contract=0.65,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+    res = run_single_trade_replay(
+        [b0_tracked_only, b1],
+        cfg,
+        ticker="NVDA",
+        legs=legs,
+        end_snapshot_id="chain_empty_0",
+        broker_fill_anchor=anchor,
+        trade_id="NVDA-20261106-1234abcd",
+    )
+    tr = res.trades[0]
+    assert [leg.mid for leg in tr.legs] == pytest.approx([2.40, 1.00])
+    assert tr.max_profit_dollars == pytest.approx(140.0)
+    assert tr.max_loss_dollars == pytest.approx(360.0)
+    assert len(tr.steps) == 2
+    assert tr.steps[0].spot == pytest.approx(101.0)
+    assert tr.steps[1].mark_source == "TRACKED"
+    assert FLAG_TRACKED_LEG_USED in tr.steps[1].flags
+    assert tr.steps[1].tracked_snapshot_ids == ["trk_0"]
+    # Tracked close = 1.70 - 0.80 = 0.90 -> gross = 140 - 90 = +50; net = 50 - 1.30 = 48.70
+    assert tr.steps[1].net_pnl_dollars == pytest.approx(48.70)
+
+    # Fully omitted leg_entry_prices still resolves valid positive legs & exact cash sum
+    anchor_no_leg_px = BrokerFillAnchor(
+        entry_date="2026-11-04",
+        entry_ts_utc="2026-11-04T15:00:00Z",
+        entry_snapshot_id="NVDA_20261104_150000",
+        entry_net_cash_dollars=140.0,
+        leg_entry_prices=(),
+    )
+    res_inferred = run_single_trade_replay(
+        [b0_tracked_only],
+        cfg,
+        ticker="NVDA",
+        legs=legs,
+        broker_fill_anchor=anchor_no_leg_px,
+    )
+    assert [leg.mid for leg in res_inferred.trades[0].legs] == pytest.approx([1.40, 0.0])
+    assert res_inferred.trades[0].max_profit_dollars == pytest.approx(140.0)
+    assert res_inferred.trades[0].max_loss_dollars == pytest.approx(360.0)
+    assert t1 > t0  # unused timestamp sanity check
+
+
+def test_broker_fill_anchor_tp_sl_expiry_and_validation_guards() -> None:
+    legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-11-20", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-11-20", strike=90.0, qty=1),
+    ]
+    anchor = BrokerFillAnchor(
+        entry_date="2026-11-10",
+        entry_ts_utc="2026-11-10T15:00:00Z",
+        entry_snapshot_id="NVDA_20261110_150000",
+        entry_net_cash_dollars=100.0,
+        leg_entry_prices=(2.00, 1.00),
+    )
+
+    t1 = datetime(2026, 11, 12, 20, 0, tzinfo=UTC)
+    t2 = datetime(2026, 11, 13, 20, 0, tzinfo=UTC)
+    b_tp = _bar(
+        "tp1",
+        t1,
+        "2026-11-12",
+        _make_chain_df(
+            snapshot_id="tp1",
+            ts_utc=t1,
+            market_date="2026-11-12",
+            expiries=(("2026-11-20", 8),),
+            overrides={
+                ("2026-11-20", 95.0, "P"): {"bid": 1.35, "ask": 1.45, "mid": 1.40, "last": 1.40},
+                ("2026-11-20", 90.0, "P"): {"bid": 0.95, "ask": 1.05, "mid": 1.00, "last": 1.00},
+            },
+        ),
+    )
+    b_after = _bar(
+        "after2",
+        t2,
+        "2026-11-13",
+        _make_chain_df(
+            snapshot_id="after2",
+            ts_utc=t2,
+            market_date="2026-11-13",
+            expiries=(("2026-11-20", 7),),
+        ),
+    )
+    cfg = BacktestConfig(
+        strategy_kind="CUSTOM",
+        commission_per_contract=0.65,
+        profit_target_pct=50.0,
+        stop_loss_pct=100.0,
+    )
+    res_tp = run_single_trade_replay(
+        [b_tp, b_after], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor
+    )
+    tr_tp = res_tp.trades[0]
+    assert tr_tp.status == "CLOSED"
+    assert tr_tp.exit_reason == "PROFIT_TARGET"
+    assert tr_tp.exit_date == "2026-11-12"
+    assert tr_tp.commissions_dollars == pytest.approx(2.60)
+    assert tr_tp.gross_pnl_dollars == pytest.approx(60.0)
+    assert tr_tp.net_pnl_dollars == pytest.approx(57.40)
+    assert len(tr_tp.steps) == 2
+    assert len(res_tp.equity_curve) == 3
+    assert res_tp.equity_curve[-1].open_trades == 0
+    assert res_tp.equity_curve[-1].realized_pnl_dollars == pytest.approx(57.40)
+
+    # Stop loss on adverse move
+    b_sl = _bar(
+        "sl1",
+        t1,
+        "2026-11-12",
+        _make_chain_df(
+            snapshot_id="sl1",
+            ts_utc=t1,
+            market_date="2026-11-12",
+            expiries=(("2026-11-20", 8),),
+            overrides={
+                ("2026-11-20", 95.0, "P"): {"bid": 3.15, "ask": 3.25, "mid": 3.20, "last": 3.20},
+                ("2026-11-20", 90.0, "P"): {"bid": 0.95, "ask": 1.05, "mid": 1.00, "last": 1.00},
+            },
+        ),
+    )
+    res_sl = run_single_trade_replay(
+        [b_sl], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor
+    )
+    assert res_sl.trades[0].exit_reason == "STOP_LOSS"
+    assert res_sl.trades[0].gross_pnl_dollars == pytest.approx(-120.0)
+
+    # Expiry settlement past 16:15 EST cutoff -> $0 closing commission
+    t_settle = datetime(2026, 11, 20, 21, 20, tzinfo=UTC)
+    b_exp = _bar(
+        "exp1",
+        t_settle,
+        "2026-11-20",
+        _make_chain_df(
+            snapshot_id="exp1",
+            ts_utc=t_settle,
+            market_date="2026-11-20",
+            spot=98.0,
+            expiries=(("2026-12-18", 28),),
+        ),
+        spot=98.0,
+    )
+    res_exp = run_single_trade_replay(
+        [b_exp],
+        cfg.model_copy(update={"profit_target_pct": None, "stop_loss_pct": None}),
+        ticker="NVDA",
+        legs=legs,
+        broker_fill_anchor=anchor,
+    )
+    tr_exp = res_exp.trades[0]
+    assert tr_exp.exit_reason == "EXPIRY_SETTLED"
+    assert tr_exp.commissions_dollars == pytest.approx(1.30)
+    assert tr_exp.gross_pnl_dollars == pytest.approx(100.0)
+    assert tr_exp.steps[-1].mark_source == "SETTLEMENT"
+
+    # Validation guards
+    with pytest.raises(BacktestValidationError):
+        run_single_trade_replay([], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor)
+    with pytest.raises(BacktestValidationError):
+        run_single_trade_replay([b_tp], cfg, ticker="NVDA", legs=None, broker_fill_anchor=anchor)
+    with pytest.raises(BacktestValidationError):
+        run_single_trade_replay([b_tp], cfg, ticker="NVDA", entry_snapshot_id=None, legs=legs)
+    with pytest.raises(BacktestValidationError):
+        run_single_trade_replay(
+            [b_tp],
+            cfg,
+            ticker="NVDA",
+            legs=legs,
+            broker_fill_anchor=BrokerFillAnchor(
+                entry_date="2026-11-10",
+                entry_ts_utc="2026-11-10T15:00:00Z",
+                entry_snapshot_id="NVDA_20261110_150000",
+                entry_net_cash_dollars=100.0,
+                leg_entry_prices=(2.0,),  # mismatched non-empty length
+            ),
+        )
+    with pytest.raises(BacktestValidationError):
+        run_single_trade_replay(
+            [b_tp],
+            cfg,
+            ticker="NVDA",
+            legs=legs,
+            end_snapshot_id="missing_end",
+            broker_fill_anchor=anchor,
+        )
+
+
+def test_resolve_broker_leg_prices_partial_known_missing_and_multilot_scaling() -> None:
+    legs_bps = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    # 1) Partial known/missing with multi-lot qty=3:
+    #    SELL 3x 95P @ $2.40 (+720) + BUY 3x 90P @ ? = +420 net -> missing BUY @ $1.00 (-300)
+    assert resolve_broker_leg_prices(legs_bps, 3, 420.0, (2.40, None)) == pytest.approx(
+        [2.40, 1.00]
+    )
+    #    Missing short leg with known long leg (and non-finite treated as missing)
+    assert resolve_broker_leg_prices(legs_bps, 3, 420.0, (float("nan"), 1.00)) == pytest.approx(
+        [2.40, 1.00]
+    )
+
+    # 2) Ratio spread multi-lot scaling: SELL 1*2=2 @ ?, BUY 2*2=4 @ $0.50 (-200) -> net +200
+    #    Residual +400 over 200 short shares -> SELL leg @ $2.00
+    legs_ratio = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=2),
+    ]
+    assert resolve_broker_leg_prices(legs_ratio, 2, 200.0, (None, 0.50)) == pytest.approx(
+        [2.00, 0.50]
+    )
+
+    # 3) All missing on equal-qty legs -> assigns full cash to SELL (credit) or BUY (debit)
+    assert resolve_broker_leg_prices(legs_bps, 3, 420.0, ()) == pytest.approx([1.40, 0.0])
+    legs_debit = [
+        StrategyLegInput(side="BUY", right="C", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="SELL", right="C", expiry="2026-12-18", strike=100.0, qty=1),
+    ]
+    assert resolve_broker_leg_prices(legs_debit, 2, -500.0, (None, None)) == pytest.approx(
+        [2.50, 0.0]
+    )
+
+    # 4) All known prices pass through with -0.0 normalized to 0.0
+    assert resolve_broker_leg_prices(legs_bps, 2, 0.0, (-0.0, 0.0)) == [0.0, 0.0]
+
+    # 5) Validation guards
+    with pytest.raises(BacktestValidationError):
+        resolve_broker_leg_prices(legs_bps, 1, 100.0, (2.0,))
+    with pytest.raises(BacktestValidationError):
+        resolve_broker_leg_prices(legs_bps, 0, 100.0, (2.0, 1.0))
+    with pytest.raises(BacktestValidationError):
+        resolve_broker_leg_prices(legs_bps, 1, float("nan"), ())
+
+
+def test_broker_fill_anchor_skips_pre_anchor_intraday_bar_and_handles_prior_same_day_fallback() -> (
+    None
+):
+    legs = [
+        StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=95.0, qty=1),
+        StrategyLegInput(side="BUY", right="P", expiry="2026-12-18", strike=90.0, qty=1),
+    ]
+    t_morning = datetime(2026, 11, 5, 14, 30, tzinfo=UTC)
+    t_eod = datetime(2026, 11, 5, 20, 45, tzinfo=UTC)
+    t_next = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+
+    b_morning = _bar(
+        "same_day_morning",
+        t_morning,
+        "2026-11-05",
+        _make_chain_df(
+            snapshot_id="same_day_morning",
+            ts_utc=t_morning,
+            market_date="2026-11-05",
+            spot=99.0,
+            expiries=(("2026-12-18", 43),),
+            overrides={
+                ("2026-12-18", 95.0, "P"): {"bid": 2.9, "ask": 3.1, "mid": 3.0, "last": 3.0},
+                ("2026-12-18", 90.0, "P"): {"bid": 0.9, "ask": 1.1, "mid": 1.0, "last": 1.0},
+            },
+        ),
+        spot=99.0,
+    )
+    b_eod = _bar(
+        "same_day_eod",
+        t_eod,
+        "2026-11-05",
+        _make_chain_df(
+            snapshot_id="same_day_eod",
+            ts_utc=t_eod,
+            market_date="2026-11-05",
+            spot=101.0,
+            expiries=(("2026-12-18", 43),),
+            overrides={
+                ("2026-12-18", 95.0, "P"): {"bid": 2.1, "ask": 2.3, "mid": 2.2, "last": 2.2},
+                ("2026-12-18", 90.0, "P"): {"bid": 0.9, "ask": 1.1, "mid": 1.0, "last": 1.0},
+            },
+        ),
+        spot=101.0,
+    )
+    b_next = _bar(
+        "next_day",
+        t_next,
+        "2026-11-06",
+        _make_chain_df(
+            snapshot_id="next_day",
+            ts_utc=t_next,
+            market_date="2026-11-06",
+            spot=102.0,
+            expiries=(("2026-12-18", 42),),
+            overrides={
+                ("2026-12-18", 95.0, "P"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0},
+                ("2026-12-18", 90.0, "P"): {"bid": 0.9, "ask": 1.1, "mid": 1.0, "last": 1.0},
+            },
+        ),
+        spot=102.0,
+    )
+    anchor = BrokerFillAnchor(
+        entry_date="2026-11-05",
+        entry_ts_utc="2026-11-05T17:15:00Z",
+        entry_snapshot_id="NVDA_20261105_171500",
+        entry_net_cash_dollars=150.0,
+        leg_entry_prices=(2.50, 1.00),
+    )
+    cfg = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        commission_per_contract=0.65,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+    )
+
+    # 1) [same_day_morning, next_day] skips pre-fill same_day_morning -> strictly monotonic
+    res_skip = run_single_trade_replay(
+        [b_morning, b_next], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor
+    )
+    tr_skip = res_skip.trades[0]
+    assert [s.snapshot_id for s in tr_skip.steps] == ["NVDA_20261105_171500", "next_day"]
+    assert [s.ts_utc for s in tr_skip.steps] == [
+        "2026-11-05T17:15:00Z",
+        "2026-11-06T20:00:00Z",
+    ]
+    assert [pt.ts_utc for pt in res_skip.equity_curve] == [
+        "2026-11-05T17:15:00Z",
+        "2026-11-06T20:00:00Z",
+    ]
+    assert tr_skip.steps[0].spot is None
+    assert tr_skip.steps[1].gross_pnl_dollars == pytest.approx(50.0)
+
+    # 2) [same_day_morning, same_day_eod, next_day] skips morning, steps EOD + next_day
+    res_eod = run_single_trade_replay(
+        [b_morning, b_eod, b_next], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor
+    )
+    assert [s.snapshot_id for s in res_eod.trades[0].steps] == [
+        "NVDA_20261105_171500",
+        "same_day_eod",
+        "next_day",
+    ]
+    assert res_eod.trades[0].steps[0].spot == pytest.approx(101.0)
+    assert [pt.ts_utc for pt in res_eod.equity_curve] == [
+        "2026-11-05T17:15:00Z",
+        "2026-11-05T20:45:00Z",
+        "2026-11-06T20:00:00Z",
+    ]
+
+    # 3) Single pre-fill same-day snapshot fallback -> keeps it, aligns anchor ts, adds note
+    res_fallback = run_single_trade_replay(
+        [b_morning], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=anchor
+    )
+    tr_fb = res_fallback.trades[0]
+    assert [s.snapshot_id for s in tr_fb.steps] == ["NVDA_20261105_171500", "same_day_morning"]
+    assert tr_fb.steps[0].ts_utc <= tr_fb.steps[1].ts_utc
+    assert res_fallback.equity_curve[0].ts_utc <= res_fallback.equity_curve[1].ts_utc
+    assert any("prior-timestamp snapshot" in n.lower() for n in res_fallback.notes)
+
+    # 4) All bars strictly before anchor.entry_date -> BacktestValidationError
+    later_anchor = BrokerFillAnchor(
+        entry_date="2026-11-07",
+        entry_ts_utc="2026-11-07T15:00:00Z",
+        entry_snapshot_id="NVDA_20261107_150000",
+        entry_net_cash_dollars=150.0,
+        leg_entry_prices=(2.50, 1.00),
+    )
+    with pytest.raises(BacktestValidationError, match="precede"):
+        run_single_trade_replay(
+            [b_morning, b_next], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=later_anchor
+        )

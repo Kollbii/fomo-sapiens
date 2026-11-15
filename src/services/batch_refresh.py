@@ -442,6 +442,22 @@ class BatchRefreshService:
         if not isinstance(exc, Exception):  # pragma: no cover - KeyboardInterrupt / SystemExit
             item.state = "cancelled"
             raise exc
+        if run.saved:
+            logger.warning(
+                "batch %s: %s post-save step failed after snapshot %s (%s): %s",
+                batch.batch_id,
+                item.ticker,
+                run.saved[0].meta.snapshot_id,
+                type(exc).__name__,
+                exc,
+            )
+            self._mark_done(item, run.saved[0])
+            safe = describe_error(exc, ibkr=self.analyzer.settings.ibkr)
+            item.notices.append(
+                f"Paper-trade quoting for {item.ticker} failed ({safe.code}); "
+                "the complete chain snapshot was saved."
+            )
+            return
         if isinstance(exc, AnalyzerError):
             logger.warning(
                 "batch %s: %s failed (%s): %s",

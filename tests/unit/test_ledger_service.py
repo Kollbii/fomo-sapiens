@@ -592,3 +592,122 @@ def test_dashboard_validation_and_analyzer_service_delegation(tmp_path: Path) ->
     )
     assert default_analyzer.ledger.repo.executions_path.is_relative_to(tmp_path / "iso")
     assert (tmp_path / "iso" / "data" / "ledger").is_dir()
+
+
+def test_analyzer_service_auto_syncs_paper_trades_on_import_sync_and_startup(
+    tmp_path: Path,
+) -> None:
+    """Ledger imports/syncs and startup layout auto-reconcile LEDGER paper trades."""
+    cfg = _settings()
+    pin_now = lambda: datetime(2026, 11, 12, 16, 0, tzinfo=UTC)  # noqa: E731
+    closed_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<FlexQueryResponse queryName="Ledger" type="AF">
+  <FlexStatements count="1">
+    <FlexStatement accountId="U1234567" toDate="20261112">
+      <Trades>
+        <Trade accountId="U1234567" currency="USD" fxRateToBase="1" assetCategory="OPT"
+               symbol="NVDA  261218C00140000" underlyingSymbol="NVDA" conid="700001"
+               underlyingConid="4815747" multiplier="100" strike="140" expiry="20261218"
+               putCall="C" dateTime="20261112;155000" quantity="2" tradePrice="4.80"
+               proceeds="-960.0" ibCommission="-1.35" fifoPnlRealized="117.30"
+               openCloseIndicator="C" buySell="BUY" ibOrderID="9902"
+               ibExecID="close-exec-1" levelOfDetail="EXECUTION" />
+      </Trades>
+    </FlexStatement>
+  </FlexStatements>
+</FlexQueryResponse>
+"""
+    closed_flex_client, _ = _make_flex_client({"ACT365": closed_xml})
+
+    # 1) Internal LedgerService created by AnalyzerService wires on_ledger_changed automatically.
+    internal_root = tmp_path / "internal"
+    internal_repo = CSVRepository(cfg.storage, root=internal_root)
+    internal_analyzer = AnalyzerService(
+        settings=cfg,
+        repo=internal_repo,
+        broker_client=IBKRBrokerClient(cfg, ib_factory=_FakeServiceIB),
+    )
+    internal_analyzer.ledger.flex_client = closed_flex_client
+    internal_analyzer.ledger.now_fn = pin_now
+    internal_analyzer.paper_trades.clock = pin_now
+    internal_analyzer.ensure_layout()
+
+    # Importing open position creates an ACTIVE LEDGER paper trade automatically.
+    internal_analyzer.import_ledger_file(
+        "open.xml",
+        _xml_statement(exec_id="open-exec-1", open_positions_xml=_open_pos_xml()),
+    )
+    active_trades, active_count = internal_analyzer.paper_trades.list_trades(status="ACTIVE")
+    assert active_count == 1
+    assert len(active_trades) == 1
+    created = active_trades[0]
+    assert created.source == "LEDGER"
+    assert created.ticker == "NVDA"
+    assert created.qty == 2
+    assert created.ledger_strategy_label == "NAKED CALL"
+
+    # Full Flex sync with empty OpenPositions closes that LEDGER paper trade automatically.
+    run_coro(internal_analyzer.sync_ledger(mode="full", include_gateway=False))
+    still_active, active_after = internal_analyzer.paper_trades.list_trades(status="ACTIVE")
+    assert active_after == 0
+    assert still_active == []
+    closed_trades, _ = internal_analyzer.paper_trades.list_trades(status="CLOSED")
+    assert [t.id for t in closed_trades] == [created.id]
+    assert closed_trades[0].status == "CLOSED"
+    assert closed_trades[0].status_changed_utc == "2026-11-12T16:00:00Z"
+
+    # 2) Pre-populated ledger archive + externally injected LedgerService syncs at startup & import.
+    ext_root = tmp_path / "external"
+    ext_repo = CSVRepository(cfg.storage, root=ext_root)
+    ext_ledger_repo = LedgerRepository(cfg.ledger.ledger_dir, root=ext_root)
+    ext_ledger_repo.ensure_layout()
+    ext_ledger_repo.replace_positions(
+        [
+            LedgerPositionRow(
+                conid=700001,
+                symbol="NVDA  261218C00140000",
+                underlying="NVDA",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=140.0,
+                right="C",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=5.40,
+                mark_price=4.85,
+                market_value=-970.0,
+                unrealized_pnl=110.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T16:00:00Z",
+            )
+        ]
+    )
+    ext_ledger = LedgerService(
+        settings=cfg,
+        repo=ext_ledger_repo,
+        broker_client=IBKRBrokerClient(cfg, ib_factory=_FakeServiceIB),
+        flex_client=closed_flex_client,
+        now_fn=pin_now,
+    )
+    ext_analyzer = AnalyzerService(
+        settings=cfg,
+        repo=ext_repo,
+        broker_client=IBKRBrokerClient(cfg, ib_factory=_FakeServiceIB),
+        ledger_service=ext_ledger,
+    )
+    ext_analyzer.paper_trades.clock = pin_now
+    ext_analyzer.ensure_layout()
+
+    startup_trades, startup_active = ext_analyzer.paper_trades.list_trades(status="ACTIVE")
+    assert startup_active == 1
+    assert startup_trades[0].source == "LEDGER"
+    assert startup_trades[0].ticker == "NVDA"
+
+    # Non-fatal fallback: import on AnalyzerService with injected LedgerService also triggers sync.
+    ext_analyzer.import_ledger_file(
+        "extra.xml",
+        _xml_statement(exec_id="ext-exec-2", open_positions_xml=""),
+    )
+    reloaded, reloaded_active = ext_analyzer.paper_trades.list_trades(status="ACTIVE")
+    assert reloaded_active == 1
+    assert len(reloaded) == 1

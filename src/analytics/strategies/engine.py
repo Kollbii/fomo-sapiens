@@ -292,7 +292,8 @@ def _extract_breakevens(grid: FloatArray, pnl: FloatArray) -> list[float]:
     touches = (np.abs(y_lo) <= 1e-6) & (grid[:-1] > 0.0)
     crosses = ((y_lo < 0.0) & (y_hi > 0.0)) | ((y_lo > 0.0) & (y_hi < 0.0))
     breakevens: list[float] = []
-    for i in np.flatnonzero(touches | crosses):
+    for raw_idx in np.flatnonzero(touches | crosses):
+        i = int(raw_idx)
         y1 = float(pnl[i])
         y2 = float(pnl[i + 1])
         x1 = float(grid[i])

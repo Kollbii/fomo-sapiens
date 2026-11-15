@@ -9,7 +9,13 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from src.analytics.backtest import BacktestConfig
+from src.analytics.backtest import FLAG_BROKER_FILL_ENTRY, BacktestConfig
+from src.analytics.ledger import (
+    LedgerAnalyticsReport,
+    LedgerCampaignRow,
+    LedgerKPIs,
+    LedgerOpenPositionView,
+)
 from src.analytics.strategies import StrategyLegInput
 from src.core.config import PaperTrackerSettings, Settings
 from src.core.exceptions import (
@@ -26,6 +32,8 @@ from src.services.schemas import (
     StrategySuggestRequest,
 )
 from src.storage.csv_repository import CSVRepository
+from src.storage.ledger_schema import LedgerPositionRow
+from src.storage.paper_trade_store import PaperTrade, PaperTradeLeg
 from src.storage.schema import OptionContractRow, SpotSource
 
 _EXPIRY = "2026-12-18"
@@ -668,4 +676,466 @@ def test_strategy_lab_optional_entry_filters_keep_defaults_and_validate(tmp_path
                 snapshot_id=ids["2026-11-04"],
                 min_net_credit_dollars=float("inf"),
             )
+        )
+
+
+def _empty_ledger_kpis() -> LedgerKPIs:
+    return LedgerKPIs(
+        realized_pnl_ex_fee=0.0,
+        stock_pnl_ex_fee=0.0,
+        total_pnl_ex_fee=0.0,
+        net_premium_ex_fee=0.0,
+        fees=0.0,
+        win_rate_pct=None,
+        closed_count=0,
+        open_count=0,
+        roll_count=0,
+        unrealized_mtm_ex_fee=None,
+    )
+
+
+def test_run_backtest_ledger_paper_trade_anchor_ratio_qty_and_synthetic_mtm(
+    tmp_path: Path,
+) -> None:
+    """LEDGER PaperTrades use BrokerFillAnchor, preserve qty_ratio, and synthesize MTM if empty."""
+    svc = _make_svc(tmp_path)
+    _seed_multiday_history(svc)
+    svc.paper_trades.clock = lambda: datetime(2026, 11, 12, 16, 0, tzinfo=UTC)
+
+    report = LedgerAnalyticsReport(
+        as_of="2026-11-12T16:00:00Z",
+        window="ALL",
+        ticker="ALL",
+        group_by="campaigns",
+        view="open_mtm",
+        include_stock_gain=True,
+        available_tickers=["NVDA"],
+        kpis=_empty_ledger_kpis(),
+        campaigns=[
+            LedgerCampaignRow(
+                campaign_id="camp-nvda-bps",
+                underlying="NVDA",
+                strategy_type="BULL_PUT_SPREAD",
+                status="OPEN",
+                opened_at="2026-11-05T15:30:00Z",
+                last_activity_at="2026-11-05T15:30:00Z",
+                roll_count=0,
+                initial_summary="140/135P",
+                current_summary="140/135P",
+                contracts_total=1.0,
+                contracts_open=1.0,
+                net_premium_ex_fee=150.0,
+                realized_pnl_ex_fee=0.0,
+                fees=1.3,
+            ),
+            LedgerCampaignRow(
+                campaign_id="camp-nvda-ratio",
+                underlying="NVDA",
+                strategy_type="CUSTOM_COMBO",
+                status="OPEN",
+                opened_at="2026-11-05T16:00:00Z",
+                last_activity_at="2026-11-05T16:00:00Z",
+                roll_count=0,
+                initial_summary="-2x140P/+4x135P",
+                current_summary="-2x140P/+4x135P",
+                contracts_total=6.0,
+                contracts_open=6.0,
+                net_premium_ex_fee=-120.0,
+                realized_pnl_ex_fee=0.0,
+                fees=3.0,
+            ),
+        ],
+        open_positions=[
+            # Distinct broker fill ($150 net credit vs snapshot mid $120 on 2026-11-05)
+            LedgerOpenPositionView(
+                position_key="NVDA|OPT|20261218|140.0|P",
+                underlying="NVDA",
+                asset_class="OPT",
+                strategy_type="BULL_PUT_SPREAD",
+                symbol="NVDA  261218P00140000",
+                expiry="20261218",
+                strike=140.0,
+                right="P",
+                quantity=-1.0,
+                avg_cost_price=3.60,
+                mark_price=1.20,
+                mark_source="FLEX_MARK",
+                cost_basis_ex_fee=-360.0,
+                market_value=-120.0,
+                unrealized_pnl_ex_fee=240.0,
+                fees=0.65,
+                campaign_id="camp-nvda-bps",
+                conid=9101,
+                opened_at="2026-11-05T15:30:00Z",
+            ),
+            LedgerOpenPositionView(
+                position_key="NVDA|OPT|20261218|135.0|P",
+                underlying="NVDA",
+                asset_class="OPT",
+                strategy_type="BULL_PUT_SPREAD",
+                symbol="NVDA  261218P00135000",
+                expiry="20261218",
+                strike=135.0,
+                right="P",
+                quantity=1.0,
+                avg_cost_price=2.10,
+                mark_price=0.80,
+                mark_source="FLEX_MARK",
+                cost_basis_ex_fee=210.0,
+                market_value=80.0,
+                unrealized_pnl_ex_fee=-130.0,
+                fees=0.65,
+                campaign_id="camp-nvda-bps",
+                conid=9102,
+                opened_at="2026-11-05T15:30:00Z",
+            ),
+            # Ratio spread (-2 short 140P, +4 long 135P) -> trade.qty=2, qty_ratio=(1, 2)
+            LedgerOpenPositionView(
+                position_key="NVDA|OPT|20261218|140.0|P|RATIO",
+                underlying="NVDA",
+                asset_class="OPT",
+                strategy_type="CUSTOM_COMBO",
+                symbol="NVDA  261218P00140000",
+                expiry="20261218",
+                strike=140.0,
+                right="P",
+                quantity=-2.0,
+                avg_cost_price=3.60,
+                mark_price=1.20,
+                mark_source="FLEX_MARK",
+                cost_basis_ex_fee=-720.0,
+                market_value=-240.0,
+                unrealized_pnl_ex_fee=480.0,
+                fees=1.0,
+                campaign_id="camp-nvda-ratio",
+                conid=9101,
+                opened_at="2026-11-05T16:00:00Z",
+            ),
+            LedgerOpenPositionView(
+                position_key="NVDA|OPT|20261218|135.0|P|RATIO",
+                underlying="NVDA",
+                asset_class="OPT",
+                strategy_type="CUSTOM_COMBO",
+                symbol="NVDA  261218P00135000",
+                expiry="20261218",
+                strike=135.0,
+                right="P",
+                quantity=4.0,
+                avg_cost_price=2.10,
+                mark_price=0.80,
+                mark_source="FLEX_MARK",
+                cost_basis_ex_fee=840.0,
+                market_value=320.0,
+                unrealized_pnl_ex_fee=-520.0,
+                fees=2.0,
+                campaign_id="camp-nvda-ratio",
+                conid=9102,
+                opened_at="2026-11-05T16:00:00Z",
+            ),
+        ],
+    )
+    synced = svc.paper_trades.sync_from_ledger_report(report)
+    assert synced.created_count == 2
+    by_campaign = {t.ledger_campaign_id: t for t in synced.trades}
+    bps_trade = by_campaign["camp-nvda-bps"]
+    ratio_trade = by_campaign["camp-nvda-ratio"]
+
+    # 1) Replay with historical daily bars uses BrokerFillAnchor on Day 0, then daily chain bars.
+    bps_res = run_backtest(
+        svc,
+        BacktestRunRequest(
+            mode="SINGLE_TRADE",
+            source="PAPER_TRADE",
+            paper_trade_id=bps_trade.id,
+            config=BacktestConfig(profit_target_pct=None, stop_loss_pct=None),
+        ),
+    )
+    assert bps_res.daily_bar_count == 5
+    bps_rec = bps_res.simulation.trades[0]
+    assert bps_rec.trade_id == bps_trade.id
+    assert bps_rec.entry_snapshot_id == "NVDA_20261105_LEDGER"
+    assert bps_rec.entry_date == "2026-11-05"
+    assert bps_rec.entry_cash_mid_dollars == pytest.approx(150.0)
+    assert FLAG_BROKER_FILL_ENTRY in bps_rec.flags
+    assert bps_rec.steps[0].mark_source == "BROKER_FILL"
+    assert bps_rec.steps[0].market_date == "2026-11-05"
+    assert bps_rec.steps[-1].market_date == "2026-11-12"
+    assert bps_rec.steps[-1].mark_source == "MID"
+
+    # 2) Ratio spread replay preserves leg qty = qty_ratio * trade.qty (SELL 2, BUY 4).
+    ratio_res = run_backtest(
+        svc,
+        BacktestRunRequest(
+            mode="SINGLE_TRADE",
+            source="PAPER_TRADE",
+            paper_trade_id=ratio_trade.id,
+            config=BacktestConfig(profit_target_pct=None, stop_loss_pct=None),
+        ),
+    )
+    ratio_rec = ratio_res.simulation.trades[0]
+    assert [(leg.side, leg.qty) for leg in ratio_rec.legs] == [("SELL", 2), ("BUY", 4)]
+
+    # 3) Zero local chain snapshots on/after market_date triggers synthetic MTM bar fallback:
+    #    covers both Ledger mark_price (PLTR) and mark_price=None -> entry price (AAPL).
+    svc.ledger.repo.replace_positions(
+        [
+            LedgerPositionRow(
+                conid=9201,
+                symbol="PLTR  261218P00050000",
+                underlying="PLTR",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=50.0,
+                right="P",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=2.50,
+                mark_price=1.80,
+                market_value=-360.0,
+                unrealized_pnl=140.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T15:00:00Z",
+            ),
+            LedgerPositionRow(
+                conid=9202,
+                symbol="AAPL  261218C00220000",
+                underlying="AAPL",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=220.0,
+                right="C",
+                multiplier=100,
+                position=-1.0,
+                avg_cost=3.10,
+                mark_price=None,
+                market_value=None,
+                unrealized_pnl=None,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T15:00:00Z",
+            ),
+        ]
+    )
+    svc.sync_paper_trades_from_ledger()
+    all_after, _ = svc.paper_trades.list_trades(status="ACTIVE")
+    pltr_trade = next(t for t in all_after if t.ticker == "PLTR")
+    aapl_trade = next(t for t in all_after if t.ticker == "AAPL")
+
+    pltr_res = run_backtest(
+        svc,
+        BacktestRunRequest(
+            mode="SINGLE_TRADE",
+            source="PAPER_TRADE",
+            paper_trade_id=pltr_trade.id,
+            config=BacktestConfig(profit_target_pct=None, stop_loss_pct=None),
+        ),
+    )
+    assert pltr_res.daily_bar_count == 1
+    assert any("PLTR_2026-11-12_LEDGER_MTM" in w for w in pltr_res.warnings)
+    pltr_rec = pltr_res.simulation.trades[0]
+    assert pltr_rec.entry_snapshot_id == "PLTR_20261112_LEDGER"
+    assert pltr_rec.entry_cash_mid_dollars == pytest.approx(500.0)
+    assert pltr_rec.steps[-1].snapshot_id == "PLTR_2026-11-12_LEDGER_MTM"
+    assert pltr_rec.steps[-1].gross_pnl_dollars == pytest.approx(140.0)
+
+    aapl_res = run_backtest(
+        svc,
+        BacktestRunRequest(
+            mode="SINGLE_TRADE",
+            source="PAPER_TRADE",
+            paper_trade_id=aapl_trade.id,
+            config=BacktestConfig(profit_target_pct=None, stop_loss_pct=None),
+        ),
+    )
+    assert aapl_res.daily_bar_count == 1
+    aapl_rec = aapl_res.simulation.trades[0]
+    assert aapl_rec.steps[-1].snapshot_id == "AAPL_2026-11-12_LEDGER_MTM"
+    assert aapl_rec.steps[-1].gross_pnl_dollars == pytest.approx(0.0)
+
+
+def test_run_backtest_ledger_paper_trade_scales_entry_cash_when_qty_overridden(
+    tmp_path: Path,
+) -> None:
+    """Explicit qty override scales entry_net_cash_dollars and synthetic MTM identically."""
+    svc = _make_svc(tmp_path)
+    _seed_multiday_history(svc)
+    svc.paper_trades.clock = lambda: datetime(2026, 11, 12, 16, 0, tzinfo=UTC)
+
+    # Multi-lot (qty=2) LEDGER short put: -2 @ $2.50 -> entry_net_cash=$500, MTM=$1.80 (+$140).
+    svc.ledger.repo.replace_positions(
+        [
+            LedgerPositionRow(
+                conid=9301,
+                symbol="PLTR  261218P00050000",
+                underlying="PLTR",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=50.0,
+                right="P",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=2.50,
+                mark_price=1.80,
+                market_value=-360.0,
+                unrealized_pnl=140.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T15:00:00Z",
+            ),
+            LedgerPositionRow(
+                conid=9302,
+                symbol="NVDA  261218P00140000",
+                underlying="NVDA",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=140.0,
+                right="P",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=3.20,
+                mark_price=1.20,
+                market_value=-240.0,
+                unrealized_pnl=400.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-05T15:30:00Z",
+            ),
+        ]
+    )
+    svc.sync_paper_trades_from_ledger()
+
+    # Also register a qty=2 LEDGER trade with entry_price=None and no Ledger MTM mark to verify
+    # resolve_broker_leg_prices uses scaled_entry_net_cash with eff_qty for synthetic MTM bars.
+    no_mark_trade = PaperTrade(
+        id="CRDO-20261112-deadbeef",
+        ticker="CRDO",
+        strategy_kind="CUSTOM",
+        status="ACTIVE",
+        legs=[
+            PaperTradeLeg(
+                side="SELL",
+                right="P",
+                expiry=_EXPIRY,
+                strike=50.0,
+                qty_ratio=1,
+                entry_price=None,
+            )
+        ],
+        qty=2,
+        created_from_snapshot_id=None,
+        created_utc="2026-11-12T15:00:00Z",
+        market_date="2026-11-12",
+        entry_net_cash=500.0,
+        source="LEDGER",
+    )
+    existing_trades = svc.paper_trades.store.load_trades()
+    svc.paper_trades.store.save_trades([*existing_trades, no_mark_trade])
+
+    active_trades, _ = svc.paper_trades.list_trades(status="ACTIVE")
+    pltr_trade = next(t for t in active_trades if t.ticker == "PLTR")
+    nvda_trade = next(t for t in active_trades if t.ticker == "NVDA")
+    assert pltr_trade.qty == 2
+    assert pltr_trade.entry_net_cash == pytest.approx(500.0)
+
+    # 1) Synthetic MTM replay with explicit "qty": 1 in config -> $250 entry cash, $70 MTM P&L.
+    pltr_req = BacktestRunRequest.model_validate(
+        {
+            "mode": "SINGLE_TRADE",
+            "source": "PAPER_TRADE",
+            "paper_trade_id": pltr_trade.id,
+            "config": {"qty": 1, "profit_target_pct": None, "stop_loss_pct": None},
+        }
+    )
+    pltr_res = run_backtest(svc, pltr_req)
+    pltr_rec = pltr_res.simulation.trades[0]
+    assert pltr_rec.qty == 1
+    assert pltr_rec.entry_cash_mid_dollars == pytest.approx(250.0)
+    assert pltr_rec.steps[0].mark_source == "BROKER_FILL"
+    assert pltr_rec.steps[0].gross_pnl_dollars == pytest.approx(0.0)
+    assert pltr_rec.steps[-1].snapshot_id == "PLTR_2026-11-12_LEDGER_MTM"
+    assert pltr_rec.steps[-1].gross_pnl_dollars == pytest.approx(70.0)
+    assert pltr_rec.gross_pnl_dollars == pytest.approx(70.0)
+
+    # 2) Historical daily-bar replay with explicit "qty": 1 -> $320 entry, +$200 on 2026-11-12.
+    nvda_req = BacktestRunRequest.model_validate(
+        {
+            "mode": "SINGLE_TRADE",
+            "source": "PAPER_TRADE",
+            "paper_trade_id": nvda_trade.id,
+            "config": {"qty": 1, "profit_target_pct": None, "stop_loss_pct": None},
+        }
+    )
+    nvda_res = run_backtest(svc, nvda_req)
+    nvda_rec = nvda_res.simulation.trades[0]
+    assert nvda_rec.qty == 1
+    assert nvda_rec.entry_cash_mid_dollars == pytest.approx(320.0)
+    assert nvda_rec.steps[0].gross_pnl_dollars == pytest.approx(0.0)
+    assert nvda_rec.steps[-1].market_date == "2026-11-12"
+    assert nvda_rec.steps[-1].gross_pnl_dollars == pytest.approx(200.0)
+
+    # 3) Synthetic MTM fallback without mark_price or leg.entry_price scales mark to $2.50 ($0 P&L).
+    crdo_req = BacktestRunRequest.model_validate(
+        {
+            "mode": "SINGLE_TRADE",
+            "source": "PAPER_TRADE",
+            "paper_trade_id": no_mark_trade.id,
+            "config": {"qty": 1, "profit_target_pct": None, "stop_loss_pct": None},
+        }
+    )
+    crdo_res = run_backtest(svc, crdo_req)
+    crdo_rec = crdo_res.simulation.trades[0]
+    assert crdo_rec.qty == 1
+    assert crdo_rec.entry_cash_mid_dollars == pytest.approx(250.0)
+    assert crdo_rec.steps[0].gross_pnl_dollars == pytest.approx(0.0)
+    assert crdo_rec.steps[-1].snapshot_id == "CRDO_2026-11-12_LEDGER_MTM"
+    assert crdo_rec.steps[-1].gross_pnl_dollars == pytest.approx(0.0)
+
+
+def test_run_backtest_paper_trade_rejects_end_date_before_entry_date(tmp_path: Path) -> None:
+    """Replaying a PAPER_TRADE with end_date < paper_trade.market_date raises validation error."""
+    svc = _make_svc(tmp_path)
+    svc.paper_trades.clock = lambda: datetime(2026, 11, 12, 16, 0, tzinfo=UTC)
+    svc.ledger.repo.replace_positions(
+        [
+            LedgerPositionRow(
+                conid=9301,
+                symbol="PLTR  261218P00050000",
+                underlying="PLTR",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=50.0,
+                right="P",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=2.50,
+                mark_price=1.80,
+                market_value=-360.0,
+                unrealized_pnl=140.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T15:00:00Z",
+            )
+        ]
+    )
+    svc.sync_paper_trades_from_ledger()
+    pltr_trade = svc.paper_trades.list_trades(status="ACTIVE")[0][0]
+    assert pltr_trade.market_date == "2026-11-12"
+
+    with pytest.raises(BacktestValidationError, match="end_date"):
+        run_backtest(
+            svc,
+            BacktestRunRequest(
+                mode="SINGLE_TRADE",
+                source="PAPER_TRADE",
+                paper_trade_id=pltr_trade.id,
+                end_date=date(2026, 11, 11),
+            ),
+        )
+
+    with pytest.raises(BacktestValidationError, match="end_date"):
+        run_backtest(
+            svc,
+            BacktestRunRequest(
+                mode="SINGLE_TRADE",
+                source="PAPER_TRADE",
+                paper_trade_id=pltr_trade.id,
+                start_date=date(2026, 11, 10),
+                end_date=date(2026, 11, 11),
+            ),
         )

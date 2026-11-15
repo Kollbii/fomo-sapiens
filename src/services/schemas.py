@@ -133,6 +133,7 @@ __all__ = [
     "PaperTrade",
     "PaperTradeLeg",
     "PaperTradeStatus",
+    "PaperTradesLedgerSyncResponse",
     "PaperTradesListResponse",
     "PortfolioSummary",
     "PositionGreeks",
@@ -509,6 +510,19 @@ class PaperTradesListResponse(BaseModel):
 
     active_count: int
     max_active_trades: int
+    trades: list[PaperTrade]
+
+
+class PaperTradesLedgerSyncResponse(BaseModel):
+    """Response body for syncing Trade Ledger open positions into Paper Trades."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    created_count: int
+    updated_count: int
+    closed_count: int
+    active_ledger_count: int
+    active_count: int
     trades: list[PaperTrade]
 
 

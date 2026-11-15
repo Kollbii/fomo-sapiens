@@ -25,6 +25,7 @@ FLAG_CLOSE_SPOT_ONLY: Final = "CLOSE_SPOT_ONLY"
 FLAG_FROZEN_MARKET_DATA: Final = "FROZEN_MARKET_DATA"
 FLAG_SNAPSHOT_META_MISSING: Final = "SNAPSHOT_META_MISSING"
 FLAG_EMPTY_CHAIN: Final = "EMPTY_CHAIN"
+FLAG_BROKER_FILL_ENTRY: Final = "BROKER_FILL_ENTRY"
 
 
 def deduplicate_flags(flags: Sequence[str]) -> list[str]:
@@ -47,14 +48,17 @@ StepMarkSource = Literal[
     "NATURAL_FALLBACK",
     "MIXED",
     "TRACKED",
+    "BROKER_FILL",
     "PARTIAL_SETTLEMENT",
     "SETTLEMENT",
     "MISSING",
 ]
 TradeStatus = Literal["CLOSED", "OPEN", "UNRESOLVED"]
 
-LegPriceSource = Literal["MID", "LAST", "CLOSE", "BID", "ASK", "INTRINSIC", "NO_PRICE"]
-LegQuoteSource = Literal["CHAIN", "TRACKED", "SETTLEMENT", "NONE"]
+LegPriceSource = Literal[
+    "MID", "LAST", "CLOSE", "BID", "ASK", "INTRINSIC", "BROKER_FILL", "NO_PRICE"
+]
+LegQuoteSource = Literal["CHAIN", "TRACKED", "SETTLEMENT", "BROKER_FILL", "NONE"]
 LegMarkStatus = Literal[
     "OK", "FALLBACK_PRICE", "MISSING_CONTRACT", "MISSING_PRICE", "SETTLED", "UNRESOLVED"
 ]

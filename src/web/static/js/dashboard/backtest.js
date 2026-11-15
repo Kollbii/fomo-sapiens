@@ -6,13 +6,16 @@ import {
 } from "./state.js";
 import {
   extractApiErrorMessage,
+  showBanner,
   themeVars,
 } from "./helpers.js";
 import {
+  applyPanelVisibility,
   isPanelVisible,
 } from "./panels.js";
 import {
   apiJson,
+  loadChain,
 } from "./network.js";
 import {
   renderBacktestChart,
@@ -28,6 +31,7 @@ import {
   saveCurrentPaperTrade,
   setBacktestNotice,
   stopPaperTrade,
+  syncPaperTradesFromLedger,
   toIsoExpiry,
 } from "./backtest_paper.js";
 import {
@@ -157,6 +161,33 @@ export async function backtestOnSnapshotsLoaded(ticker) {
   }
 }
 
+function findPaperTradeById(tradeId) {
+  var pid = String(tradeId || "").trim();
+  if (!pid || !Array.isArray(state.backtestPaperTrades)) return null;
+  for (var i = 0; i < state.backtestPaperTrades.length; i++) {
+    if (state.backtestPaperTrades[i] && state.backtestPaperTrades[i].id === pid) {
+      return state.backtestPaperTrades[i];
+    }
+  }
+  return null;
+}
+
+function syncPaperTradeQtyInput(trade) {
+  if (!trade || !dom.backtestQty) return;
+  dom.backtestQty.value = String(trade.qty || 1);
+}
+
+function syncSelectedPaperTradeQty() {
+  if (!dom.backtestPaperSelect) return;
+  syncPaperTradeQtyInput(findPaperTradeById(dom.backtestPaperSelect.value));
+}
+
+function clearBacktestDateAndEndFilters() {
+  if (dom.backtestStartDate) dom.backtestStartDate.value = "";
+  if (dom.backtestEndDate) dom.backtestEndDate.value = "";
+  if (dom.backtestEndSelect) dom.backtestEndSelect.value = "";
+}
+
 function optionalNumberInput(el, isInt) {
   if (!el) return null;
   var raw = String(el.value || "").trim();
@@ -223,8 +254,16 @@ function buildBacktestPayload() {
   if (mode === "SINGLE_TRADE") {
     payload.source = state.backtestSource;
     if (state.backtestSource === "PAPER_TRADE") {
-      payload.paper_trade_id =
+      var selectedPaperId =
         dom.backtestPaperSelect && dom.backtestPaperSelect.value ? dom.backtestPaperSelect.value : null;
+      payload.paper_trade_id = selectedPaperId;
+      var selectedPaper = findPaperTradeById(selectedPaperId);
+      if (selectedPaper && selectedPaper.ticker) {
+        payload.ticker = selectedPaper.ticker;
+      }
+      if (!selectedPaper) {
+        delete cfg.qty;
+      }
     } else {
       payload.entry_snapshot_id =
         (dom.backtestEntrySelect && dom.backtestEntrySelect.value) || state.snapshotId || null;
@@ -280,13 +319,206 @@ export function rerenderBacktestChartOnTheme() {
   }
 }
 
+function findMatchedLedgerPaperTrade(trades, campaignId, positionKey, ticker) {
+  if (!Array.isArray(trades) || !trades.length) return null;
+  var cid = String(campaignId || "").trim();
+  var pkey = String(positionKey || "").trim();
+  var sym = String(ticker || "").trim().toUpperCase();
+
+  function pickBest(candidates) {
+    if (!candidates.length) return null;
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i].source === "LEDGER" && candidates[i].status === "ACTIVE") {
+        return candidates[i];
+      }
+    }
+    for (var j = 0; j < candidates.length; j++) {
+      if (candidates[j].source === "LEDGER") return candidates[j];
+    }
+    for (var k = 0; k < candidates.length; k++) {
+      if (candidates[k].status === "ACTIVE") return candidates[k];
+    }
+    return candidates[0];
+  }
+
+  if (cid) {
+    var byCampaign = trades.filter(function (pt) {
+      return pt.ledger_campaign_id === cid && (!sym || pt.ticker === sym);
+    });
+    var bestCamp = pickBest(byCampaign);
+    if (bestCamp) return bestCamp;
+  }
+  if (pkey) {
+    var byPos = trades.filter(function (pt) {
+      return pt.ledger_campaign_id === pkey && (!sym || pt.ticker === sym);
+    });
+    var bestPos = pickBest(byPos);
+    if (bestPos) return bestPos;
+  }
+  if (!cid && !pkey && sym) {
+    var byTicker = trades.filter(function (pt) {
+      return pt.source === "LEDGER" && pt.ticker === sym;
+    });
+    return pickBest(byTicker);
+  }
+  return null;
+}
+
+async function activateAndReplayPaperTrade(matched) {
+  if (!matched) return;
+  if (!isPanelVisible("backtest")) {
+    var nextVis = Object.assign({}, state.panelVisibility);
+    nextVis.backtest = true;
+    applyPanelVisibility(nextVis, { persist: true });
+  }
+  var filterVal = dom.backtestPaperFilter ? dom.backtestPaperFilter.value : "ACTIVE";
+  var inVisibleList = (state.backtestPaperTrades || []).some(function (t) {
+    return t.id === matched.id;
+  });
+  if (!inVisibleList || (filterVal !== "ALL" && filterVal !== matched.status)) {
+    if (dom.backtestPaperFilter && filterVal !== "ALL" && filterVal !== matched.status) {
+      dom.backtestPaperFilter.value = "ALL";
+    }
+    await loadPaperTrades();
+  }
+  if (dom.backtestCard && typeof dom.backtestCard.scrollIntoView === "function") {
+    dom.backtestCard.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+  clearBacktestDateAndEndFilters();
+  var switchedTicker = Boolean(matched.ticker && matched.ticker !== state.ticker);
+  if (switchedTicker) {
+    await loadChain(matched.ticker, "");
+  }
+  state.backtestMode = "SINGLE_TRADE";
+  state.backtestSource = "PAPER_TRADE";
+  syncBacktestControlVisibility();
+  if (dom.backtestPaperSelect) {
+    dom.backtestPaperSelect.value = matched.id;
+    if (dom.backtestPaperSelect.value !== matched.id && typeof document !== "undefined") {
+      var fallbackOpt = document.createElement("option");
+      fallbackOpt.value = matched.id;
+      fallbackOpt.textContent = matched.id + (matched.ticker ? " \u2022 " + matched.ticker : "");
+      fallbackOpt.selected = true;
+      dom.backtestPaperSelect.appendChild(fallbackOpt);
+      dom.backtestPaperSelect.value = matched.id;
+    }
+  }
+  syncPaperTradeQtyInput(matched);
+  clearBacktestDateAndEndFilters();
+  setBacktestNotice("", "");
+  await runBacktestStudy();
+  if (switchedTicker && !state.chainData && state.backtestResult) {
+    var stratLabel = matched.ledger_strategy_label || matched.strategy_kind;
+    showBanner(
+      "info",
+      "Replaying Ledger trade " +
+        matched.id +
+        " (" +
+        matched.ticker +
+        " \u2022 " +
+        stratLabel +
+        ") using synthetic Ledger MTM fallback.",
+      { ticker: matched.ticker, phase: "PAPER_TRADE" }
+    );
+  }
+}
+
+export async function replayLedgerTradeInBacktester(options) {
+  var opts = options && typeof options === "object" ? options : {};
+  var campaignId = opts.campaignId ? String(opts.campaignId).trim() : "";
+  var positionKey = opts.positionKey ? String(opts.positionKey).trim() : "";
+  var ticker = opts.ticker ? String(opts.ticker).trim().toUpperCase() : "";
+
+  var matched = findMatchedLedgerPaperTrade(
+    state.backtestPaperTrades,
+    campaignId,
+    positionKey,
+    ticker
+  );
+  if (!matched) {
+    var listRes = await apiJson("/api/backtest/paper-trades");
+    if (listRes.ok && listRes.body && Array.isArray(listRes.body.trades)) {
+      matched = findMatchedLedgerPaperTrade(
+        listRes.body.trades,
+        campaignId,
+        positionKey,
+        ticker
+      );
+    }
+  }
+  if (!matched) {
+    var syncBody = await syncPaperTradesFromLedger();
+    var syncedTrades =
+      syncBody && Array.isArray(syncBody.trades)
+        ? syncBody.trades
+        : state.backtestPaperTrades;
+    matched = findMatchedLedgerPaperTrade(syncedTrades, campaignId, positionKey, ticker);
+  }
+  if (!matched) {
+    var label = ticker || campaignId || positionKey || "position";
+    var warnMsg =
+      "No replayable option Paper Trade found for Trade Ledger " +
+      label +
+      " (stock-only lots or groups > 8 legs are skipped).";
+    showBanner("warn", warnMsg, { ticker: ticker || state.ticker, phase: "PAPER_TRADE" });
+    setBacktestNotice("warn", warnMsg);
+    return;
+  }
+  await activateAndReplayPaperTrade(matched);
+}
+
+async function replayPaperTradeFromList(pid) {
+  var tradeId = String(pid || "").trim();
+  if (!tradeId) return;
+  var matched = findPaperTradeById(tradeId);
+  if (!matched) {
+    await loadPaperTrades();
+    matched = findPaperTradeById(tradeId);
+  }
+  if (matched) {
+    await activateAndReplayPaperTrade(matched);
+    return;
+  }
+  state.backtestMode = "SINGLE_TRADE";
+  state.backtestSource = "PAPER_TRADE";
+  syncBacktestControlVisibility();
+  if (dom.backtestPaperSelect) dom.backtestPaperSelect.value = tradeId;
+  clearBacktestDateAndEndFilters();
+  setBacktestNotice("", "");
+  await runBacktestStudy();
+}
+
+async function reloadPaperTradesAndSyncQty(loaderFn, forceSync) {
+  var prevId = dom.backtestPaperSelect ? dom.backtestPaperSelect.value : "";
+  await loaderFn();
+  var nextId = dom.backtestPaperSelect ? dom.backtestPaperSelect.value : "";
+  if (
+    state.backtestMode === "SINGLE_TRADE" &&
+    state.backtestSource === "PAPER_TRADE" &&
+    nextId &&
+    (forceSync || nextId !== prevId)
+  ) {
+    syncSelectedPaperTradeQty();
+  }
+}
+
 function wireSegGroup(groupEl, attrName, stateKey, fallback) {
   if (!groupEl) return;
   groupEl.addEventListener("click", function (ev) {
     var btn = ev.target && ev.target.closest ? ev.target.closest("[" + attrName + "]") : null;
     if (!btn) return;
+    var prevMode = state.backtestMode;
+    var prevSource = state.backtestSource;
     state[stateKey] = btn.getAttribute(attrName) || fallback;
     syncBacktestControlVisibility();
+    if (
+      (stateKey === "backtestMode" || stateKey === "backtestSource") &&
+      (prevMode !== state.backtestMode || prevSource !== state.backtestSource) &&
+      state.backtestMode === "SINGLE_TRADE" &&
+      state.backtestSource === "PAPER_TRADE"
+    ) {
+      syncSelectedPaperTradeQty();
+    }
   });
 }
 
@@ -317,8 +549,22 @@ export function bindBacktestEvents() {
       if (idx >= 0) removeCustomBacktestLeg(idx);
     });
   }
-  if (dom.backtestPaperFilter) dom.backtestPaperFilter.addEventListener("change", loadPaperTrades);
-  if (dom.backtestPaperRefreshBtn) dom.backtestPaperRefreshBtn.addEventListener("click", loadPaperTrades);
+  if (dom.backtestPaperSelect) dom.backtestPaperSelect.addEventListener("change", syncSelectedPaperTradeQty);
+  if (dom.backtestPaperFilter) {
+    dom.backtestPaperFilter.addEventListener("change", function () {
+      reloadPaperTradesAndSyncQty(loadPaperTrades);
+    });
+  }
+  if (dom.backtestPaperSyncLedgerBtn) {
+    dom.backtestPaperSyncLedgerBtn.addEventListener("click", function () {
+      reloadPaperTradesAndSyncQty(syncPaperTradesFromLedger, true);
+    });
+  }
+  if (dom.backtestPaperRefreshBtn) {
+    dom.backtestPaperRefreshBtn.addEventListener("click", function () {
+      reloadPaperTradesAndSyncQty(loadPaperTrades);
+    });
+  }
   if (dom.backtestPaperList) {
     dom.backtestPaperList.addEventListener("click", function (ev) {
       var stopBtn = ev.target && ev.target.closest ? ev.target.closest("[data-paper-stop]") : null;
@@ -328,12 +574,7 @@ export function bindBacktestEvents() {
       }
       var replayBtn = ev.target && ev.target.closest ? ev.target.closest("[data-paper-replay]") : null;
       if (replayBtn) {
-        var pid = replayBtn.getAttribute("data-paper-replay") || "";
-        state.backtestMode = "SINGLE_TRADE";
-        state.backtestSource = "PAPER_TRADE";
-        syncBacktestControlVisibility();
-        if (dom.backtestPaperSelect && pid) dom.backtestPaperSelect.value = pid;
-        runBacktestStudy();
+        replayPaperTradeFromList(replayBtn.getAttribute("data-paper-replay") || "");
       }
     });
   }

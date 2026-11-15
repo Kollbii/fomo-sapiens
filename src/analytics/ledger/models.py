@@ -126,6 +126,8 @@ class LedgerOpenPositionView(BaseModel):
     unrealized_pnl_ex_fee: float | None = None
     fees: float
     campaign_id: str | None = None
+    conid: int | None = None
+    opened_at: str | None = None
 
 
 class LedgerExecutionView(BaseModel):

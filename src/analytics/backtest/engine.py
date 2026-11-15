@@ -4,14 +4,18 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 
-from src.analytics.backtest.context import BarContext, extract_bar_context
+import polars as pl
+
+from src.analytics.backtest.context import BarContext, clean_positive_price, extract_bar_context
 from src.analytics.backtest.metrics import (
     build_portfolio_summary,
     finalize_trade_record,
     pct_or_none,
 )
 from src.analytics.backtest.models import (
+    FLAG_BROKER_FILL_ENTRY,
     FLAG_LEG_FALLBACK_PRICE,
     FLAG_NO_USABLE_DAILY_SNAPSHOT,
     FLAG_TRACKED_LEG_USED,
@@ -36,10 +40,13 @@ from src.analytics.backtest.pricing import (
 )
 from src.analytics.backtest.rules import (
     DENOM_EPS,
+    BrokerFillAnchor,
     CadenceState,
     EntryBuildResult,
+    build_broker_fill_entry,
     build_entry_candidate_outcome,
     evaluate_exit_rule,
+    parse_anchor_ts_utc,
     record_entry_attempt,
     should_attempt_entry,
 )
@@ -48,6 +55,7 @@ from src.core.calendar import fmt_et
 from src.core.exceptions import BacktestValidationError
 from src.core.security import TickerValidator
 from src.storage.backtest_store import DailyChainBar
+from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA
 
 BACKTEST_ASSUMPTIONS: tuple[str, ...] = (
     "Chronological execution: exits and expiry settlements on bar i evaluate strictly "
@@ -90,6 +98,7 @@ _SINGLE_PRICE_TO_MARK: dict[LegPriceSource, StepMarkSource] = {
     "MID": "MID",
     "LAST": "LAST",
     "CLOSE": "CLOSE",
+    "BROKER_FILL": "BROKER_FILL",
 }
 
 
@@ -101,6 +110,10 @@ def _derive_step_mark_source(
 ) -> StepMarkSource:
     if quote_missing:
         return "MISSING"
+    if FLAG_BROKER_FILL_ENTRY in step_data.flags or (
+        step_data.legs and all(leg.quote_source == "BROKER_FILL" for leg in step_data.legs)
+    ):
+        return "BROKER_FILL"
     if step_data.all_legs_settled:
         return "SETTLEMENT"
     if FLAG_TRACKED_LEG_USED in step_data.flags:
@@ -291,6 +304,142 @@ def _finalize(
     )
 
 
+@dataclass
+class _SimRunState:
+    peak_equity: float
+    all_trades: list[_OpenTradeState] = field(default_factory=list)
+    active_open: list[_OpenTradeState] = field(default_factory=list)
+    equity_curve: list[EquityCurvePoint] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+    skipped_by_reason: dict[str, int] = field(default_factory=dict)
+    cadence: CadenceState = field(default_factory=CadenceState)
+    realized_pnl: float = 0.0
+    ok_bars: int = 0
+    flagged_bars: int = 0
+    unusable_bars: int = 0
+    trade_seq: int = 0
+
+
+def _as_utc(ts: datetime) -> datetime:
+    return ts.replace(tzinfo=UTC) if ts.tzinfo is None else ts.astimezone(UTC)
+
+
+def _prepare_anchor_bars(
+    ordered_bars: Sequence[DailyChainBar],
+    anchor: BrokerFillAnchor,
+) -> tuple[list[DailyChainBar], datetime, list[str]]:
+    """Filter bars to on/after `anchor.entry_ts_utc`, or keep latest same/later-day bar."""
+    try:
+        entry_day = date.fromisoformat(anchor.entry_date)
+    except ValueError as exc:
+        raise BacktestValidationError(f"Invalid entry_date {anchor.entry_date!r}: {exc}") from exc
+    anchor_ts = parse_anchor_ts_utc(anchor.entry_ts_utc)
+    after_anchor = [b for b in ordered_bars if _as_utc(b.ts_utc) >= anchor_ts]
+    if after_anchor:
+        return after_anchor, anchor_ts, []
+
+    last_bar = ordered_bars[-1]
+    if date.fromisoformat(last_bar.market_date) < entry_day:
+        raise BacktestValidationError(
+            f"All provided daily bars precede broker fill entry_date {anchor.entry_date}."
+        )
+    fallback_ts = _as_utc(last_bar.ts_utc)
+    aligned_ts = min(anchor_ts, fallback_ts)
+    note = (
+        f"Only prior-timestamp snapshot {last_bar.snapshot_id} "
+        f"({fallback_ts.strftime('%Y-%m-%dT%H:%M:%SZ')}) was available on/after "
+        f"{anchor.entry_date}; Day-0 anchor step timestamp aligned for chronological order."
+    )
+    return [last_bar], aligned_ts, [note]
+
+
+def _build_anchor_bar_and_context(
+    anchor: BrokerFillAnchor,
+    first_bar: DailyChainBar,
+    *,
+    anchor_ts_override: datetime | None = None,
+) -> tuple[DailyChainBar, BarContext]:
+    anchor_ts = (
+        anchor_ts_override
+        if anchor_ts_override is not None
+        else parse_anchor_ts_utc(anchor.entry_ts_utc)
+    )
+    anchor_bar = DailyChainBar(
+        snapshot_id=anchor.entry_snapshot_id,
+        ts_utc=anchor_ts,
+        market_date=anchor.entry_date,
+        df=pl.DataFrame(schema=OPTION_CHAIN_POLARS_SCHEMA),
+        meta=None,
+    )
+    first_ctx = extract_bar_context(first_bar)
+    same_day = first_bar.market_date == anchor.entry_date
+    anchor_spot = first_ctx.spot
+    if (
+        same_day
+        and anchor_spot is None
+        and first_bar.tracked_df is not None
+        and first_bar.tracked_df.height > 0
+    ):
+        anchor_spot = clean_positive_price(first_bar.tracked_df["underlying_price"][0])
+    anchor_ctx = BarContext(
+        spot=anchor_spot if same_day else None,
+        spot_source=first_ctx.spot_source if same_day else None,
+        market_data_type=first_ctx.market_data_type if same_day else None,
+        quote_coverage=first_ctx.quote_coverage if same_day else None,
+        flags=(),
+        bar_reliable=True,
+    )
+    return anchor_bar, anchor_ctx
+
+
+def _emit_equity_point(
+    state: _SimRunState,
+    bar: DailyChainBar,
+    spot: float | None,
+    bar_flags: list[str],
+    config: BacktestConfig,
+) -> None:
+    unrealized = sum(
+        (
+            t.steps[-1].net_pnl_dollars
+            if t.steps[-1].net_pnl_dollars is not None
+            else t.last_known_unrealized_net
+        )
+        for t in state.active_open
+    )
+    if any(t.status == "UNRESOLVED" for t in state.all_trades):
+        bar_flags.append("UNRESOLVED_TRADE")
+
+    equity = round(config.initial_capital + state.realized_pnl + unrealized, 2)
+    state.peak_equity = max(state.peak_equity, equity)
+    dd_dollars = round(max(0.0, state.peak_equity - equity), 2)
+    dd_pct = (
+        round((dd_dollars / state.peak_equity) * 100.0, 2) if state.peak_equity > DENOM_EPS else 0.0
+    )
+
+    deduped_bar_flags = deduplicate_flags(bar_flags)
+    if deduped_bar_flags:
+        state.flagged_bars += 1
+    else:
+        state.ok_bars += 1
+
+    state.equity_curve.append(
+        EquityCurvePoint(
+            market_date=bar.market_date,
+            snapshot_id=bar.snapshot_id,
+            ts_utc=bar.ts_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            equity_dollars=equity,
+            realized_pnl_dollars=round(state.realized_pnl, 2),
+            unrealized_pnl_dollars=round(unrealized, 2),
+            drawdown_dollars=dd_dollars,
+            drawdown_pct=dd_pct,
+            open_trades=len(state.active_open),
+            underlying_price=spot,
+            flags=deduped_bar_flags,
+        )
+    )
+
+
 def _simulate_bars(
     ordered_bars: Sequence[DailyChainBar],
     config: BacktestConfig,
@@ -298,6 +447,8 @@ def _simulate_bars(
     ticker: str,
     mode: BacktestMode,
     entry_legs: Sequence[StrategyLegInput] | None = None,
+    broker_fill_anchor: BrokerFillAnchor | None = None,
+    trade_id: str | None = None,
 ) -> BacktestSimulationResult:
     if not ordered_bars:
         return BacktestSimulationResult(
@@ -309,40 +460,63 @@ def _simulate_bars(
             assumptions=list(BACKTEST_ASSUMPTIONS),
         )
 
-    all_trades: list[_OpenTradeState] = []
-    active_open: list[_OpenTradeState] = []
-    equity_curve: list[EquityCurvePoint] = []
-    notes: list[str] = []
-    skipped_by_reason: dict[str, int] = {}
-    cadence = CadenceState()
-    realized_pnl, peak_equity = 0.0, config.initial_capital
-    ok_bars = flagged_bars = unusable_bars = trade_seq = 0
+    state = _SimRunState(peak_equity=config.initial_capital)
+    active_bars: Sequence[DailyChainBar] = ordered_bars
 
-    for bar_idx, bar in enumerate(ordered_bars):
+    if broker_fill_anchor is not None:
+        active_bars, anchor_ts_eff, anchor_notes = _prepare_anchor_bars(
+            ordered_bars, broker_fill_anchor
+        )
+        state.notes.extend(anchor_notes)
+        anchor_entry = build_broker_fill_entry(
+            entry_legs or (),
+            config,
+            broker_fill_anchor,
+            reference_bar=active_bars[0],
+        )
+        anchor_bar, anchor_ctx = _build_anchor_bar_and_context(
+            broker_fill_anchor,
+            active_bars[0],
+            anchor_ts_override=anchor_ts_eff,
+        )
+        state.trade_seq += 1
+        resolved_tid = trade_id or f"{ticker}_BT_{state.trade_seq:04d}"
+        t_state = _start_trade_state(resolved_tid, anchor_bar, anchor_ctx, anchor_entry, config)
+        state.all_trades.append(t_state)
+        state.active_open.append(t_state)
+        _emit_equity_point(
+            state,
+            anchor_bar,
+            anchor_ctx.spot,
+            [*anchor_ctx.flags, *t_state.flags],
+            config,
+        )
+
+    for bar_idx, bar in enumerate(active_bars):
         bar_ctx = extract_bar_context(bar)
         bar_flags: list[str] = list(bar_ctx.flags)
         if FLAG_NO_USABLE_DAILY_SNAPSHOT in bar_ctx.flags:
-            unusable_bars += 1
+            state.unusable_bars += 1
 
         still_open: list[_OpenTradeState] = []
-        for t in active_open:
-            stays_open, realized_delta = _step_open_trade(t, bar, bar_ctx, config, notes)
-            realized_pnl += realized_delta
+        for t in state.active_open:
+            stays_open, realized_delta = _step_open_trade(t, bar, bar_ctx, config, state.notes)
+            state.realized_pnl += realized_delta
             bar_flags.extend(t.steps[-1].flags)
             if t.status == "UNRESOLVED":
                 bar_flags.append("UNRESOLVED_TRADE")
-                notes.append(
+                state.notes.append(
                     f"{t.trade_id} kept UNRESOLVED on {bar.market_date}: "
                     "missing settlement spot/leg."
                 )
             if stays_open:
                 still_open.append(t)
-        active_open = still_open
+        state.active_open = still_open
 
         want_entry = (
-            bar_idx == 0
+            (bar_idx == 0 and broker_fill_anchor is None)
             if mode == "SINGLE_TRADE"
-            else should_attempt_entry(bar, bar_idx, config, len(active_open), cadence)
+            else should_attempt_entry(bar, bar_idx, config, len(state.active_open), state.cadence)
         )
         if want_entry:
             entry_res, _entry_notes, skip_reason = build_entry_candidate_outcome(
@@ -350,111 +524,80 @@ def _simulate_bars(
             )
             if entry_res is not None:
                 if mode == "SYSTEMATIC":
-                    record_entry_attempt(bar, bar_idx, cadence)
-                trade_seq += 1
-                t_state = _start_trade_state(
-                    f"{ticker}_BT_{trade_seq:04d}", bar, bar_ctx, entry_res, config
+                    record_entry_attempt(bar, bar_idx, state.cadence)
+                state.trade_seq += 1
+                resolved_tid = (
+                    trade_id
+                    if (mode == "SINGLE_TRADE" and trade_id)
+                    else f"{ticker}_BT_{state.trade_seq:04d}"
                 )
-                all_trades.append(t_state)
-                active_open.append(t_state)
+                t_state = _start_trade_state(resolved_tid, bar, bar_ctx, entry_res, config)
+                state.all_trades.append(t_state)
+                state.active_open.append(t_state)
                 bar_flags.extend(t_state.flags)
             else:
                 reason_key = skip_reason or "ENTRY_SKIPPED"
-                skipped_by_reason[reason_key] = skipped_by_reason.get(reason_key, 0) + 1
+                state.skipped_by_reason[reason_key] = state.skipped_by_reason.get(reason_key, 0) + 1
                 bar_flags.append("ENTRY_SKIPPED")
 
-        unrealized = sum(
-            (
-                t.steps[-1].net_pnl_dollars
-                if t.steps[-1].net_pnl_dollars is not None
-                else t.last_known_unrealized_net
-            )
-            for t in active_open
-        )
-        if any(t.status == "UNRESOLVED" for t in all_trades):
-            bar_flags.append("UNRESOLVED_TRADE")
+        _emit_equity_point(state, bar, bar_ctx.spot, bar_flags, config)
 
-        equity = round(config.initial_capital + realized_pnl + unrealized, 2)
-        peak_equity = max(peak_equity, equity)
-        dd_dollars = round(max(0.0, peak_equity - equity), 2)
-        dd_pct = round((dd_dollars / peak_equity) * 100.0, 2) if peak_equity > DENOM_EPS else 0.0
-
-        deduped_bar_flags = deduplicate_flags(bar_flags)
-        if deduped_bar_flags:
-            flagged_bars += 1
-        else:
-            ok_bars += 1
-
-        equity_curve.append(
-            EquityCurvePoint(
-                market_date=bar.market_date,
-                snapshot_id=bar.snapshot_id,
-                ts_utc=bar.ts_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                equity_dollars=equity,
-                realized_pnl_dollars=round(realized_pnl, 2),
-                unrealized_pnl_dollars=round(unrealized, 2),
-                drawdown_dollars=dd_dollars,
-                drawdown_pct=dd_pct,
-                open_trades=len(active_open),
-                underlying_price=bar_ctx.spot,
-                flags=deduped_bar_flags,
-            )
-        )
-
-    if unusable_bars > 0:
-        notes.append(
-            f"{unusable_bars} daily bar(s) had no usable snapshot (NO_USABLE_DAILY_SNAPSHOT)."
+    if state.unusable_bars > 0:
+        state.notes.append(
+            f"{state.unusable_bars} daily bar(s) had no usable snapshot (NO_USABLE_DAILY_SNAPSHOT)."
         )
 
     missing_quote_steps = sum(
         1
-        for t in all_trades
+        for t in state.all_trades
         for s in t.steps
         if s.quote_missing
         and FLAG_UNRESOLVED_EXPIRY_SPOT not in s.flags
         and FLAG_UNRESOLVED_EXPIRY_LEG not in s.flags
     )
     if missing_quote_steps > 0:
-        notes.append(
+        state.notes.append(
             f"{missing_quote_steps} trade daily step(s) had missing leg quotes "
             "(MTM omitted; prior unrealized P&L carried forward on equity curve)."
         )
 
     fallback_quote_steps = sum(
         1
-        for t in all_trades
+        for t in state.all_trades
         for s in t.steps
         if not s.quote_missing
         and (FLAG_LEG_FALLBACK_PRICE in s.flags or FLAG_TRACKED_LEG_USED in s.flags)
     )
     if fallback_quote_steps > 0:
-        notes.append(
+        state.notes.append(
             f"{fallback_quote_steps} trade daily step(s) used fallback or tracked-leg quotes."
         )
 
-    if skipped_by_reason:
-        skip_parts = ", ".join(f"{k}={v}" for k, v in sorted(skipped_by_reason.items()))
-        notes.append(f"Skipped {sum(skipped_by_reason.values())} entry attempt(s): {skip_parts}.")
-    elif not all_trades:
-        notes.append("No trades opened during the simulation window.")
+    if state.skipped_by_reason:
+        skip_parts = ", ".join(f"{k}={v}" for k, v in sorted(state.skipped_by_reason.items()))
+        state.notes.append(
+            f"Skipped {sum(state.skipped_by_reason.values())} entry attempt(s): {skip_parts}."
+        )
+    elif not state.all_trades:
+        state.notes.append("No trades opened during the simulation window.")
 
-    final_trades = [_finalize(t, ordered_bars[-1], config) for t in all_trades]
+    final_trades = [_finalize(t, active_bars[-1], config) for t in state.all_trades]
     summary = build_portfolio_summary(
         config,
         final_trades,
-        equity_curve,
-        ok_bars,
-        flagged_bars,
-        skipped_by_reason=skipped_by_reason,
+        state.equity_curve,
+        state.ok_bars,
+        state.flagged_bars,
+        skipped_by_reason=state.skipped_by_reason,
     )
     return BacktestSimulationResult(
         ticker=ticker,
         mode=mode,
         config=config,
         summary=summary,
-        equity_curve=equity_curve,
+        equity_curve=state.equity_curve,
         trades=final_trades,
-        notes=deduplicate_flags(notes),
+        notes=deduplicate_flags(state.notes),
         assumptions=list(BACKTEST_ASSUMPTIONS),
     )
 
@@ -479,13 +622,46 @@ def run_single_trade_replay(
     config: BacktestConfig,
     *,
     ticker: str,
-    entry_snapshot_id: str,
+    entry_snapshot_id: str | None = None,
     legs: Sequence[StrategyLegInput] | None = None,
     end_snapshot_id: str | None = None,
+    broker_fill_anchor: BrokerFillAnchor | None = None,
+    trade_id: str | None = None,
 ) -> BacktestSimulationResult:
-    """Replay a single trade from `entry_snapshot_id` through exit or `end_snapshot_id`."""
+    """Replay a single trade from `entry_snapshot_id` or `broker_fill_anchor` through exit."""
     symbol = TickerValidator.validate(ticker)
     ordered = sorted(bars, key=lambda b: (b.ts_utc, b.snapshot_id))
+
+    if broker_fill_anchor is not None:
+        if not ordered:
+            raise BacktestValidationError(
+                "At least one daily bar is required when broker_fill_anchor is provided."
+            )
+        if end_snapshot_id is not None:
+            end_idx = next(
+                (idx for idx, b in enumerate(ordered) if b.snapshot_id == end_snapshot_id), None
+            )
+            if end_idx is None:
+                raise BacktestValidationError(
+                    f"end_snapshot_id {end_snapshot_id!r} not found in provided bars."
+                )
+            window_bars = ordered[: end_idx + 1]
+        else:
+            window_bars = ordered
+        return _simulate_bars(
+            window_bars,
+            config,
+            ticker=symbol,
+            mode="SINGLE_TRADE",
+            entry_legs=legs,
+            broker_fill_anchor=broker_fill_anchor,
+            trade_id=trade_id,
+        )
+
+    if entry_snapshot_id is None:
+        raise BacktestValidationError(
+            "entry_snapshot_id is required when broker_fill_anchor is not provided."
+        )
     entry_idx = next(
         (idx for idx, b in enumerate(ordered) if b.snapshot_id == entry_snapshot_id), None
     )
@@ -510,4 +686,11 @@ def run_single_trade_replay(
     else:
         window_bars = ordered[entry_idx:]
 
-    return _simulate_bars(window_bars, config, ticker=symbol, mode="SINGLE_TRADE", entry_legs=legs)
+    return _simulate_bars(
+        window_bars,
+        config,
+        ticker=symbol,
+        mode="SINGLE_TRADE",
+        entry_legs=legs,
+        trade_id=trade_id,
+    )

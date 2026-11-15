@@ -2,18 +2,26 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Final
 
 import polars as pl
 
-from src.analytics.backtest.context import BarContext, extract_bar_context, is_leg_settled
+from src.analytics.backtest.context import (
+    BarContext,
+    clean_positive_price,
+    extract_bar_context,
+    is_leg_settled,
+)
 from src.analytics.backtest.models import (
+    FLAG_BROKER_FILL_ENTRY,
     FLAG_MISSING_PRICE,
     FLAG_NO_LAST_PRINT,
     BacktestConfig,
+    BacktestLegMark,
     ExitReason,
     deduplicate_flags,
 )
@@ -27,7 +35,11 @@ from src.analytics.backtest.pricing import (
 )
 from src.analytics.strategies.builders import StrategyFilterError
 from src.analytics.strategies.engine import evaluate_strategy
-from src.analytics.strategies.models import EvaluatedLeg, StrategyLegInput
+from src.analytics.strategies.models import (
+    EvaluatedLeg,
+    StrategyEvaluationResponse,
+    StrategyLegInput,
+)
 from src.analytics.walls import compute_walls
 from src.core.exceptions import BacktestValidationError
 from src.storage.backtest_store import DailyChainBar
@@ -35,6 +47,17 @@ from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA
 
 DENOM_EPS: Final = 1e-9
 TARGET_DTE_CENTER: Final = 38
+
+
+@dataclass(frozen=True)
+class BrokerFillAnchor:
+    """Entry cash and fill-price anchor for replaying an already-opened position."""
+
+    entry_date: str
+    entry_ts_utc: str
+    entry_snapshot_id: str
+    entry_net_cash_dollars: float
+    leg_entry_prices: Sequence[float | None] = ()
 
 
 @dataclass(frozen=True)
@@ -70,6 +93,289 @@ class ExitDecision:
     unresolved: bool = False
     flags: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+
+def _adjust_risk_bounds(
+    ev: StrategyEvaluationResponse, entry_cash_mid_r: float
+) -> tuple[float, float | None, bool]:
+    delta_cash = entry_cash_mid_r - ev.pricing.mid_cash_total
+    max_profit_dollars = round(max(0.0, ev.risk.max_profit + delta_cash), 2)
+    if ev.risk.max_loss_unbounded:
+        return max_profit_dollars, None, True
+    return max_profit_dollars, round(max(0.0, ev.risk.max_loss - delta_cash), 2), False
+
+
+def parse_anchor_ts_utc(raw: str) -> datetime:
+    """Parse an ISO-8601 UTC timestamp string from `BrokerFillAnchor` into UTC `datetime`."""
+    text = raw.strip()
+    if not text:
+        raise BacktestValidationError("broker_fill_anchor.entry_ts_utc must not be empty.")
+    iso_text = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        dt = datetime.fromisoformat(iso_text)
+    except ValueError as exc:
+        raise BacktestValidationError(f"Invalid entry_ts_utc {raw!r}: {exc}") from exc
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def resolve_broker_leg_prices(
+    legs: Sequence[StrategyLegInput],
+    qty_multiplier: int,
+    entry_net_cash_dollars: float,
+    leg_entry_prices: Sequence[float | None],
+) -> list[float]:
+    """Resolve per-leg entry fill prices from explicit prices and total net entry cash."""
+    if qty_multiplier <= 0:
+        raise BacktestValidationError("qty_multiplier must be >= 1.")
+    if not math.isfinite(entry_net_cash_dollars):
+        raise BacktestValidationError("entry_net_cash_dollars must be finite.")
+    if leg_entry_prices and len(leg_entry_prices) != len(legs):
+        raise BacktestValidationError(
+            f"leg_entry_prices length ({len(leg_entry_prices)}) must match legs ({len(legs)})."
+        )
+    resolved: list[float | None] = []
+    known_cash = 0.0
+    missing_indices: list[int] = []
+    for idx, leg in enumerate(legs):
+        raw_px = leg_entry_prices[idx] if idx < len(leg_entry_prices) else None
+        if raw_px is not None and math.isfinite(raw_px) and raw_px >= 0.0:
+            px = 0.0 if raw_px == 0.0 else float(raw_px)
+            resolved.append(px)
+            cash_sign = -1.0 if leg.side == "BUY" else 1.0
+            known_cash += cash_sign * float(leg.qty * qty_multiplier) * 100.0 * px
+        else:
+            resolved.append(None)
+            missing_indices.append(idx)
+
+    if missing_indices:
+        residual_cash = entry_net_cash_dollars - known_cash
+        signed_shares = 0.0
+        sell_shares = 0.0
+        buy_shares = 0.0
+        for idx in missing_indices:
+            leg = legs[idx]
+            shares = float(leg.qty * qty_multiplier) * 100.0
+            if leg.side == "BUY":
+                signed_shares -= shares
+                buy_shares += shares
+            else:
+                signed_shares += shares
+                sell_shares += shares
+
+        uniform_px = residual_cash / signed_shares if abs(signed_shares) > DENOM_EPS else -1.0
+        if uniform_px >= 0.0 and math.isfinite(uniform_px):
+            clean_px = 0.0 if uniform_px == 0.0 else float(uniform_px)
+            for idx in missing_indices:
+                resolved[idx] = clean_px
+        elif residual_cash >= 0.0 and sell_shares > DENOM_EPS:
+            sell_px = residual_cash / sell_shares
+            for idx in missing_indices:
+                resolved[idx] = sell_px if legs[idx].side == "SELL" else 0.0
+        elif residual_cash < 0.0 and buy_shares > DENOM_EPS:
+            buy_px = (-residual_cash) / buy_shares
+            for idx in missing_indices:
+                resolved[idx] = buy_px if legs[idx].side == "BUY" else 0.0
+        else:
+            for idx in missing_indices:
+                resolved[idx] = 0.0
+
+    return [0.0 if px is None else float(px) for px in resolved]
+
+
+def _resolve_anchor_underlying_and_spot(
+    legs: Sequence[StrategyLegInput],
+    anchor: BrokerFillAnchor,
+    reference_bar: DailyChainBar | None,
+) -> tuple[str, float]:
+    underlying = ""
+    spot: float | None = None
+    if reference_bar is not None:
+        spot = extract_bar_context(reference_bar).spot
+        if reference_bar.df.height > 0:
+            underlying = str(reference_bar.df["underlying"][0] or "").strip()
+        if (
+            (not underlying or spot is None or spot <= 0.0)
+            and reference_bar.tracked_df is not None
+            and reference_bar.tracked_df.height > 0
+        ):
+            if not underlying:
+                underlying = str(reference_bar.tracked_df["underlying"][0] or "").strip()
+            if spot is None or spot <= 0.0:
+                spot = clean_positive_price(reference_bar.tracked_df["underlying_price"][0])
+        if not underlying and "_" in reference_bar.snapshot_id:
+            underlying = reference_bar.snapshot_id.split("_", 1)[0].strip()
+    if not underlying and "_" in anchor.entry_snapshot_id:
+        underlying = anchor.entry_snapshot_id.split("_", 1)[0].strip()
+    if not underlying:
+        underlying = "UNDERLYING"
+    if spot is None or spot <= 0.0:
+        spot = sum(float(leg.strike) for leg in legs) / float(len(legs))
+    return underlying, float(spot)
+
+
+def build_broker_fill_entry(
+    legs: Sequence[StrategyLegInput],
+    config: BacktestConfig,
+    anchor: BrokerFillAnchor,
+    reference_bar: DailyChainBar | None = None,
+) -> EntryBuildResult:
+    """Build an anchored Day-0 `EntryBuildResult` from recorded fill cash & leg prices."""
+    if not legs:
+        raise BacktestValidationError("At least one option leg is required.")
+    if not anchor.entry_snapshot_id.strip():
+        raise BacktestValidationError("broker_fill_anchor.entry_snapshot_id must not be empty.")
+    if not math.isfinite(anchor.entry_net_cash_dollars):
+        raise BacktestValidationError("broker_fill_anchor.entry_net_cash_dollars must be finite.")
+    try:
+        entry_day = date.fromisoformat(anchor.entry_date)
+    except ValueError as exc:
+        raise BacktestValidationError(f"Invalid entry_date {anchor.entry_date!r}: {exc}") from exc
+    entry_dt = parse_anchor_ts_utc(anchor.entry_ts_utc)
+    ts_utc_str = entry_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    resolved_prices = resolve_broker_leg_prices(
+        legs, config.qty, anchor.entry_net_cash_dollars, anchor.leg_entry_prices
+    )
+    underlying, spot = _resolve_anchor_underlying_and_spot(legs, anchor, reference_bar)
+
+    syn_rows: list[dict[str, object]] = []
+    for idx, (leg, px) in enumerate(zip(legs, resolved_prices, strict=True), start=1):
+        dte = max(0, (date.fromisoformat(leg.expiry) - entry_day).days)
+        syn_rows.append(
+            {
+                "snapshot_id": anchor.entry_snapshot_id,
+                "snapshot_ts_utc": ts_utc_str,
+                "market_date": anchor.entry_date,
+                "market_data_type": 3,
+                "underlying": underlying,
+                "underlying_conid": 1,
+                "underlying_price": spot,
+                "option_conid": idx,
+                "expiry": leg.expiry,
+                "dte": dte,
+                "strike": float(leg.strike),
+                "moneyness_pct": round(((float(leg.strike) - spot) / spot) * 100.0, 4),
+                "right": leg.right,
+                "bid": px,
+                "ask": px,
+                "mid": px,
+                "last": px,
+                "close": px,
+                "mark_price": px,
+                "volume": None,
+                "open_interest": None,
+                "iv": None,
+                "delta": None,
+                "gamma": None,
+                "theta": None,
+                "vega": None,
+                "greeks_source": "NONE",
+            }
+        )
+    syn_df = pl.DataFrame(syn_rows, schema=OPTION_CHAIN_POLARS_SCHEMA)
+
+    entry_cash_mid_r = round(anchor.entry_net_cash_dollars, 2) or 0.0
+    entry_cash_nat_r = entry_cash_mid_r
+    entry_basis = round(abs(entry_cash_mid_r), 2) or 0.0
+    anchor_note = f"Anchored to broker fill from {anchor.entry_snapshot_id} ({anchor.entry_date})."
+
+    try:
+        ev = evaluate_strategy(
+            syn_df,
+            strategy_kind=config.strategy_kind,
+            legs=list(legs),
+            qty_multiplier=config.qty,
+            risk_free_rate=config.risk_free_rate,
+        )
+        max_profit_dollars, max_loss_dollars, max_loss_unbounded = _adjust_risk_bounds(
+            ev, entry_cash_mid_r
+        )
+        eval_legs = [
+            ev_leg.model_copy(
+                update={
+                    "bid": round(px, 4),
+                    "ask": round(px, 4),
+                    "mid": round(px, 4),
+                    "natural_fill": round(px, 4),
+                }
+            )
+            for ev_leg, px in zip(ev.legs, resolved_prices, strict=True)
+        ]
+        selection_notes = deduplicate_flags([anchor_note, *ev.rationale])
+    except ValueError:
+        max_profit_dollars = None
+        max_loss_dollars = None
+        max_loss_unbounded = False
+        eval_legs = [
+            EvaluatedLeg(
+                side=leg.side,
+                right=leg.right,
+                expiry=leg.expiry,
+                dte=max(0, (date.fromisoformat(leg.expiry) - entry_day).days),
+                strike=float(leg.strike),
+                qty=leg.qty * config.qty,
+                bid=round(px, 4),
+                ask=round(px, 4),
+                mid=round(px, 4),
+                natural_fill=round(px, 4),
+                spread_pct=0.0 if px > 0.0 else None,
+                iv=None,
+                delta=None,
+                gamma=None,
+                theta=None,
+                vega=None,
+                open_interest=None,
+                volume=None,
+                option_conid=None,
+                selection_reason=leg.selection_reason,
+            )
+            for leg, px in zip(legs, resolved_prices, strict=True)
+        ]
+        selection_notes = [anchor_note]
+
+    leg_marks = [
+        BacktestLegMark(
+            side=leg.side,
+            right=leg.right,
+            expiry=leg.expiry,
+            strike=leg.strike,
+            qty=leg.qty,
+            price_used=round(px, 4),
+            natural_price=round(px, 4),
+            price_source="BROKER_FILL",
+            quote_source="BROKER_FILL",
+            status="OK",
+        )
+        for leg, px in zip(eval_legs, resolved_prices, strict=True)
+    ]
+    dte_min_leg = min(max(0, (date.fromisoformat(leg.expiry) - entry_day).days) for leg in legs)
+    close_val = round(-entry_cash_mid_r, 2) or 0.0
+    initial_step = EvaluatedStepData(
+        legs=leg_marks,
+        dte_min_leg=dte_min_leg,
+        mark_value_dollars=close_val,
+        natural_close_value_dollars=close_val,
+        active_close_value_dollars=close_val,
+        all_legs_settled=False,
+        any_leg_settled=False,
+        settlement_blocked=False,
+        unexpired_close_contracts=sum(leg.qty for leg in eval_legs),
+        flags=[FLAG_BROKER_FILL_ENTRY],
+        tracked_snapshot_ids=[],
+        status="OK",
+    )
+    return EntryBuildResult(
+        legs=eval_legs,
+        entry_cash_mid_dollars=entry_cash_mid_r,
+        entry_cash_natural_dollars=entry_cash_nat_r,
+        entry_basis_dollars=entry_basis,
+        max_profit_dollars=max_profit_dollars,
+        max_loss_dollars=max_loss_dollars,
+        max_loss_unbounded=max_loss_unbounded,
+        initial_step=initial_step,
+        selection_notes=selection_notes,
+        flags=[FLAG_BROKER_FILL_ENTRY],
+    )
 
 
 def _pick_front_expiry(df: pl.DataFrame, *, target_dte_min: int, target_dte_max: int) -> str:
@@ -337,13 +643,7 @@ def build_entry_candidate_outcome(
     entry_cash_mid_r = round(entry_cash_mid, 2)
     entry_cash_nat_r = round(entry_cash_nat, 2)
     entry_basis = round(abs(entry_cash_mid_r), 2)
-    delta_cash = entry_cash_mid_r - ev.pricing.mid_cash_total
-
-    max_profit_dollars = round(max(0.0, ev.risk.max_profit + delta_cash), 2)
-    if ev.risk.max_loss_unbounded:
-        max_loss_dollars: float | None = None
-    else:
-        max_loss_dollars = round(max(0.0, ev.risk.max_loss - delta_cash), 2)
+    max_profit_dollars, max_loss_dollars, _ = _adjust_risk_bounds(ev, entry_cash_mid_r)
 
     if apply_bps_filters and (eff_min_credit is not None or eff_min_ror is not None):
         per_spread_credit = round(entry_cash_mid_r / float(config.qty), 2)

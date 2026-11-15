@@ -10,6 +10,7 @@ screener) run one at a time, and every `refresh_lock` holder stops both (`_stop_
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
@@ -72,6 +73,7 @@ from src.services.schemas import (
     LedgerImportResponse,
     LedgerMTMRefreshResponse,
     LedgerSyncResponse,
+    PaperTradesLedgerSyncResponse,
     RefreshRequest,
     ScreenerLiveStopReason,
     SnapshotsListResponse,
@@ -93,6 +95,8 @@ from src.storage.schema import (
     infer_chain_step_and_range,
 )
 from src.storage.watchlist_store import WatchlistStore, resolve_watchlist_path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -212,6 +216,7 @@ class AnalyzerService:
             refresh_acquire=self.acquire_refresh,
             refresh_release=self.release_refresh,
             refresh_owner_getter=lambda: self.refresh_owner,
+            on_ledger_changed=self._handle_ledger_changed,
         )
         self.ledger.ensure_layout()
         self.paper_trades = paper_trades or PaperTradeService(
@@ -371,12 +376,29 @@ class AnalyzerService:
             "at a time."
         ]
 
+    def _handle_ledger_changed(self) -> None:
+        if hasattr(self, "paper_trades"):
+            self.sync_paper_trades_from_ledger()
+
+    def _safe_sync_paper_trades_from_ledger(self, context: str) -> None:
+        try:
+            self.sync_paper_trades_from_ledger()
+        except Exception as exc:
+            logger.warning("%s ledger -> paper trade sync failed: %s", context, exc)
+
+    def sync_paper_trades_from_ledger(self) -> PaperTradesLedgerSyncResponse:
+        """Reconcile open Trade Ledger option positions into the Paper Trade registry."""
+        report = self.ledger.build_full_open_report()
+        return self.paper_trades.sync_from_ledger_report(report)
+
     def ensure_layout(self) -> None:
         """Ensure chain CSV, ledger archive, paper-trade and watchlist directories exist."""
         self.repo.ensure_layout()
         self.ledger.ensure_layout()
         self.paper_trades.ensure_layout()
         self.watchlist.ensure_layout()
+        if hasattr(self.ledger, "repo") and self.ledger.repo.load_positions().height > 0:
+            self._safe_sync_paper_trades_from_ledger("startup")
 
     def validate_ticker(self, raw_ticker: str) -> str:
         return self.validator.validate_selection(raw_ticker)
@@ -1255,21 +1277,29 @@ class AnalyzerService:
     ) -> LedgerSyncResponse:
         """Synchronize the trade ledger via Flex Web Service and/or Gateway."""
         if getattr(self.ledger, "_refresh_acquire", None) is not None:
-            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
-        run_gateway = self.settings.ledger.gateway_sync_enabled and include_gateway is not False
-        if not run_gateway:
-            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
-        if not await self.acquire_refresh("ledger:sync"):
-            raise self._busy_error()
-        try:
-            await self._stop_live_feeds(reason="ledger_sync")
-            return await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
-        finally:
-            self.release_refresh()
+            res = await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+        else:
+            run_gateway = self.settings.ledger.gateway_sync_enabled and include_gateway is not False
+            if not run_gateway:
+                res = await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+            else:
+                if not await self.acquire_refresh("ledger:sync"):
+                    raise self._busy_error()
+                try:
+                    await self._stop_live_feeds(reason="ledger_sync")
+                    res = await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
+                finally:
+                    self.release_refresh()
+        if getattr(self.ledger, "_on_ledger_changed", None) is None:
+            self._safe_sync_paper_trades_from_ledger("sync_ledger")
+        return res
 
     def import_ledger_file(self, filename: str, raw_bytes: bytes) -> LedgerImportResponse:
         """Import a manual IBKR Flex XML or Activity CSV file into the trade ledger."""
-        return self.ledger.import_ledger_file(filename, raw_bytes)
+        res = self.ledger.import_ledger_file(filename, raw_bytes)
+        if getattr(self.ledger, "_on_ledger_changed", None) is None:
+            self._safe_sync_paper_trades_from_ledger("import_ledger_file")
+        return res
 
     async def refresh_open_ledger_mtm(self) -> LedgerMTMRefreshResponse:
         """Refresh live mark-to-market quotes for open ledger positions."""
