@@ -15,6 +15,7 @@ import {
   extractApiErrorMessage,
   gatewayAddressLabel,
   parseDashboardDteWindow,
+  partialReasonLabel,
   resetControlCapabilities,
   setActiveTickerUI,
   showBanner,
@@ -212,7 +213,18 @@ export async function loadChain(ticker, snapshotId) {
       renderTable(res.body);
       maybeAutoPopulateStrategy(res.body);
 
-      if (res.body.meta.notices && res.body.meta.notices.length) {
+      if (res.body.partial) {
+        showBanner(
+          "warn",
+          "Partial snapshot (" +
+            partialReasonLabel(res.body.partial_reason) +
+            "): only contracts from finished pages were saved. Not used by the Backtest." +
+            (res.body.meta.notices && res.body.meta.notices.length
+              ? " " + res.body.meta.notices.join(" ")
+              : ""),
+          { ticker: ticker, phase: "CHAIN_LOAD", elapsedMs: res.elapsedMs }
+        );
+      } else if (res.body.meta.notices && res.body.meta.notices.length) {
         showBanner("info", res.body.meta.notices.join(" "), {
           ticker: ticker,
           phase: "CHAIN_LOAD",
@@ -294,7 +306,7 @@ export async function loadChain(ticker, snapshotId) {
 }
 
 export async function refreshFromIBKR() {
-  if (state.loading) return;
+  if (state.loading || state.watchlistBatchBusy) return;
   if (state.corridorStreaming || state.corridorStreamSource) {
     stopCorridorStream({ silent: true });
   }
@@ -383,6 +395,9 @@ export async function refreshFromIBKR() {
       return;
     }
 
+    // Tell the watchlist panel a new snapshot exists (decoupled event; no import cycle).
+    document.dispatchEvent(new Event("ibkr:snapshot-saved"));
+
     // Stage 2: Post-Refresh DOM / Plotly Render
     try {
       state.chainData = res.body;
@@ -438,8 +453,10 @@ export async function refreshFromIBKR() {
   } finally {
     state.loading = false;
     if (dom.refreshBtn) {
-      dom.refreshBtn.disabled = false;
+      dom.refreshBtn.disabled = Boolean(state.watchlistBatchBusy);
       dom.refreshBtn.textContent = "REFRESH FROM IBKR";
     }
+    // Lock holder finished: lets the Best Option screener auto-resume its live stream.
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }

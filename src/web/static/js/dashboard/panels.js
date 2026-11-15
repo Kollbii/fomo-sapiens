@@ -143,8 +143,17 @@ export function applyPanelVisibility(nextVis, options) {
     }
   });
 
+  var wasBestOption = isPanelVisible("best_option");
   state.panelVisibility = normalized;
   syncPanelVisibilityUI(normalized);
+  if (wasBestOption !== normalized.best_option) {
+    // Decoupled signal (no import cycle): the screener stops/resumes its live stream.
+    document.dispatchEvent(
+      new CustomEvent("ibkr:panel-visibility", {
+        detail: { panelId: "best_option", visible: normalized.best_option },
+      })
+    );
+  }
 
   if (opts.clearOverrides) {
     clearPanelVisibilityOverrides();

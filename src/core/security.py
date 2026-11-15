@@ -8,7 +8,24 @@ from typing import Any, NoReturn
 
 from src.core.exceptions import InvalidTickerError, SecurityViolationError
 
-DEFAULT_WATCHLIST: tuple[str, ...] = ("NVDA", "AVGO", "CRDO", "PLTR")
+DEFAULT_WATCHLIST: tuple[str, ...] = (
+    "NVDA",
+    "AVGO",
+    "CRDO",
+    "MRVL",
+    "META",
+    "MSFT",
+    "AMZN",
+    "TSLA",
+    "SPCX",
+    "LITE",
+    "AMD",
+    "ORCL",
+    "PLTR",
+    "ALAB",
+    "MU",
+    "GOOGL",
+)
 TICKER_PATTERN = re.compile(r"[A-Z]{1,5}")
 
 BLOCKED_METHODS: tuple[str, ...] = (

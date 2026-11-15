@@ -8,10 +8,12 @@ from typing import Any
 
 import polars as pl
 import pytest
+from pydantic import ValidationError
 
 from src.core.config import StorageSettings
 from src.core.exceptions import InvalidTickerError, SnapshotNotFoundError, StorageSchemaError
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
+from src.storage.quality import evaluate_snapshot
 from src.storage.schema import COLUMNS, OPTION_CHAIN_POLARS_SCHEMA, OptionContractRow, SnapshotMeta
 
 SPOT = 142.65
@@ -332,3 +334,182 @@ def test_snapshot_quality_metadata_roundtrip_and_legacy_index_compat(
     rebuilt_snaps = rebuilt["tickers"]["NVDA"]["snapshots"]
     assert len(rebuilt_snaps) == 2
     assert all(item["quoted_contract_count"] is not None for item in rebuilt_snaps)
+
+
+# ------------------------------------------------------------------ partial snapshots
+T1 = MARKET_DATE + timedelta(minutes=30)
+T2 = MARKET_DATE + timedelta(hours=1)
+
+
+def _index_snapshot(repo: CSVRepository, ticker: str, snapshot_id: str) -> dict[str, Any]:
+    raw = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    entry: dict[str, Any] = next(
+        s for s in raw["tickers"][ticker]["snapshots"] if s["snapshot_id"] == snapshot_id
+    )
+    return entry
+
+
+def _index_latest_id(repo: CSVRepository, ticker: str) -> str:
+    raw = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    return str(raw["tickers"][ticker]["latest_snapshot_id"])
+
+
+def test_partial_snapshot_archived_flagged_and_keeps_existing_latest(repo: CSVRepository) -> None:
+    complete = repo.save_snapshot_result("NVDA", make_rows(), spot_source="LAST")
+    assert complete.latest_updated is True
+    assert complete.meta.partial is False
+    assert complete.meta.partial_reason is None
+    latest_before = repo.latest_path("NVDA").read_bytes()
+
+    rows = make_rows(ts=T1)[:8]  # only the finished pages arrived
+    partial = repo.save_snapshot_result(
+        "NVDA", rows, spot_source="LAST", partial_reason="cancelled"
+    )
+    assert partial.latest_updated is False
+    assert partial.meta.partial is True
+    assert partial.meta.partial_reason == "cancelled"
+    assert partial.meta.is_partial
+    assert partial.meta.contract_count == 8
+
+    # Archive written as a new immutable Mode 1 snapshot (27 columns, nothing extra).
+    archive = repo.snapshots_dir / "NVDA" / f"{partial.meta.snapshot_id}.csv"
+    assert archive.is_file()
+    assert tuple(repo.load_snapshot("NVDA", partial.meta.snapshot_id).columns) == COLUMNS
+    with pytest.raises(StorageSchemaError, match="immutable"):
+        repo.save_snapshot("NVDA", rows, partial_reason="cancelled")
+
+    # Index carries the flag; latest cache + index pointer keep the complete snapshot.
+    entry = _index_snapshot(repo, "NVDA", partial.meta.snapshot_id)
+    assert entry["partial"] is True
+    assert entry["partial_reason"] == "cancelled"
+    assert repo.latest_path("NVDA").read_bytes() == latest_before
+    assert repo.load_latest("NVDA")["snapshot_id"][0] == complete.meta.snapshot_id
+    assert repo.latest_cache_snapshot_id("NVDA") == complete.meta.snapshot_id
+    assert _index_latest_id(repo, "NVDA") == complete.meta.snapshot_id
+
+    # Listing (GET /api/snapshots/{ticker}) is newest-first and carries the flag through.
+    listed = repo.list_snapshots("NVDA")
+    assert [m.snapshot_id for m in listed] == [
+        partial.meta.snapshot_id,
+        complete.meta.snapshot_id,
+    ]
+    assert listed[0].partial is True
+    assert listed[0].partial_reason == "cancelled"
+    assert listed[1].partial is False
+
+    # A later complete refresh replaces the latest cache again.
+    newer = repo.save_snapshot_result("NVDA", make_rows(ts=T2))
+    assert newer.latest_updated is True
+    assert repo.load_latest("NVDA")["snapshot_id"][0] == newer.meta.snapshot_id
+    assert _index_latest_id(repo, "NVDA") == newer.meta.snapshot_id
+
+
+def test_partial_snapshot_becomes_latest_only_when_none_exists(repo: CSVRepository) -> None:
+    first = repo.save_snapshot_result("CRDO", make_rows("CRDO"), partial_reason="timeout")
+    assert first.latest_updated is True
+    assert repo.latest_path("CRDO").is_file()
+    assert repo.load_latest("CRDO")["snapshot_id"][0] == first.meta.snapshot_id
+    assert _index_latest_id(repo, "CRDO") == first.meta.snapshot_id
+
+    second = repo.save_snapshot_result(
+        "CRDO", make_rows("CRDO", ts=T1), partial_reason="connection_lost"
+    )
+    assert second.latest_updated is False
+    assert repo.load_latest("CRDO")["snapshot_id"][0] == first.meta.snapshot_id
+    assert _index_latest_id(repo, "CRDO") == first.meta.snapshot_id
+    second_entry = _index_snapshot(repo, "CRDO", second.meta.snapshot_id)
+    assert second_entry["partial_reason"] == "connection_lost"
+
+    # The plain `save_snapshot` wrapper accepts the same keyword and returns the meta.
+    meta = repo.save_snapshot("CRDO", make_rows("CRDO", ts=T2), partial_reason="cancelled")
+    assert isinstance(meta, SnapshotMeta)
+    assert meta.partial_reason == "cancelled"
+    assert repo.load_latest("CRDO")["snapshot_id"][0] == first.meta.snapshot_id
+
+
+def test_legacy_index_without_partial_fields_reads_as_complete(repo: CSVRepository) -> None:
+    saved = repo.save_snapshot("NVDA", make_rows(), spot_source="LAST")
+    raw = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    for snap in raw["tickers"]["NVDA"]["snapshots"]:
+        snap.pop("partial")
+        snap.pop("partial_reason")
+    repo.index_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    (legacy,) = repo.list_snapshots("NVDA")
+    assert legacy.snapshot_id == saved.snapshot_id
+    assert legacy.partial is None
+    assert legacy.partial_reason is None
+    assert legacy.is_partial is False
+    assert evaluate_snapshot(legacy).usable is True
+    assert repo.latest_snapshots(["NVDA"], include_partial=False)["NVDA"] == legacy
+    # The legacy index was read as-is (valid), not rebuilt.
+    reread = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    assert "partial" not in reread["tickers"]["NVDA"]["snapshots"][0]
+
+
+def test_latest_snapshots_freshness_ignores_partial(repo: CSVRepository) -> None:
+    complete = repo.save_snapshot("NVDA", make_rows())
+    partial = repo.save_snapshot("NVDA", make_rows(ts=T1), partial_reason="timeout")
+    only_partial = repo.save_snapshot("AVGO", make_rows("AVGO"), partial_reason="cancelled")
+
+    newest = repo.latest_snapshots(["NVDA", "AVGO", "PLTR"])
+    assert newest["NVDA"].snapshot_id == partial.snapshot_id
+    assert newest["AVGO"].snapshot_id == only_partial.snapshot_id
+    assert "PLTR" not in newest
+
+    fresh = repo.latest_snapshots(["NVDA", "AVGO", "PLTR"], include_partial=False)
+    assert fresh["NVDA"].snapshot_id == complete.snapshot_id
+    assert "AVGO" not in fresh  # a partial snapshot never counts as fresh
+    assert "PLTR" not in fresh
+
+
+def test_corrupt_latest_fallback_prefers_complete_snapshot(repo: CSVRepository) -> None:
+    complete = repo.save_snapshot("NVDA", make_rows())
+    repo.save_snapshot("NVDA", make_rows(ts=T1), partial_reason="connection_lost")
+    repo.latest_path("NVDA").write_text("garbage", encoding="utf-8")
+    assert repo.latest_cache_snapshot_id("NVDA") is None
+    assert repo.load_latest("NVDA")["snapshot_id"][0] == complete.snapshot_id
+
+    only = repo.save_snapshot("AVGO", make_rows("AVGO"), partial_reason="timeout")
+    repo.latest_path("AVGO").unlink()
+    assert repo.load_latest("AVGO")["snapshot_id"][0] == only.snapshot_id  # last resort
+
+
+def test_partial_flag_survives_save_into_corrupt_index(repo: CSVRepository) -> None:
+    complete = repo.save_snapshot("NVDA", make_rows())
+    repo.index_path.write_text("{ not json", encoding="utf-8")
+    partial = repo.save_snapshot("NVDA", make_rows(ts=T1), partial_reason="cancelled")
+
+    entry = _index_snapshot(repo, "NVDA", partial.snapshot_id)
+    assert entry["partial"] is True
+    assert entry["partial_reason"] == "cancelled"
+    assert _index_latest_id(repo, "NVDA") == complete.snapshot_id  # read from the cache file
+    assert repo.list_snapshots("NVDA")[1].partial is None  # rescanned entry: flag unknown
+
+    # A plain rebuild keeps the pointer on the snapshot actually held by the latest cache.
+    repo.rebuild_index()
+    assert _index_latest_id(repo, "NVDA") == complete.snapshot_id
+
+
+def test_partial_metadata_validation(repo: CSVRepository) -> None:
+    base: dict[str, Any] = {
+        "snapshot_id": "NVDA_20261111_155004",
+        "file_path": "data/snapshots/NVDA/NVDA_20261111_155004.csv",
+        "snapshot_ts_utc": "2026-11-11T15:50:04Z",
+        "market_date": "2026-11-11",
+        "market_data_type": 3,
+        "underlying_price": SPOT,
+        "contract_count": 1,
+        "expirations": ["2026-12-18"],
+    }
+    assert SnapshotMeta.model_validate({**base, "partial": True}).partial_reason is None
+    with pytest.raises(ValidationError):
+        SnapshotMeta.model_validate({**base, "partial_reason": "cancelled"})
+    with pytest.raises(ValidationError):
+        SnapshotMeta.model_validate({**base, "partial": False, "partial_reason": "timeout"})
+    with pytest.raises(ValidationError):
+        SnapshotMeta.model_validate({**base, "partial": True, "partial_reason": "boom"})
+
+    with pytest.raises(StorageSchemaError, match="metadata validation"):
+        repo.save_snapshot("NVDA", make_rows(), partial_reason="boom")  # type: ignore[arg-type]
+    assert not repo.snapshot_path("NVDA", make_snapshot_id("NVDA", MARKET_DATE)).exists()

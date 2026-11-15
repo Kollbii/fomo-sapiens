@@ -14,6 +14,8 @@ export var TABLE_SORT_KEY = "ibkr_chain_table_sort_v1";
 export var STRATEGY_AUTO_POPULATE_KEY = "ibkr_strategy_auto_populate_v1";
 export var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
 export var LEDGER_PREFS_KEY = "ibkr_ledger_prefs_v1";
+export var SCREENER_PREFS_KEY = "ibkr_screener_prefs_v1";
+export var WATCHLIST_SELECTION_KEY = "ibkr_watchlist_selection_v1";
 export var DEFAULT_PANEL_VISIBILITY = {
   walls: true,
   iv_smile: false,
@@ -23,6 +25,7 @@ export var DEFAULT_PANEL_VISIBILITY = {
   strategy: true,
   trade_ledger: true,
   backtest: true,
+  best_option: true,
 };
 
 export function cloneDefaultPanelVisibility() {
@@ -35,6 +38,7 @@ export function cloneDefaultPanelVisibility() {
     strategy: DEFAULT_PANEL_VISIBILITY.strategy,
     trade_ledger: DEFAULT_PANEL_VISIBILITY.trade_ledger,
     backtest: DEFAULT_PANEL_VISIBILITY.backtest,
+    best_option: DEFAULT_PANEL_VISIBILITY.best_option,
   };
 }
 
@@ -44,7 +48,18 @@ export var bootstrap = bootstrapEl ? JSON.parse(bootstrapEl.textContent || "{}")
 export var state = {
   ticker: bootstrap.defaultTicker || "NVDA",
   snapshotId: "",
-  watchlist: bootstrap.watchlist || ["NVDA", "AVGO", "CRDO", "PLTR"],
+  watchlist: bootstrap.watchlist || [],
+  watchlistEntries: {},
+  watchlistMaxSize: Number(bootstrap.watchlistMaxSize) || 20,
+  watchlistAllowCustom: bootstrap.watchlistAllowCustom !== false,
+  watchlistWritable: true,
+  watchlistNotice: "",
+  watchlistUnchecked: {},
+  watchlistBatch: null,
+  watchlistBatchBusy: false,
+  watchlistPollTimer: null,
+  watchlistPollFailures: 0,
+  watchlistFollow: null,
   chainData: null,
   snapshots: [],
   status: null,
@@ -107,9 +122,34 @@ export var dom = {
   greeksBadge: document.getElementById("greeks-source-badge"),
   themeToggle: document.getElementById("theme-toggle"),
   editorialBannerCopy: document.getElementById("editorial-banner-copy"),
-  watchlistPills: document.getElementById("watchlist-pills"),
-  customForm: document.getElementById("custom-ticker-form"),
-  customInput: document.getElementById("custom-ticker-input"),
+  watchlistPicker: document.getElementById("watchlist-picker"),
+  watchlistToggle: document.getElementById("watchlist-toggle"),
+  watchlistActive: document.getElementById("watchlist-active"),
+  watchlistCount: document.getElementById("watchlist-count"),
+  watchlistPanel: document.getElementById("watchlist-panel"),
+  watchlistNotice: document.getElementById("watchlist-notice"),
+  watchlistEmpty: document.getElementById("watchlist-empty"),
+  watchlistRows: document.getElementById("watchlist-rows"),
+  watchlistSelectAll: document.getElementById("watchlist-select-all"),
+  watchlistSelectNone: document.getElementById("watchlist-select-none"),
+  watchlistSelectStale: document.getElementById("watchlist-select-stale"),
+  watchlistLoadSelected: document.getElementById("watchlist-load-selected"),
+  watchlistSelectedCount: document.getElementById("watchlist-selected-count"),
+  watchlistLoadBar: document.getElementById("watchlist-load-bar"),
+  watchlistLoadBarCount: document.getElementById("watchlist-load-bar-count"),
+  watchlistAddForm: document.getElementById("watchlist-add-form"),
+  watchlistAddInput: document.getElementById("watchlist-add-input"),
+  watchlistAddSubmit: document.getElementById("watchlist-add-submit"),
+  watchlistProgress: document.getElementById("watchlist-progress"),
+  watchlistProgressRunning: document.getElementById("watchlist-progress-running"),
+  watchlistProgressTrack: document.getElementById("watchlist-progress-track"),
+  watchlistProgressFill: document.getElementById("watchlist-progress-fill"),
+  watchlistProgressText: document.getElementById("watchlist-progress-text"),
+  watchlistCancel: document.getElementById("watchlist-cancel"),
+  watchlistSummary: document.getElementById("watchlist-progress-summary"),
+  watchlistSummaryText: document.getElementById("watchlist-summary-text"),
+  watchlistRetry: document.getElementById("watchlist-retry"),
+  watchlistSummaryDismiss: document.getElementById("watchlist-summary-dismiss"),
   rangeSelect: document.getElementById("range-pct-select"),
   stepSelect: document.getElementById("strike-step-select"),
   dteMaxSelect: document.getElementById("dte-max-select"),

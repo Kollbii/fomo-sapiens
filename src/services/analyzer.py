@@ -1,7 +1,10 @@
 """Application service: refresh, cached chain analytics, Strategy Lab and Wall Corridor.
 
 Composes broker (`src/broker/`), storage (`src/storage/`) and analytics (`src/analytics/`);
-it is the only module allowed to do so. It knows nothing about HTTP.
+it is the only module allowed to do so. It knows nothing about HTTP. It owns the Best Option
+screener (`self.screener`), which reuses its Autobuild path (`build_strategy_candidates`), and
+its live leg stream (`self.screener_live`). The two live feeds (Wall Corridor stream, live
+screener) run one at a time, and every `refresh_lock` holder stops both (`_stop_live_feeds`).
 """
 
 from __future__ import annotations
@@ -11,11 +14,13 @@ import logging
 import math
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC
 from pathlib import Path
 from typing import Any, Literal
 
 import polars as pl
+from pydantic import ValidationError
 
 from src.analytics.anomalies import scan_anomalies
 from src.analytics.bsm_fallback import BSMFallbackEngine
@@ -23,11 +28,13 @@ from src.analytics.strategies import (
     PRESET_STRATEGIES,
     PresetStrategyKind,
     StrategyEvaluationResponse,
+    StrategyFilterError,
 )
 from src.analytics.strategies import evaluate_strategy as evaluate_strategy_engine
 from src.analytics.term_greeks import build_multi_dte_profiles
 from src.analytics.walls import compute_walls
 from src.broker.client import IBKRBrokerClient
+from src.broker.contracts import ChainPlan
 from src.broker.corridor import (
     CORRIDOR_MAX_CONTRACTS,
     DEFAULT_CORRIDOR_MAX_CONTRACTS,
@@ -38,7 +45,8 @@ from src.broker.corridor import (
     CorridorSelection,
     select_wall_corridor,
 )
-from src.broker.fetcher import PagedOptionChainFetcher
+from src.broker.fetcher import ChainFetchProgress, FetchResult, PagedOptionChainFetcher
+from src.broker.live_legs import LiveLegQuoteService
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
     InvalidRequestError,
@@ -52,6 +60,7 @@ from src.services.corridor import (
     make_bsm_greeks_fallback,
     wall_anchors_from_report,
 )
+from src.services.error_messages import GENERIC_ERROR_MESSAGE, describe_error
 from src.services.ledger import LedgerService
 from src.services.paper_trades import PaperTradeService
 from src.services.schemas import (
@@ -66,17 +75,98 @@ from src.services.schemas import (
     LedgerSyncResponse,
     PaperTradesLedgerSyncResponse,
     RefreshRequest,
+    ScreenerLiveStopReason,
     SnapshotsListResponse,
     StrategyEvaluateRequest,
     StrategySuggestRequest,
     StrategySuggestResponse,
 )
+from src.services.screener import ScreenerService
+from src.services.screener_live import ScreenerLiveService, screener_stop_notice
+from src.services.watchlist import WatchlistService
 from src.storage.csv_repository import CSVRepository
 from src.storage.ledger_repository import LedgerRepository
 from src.storage.quality import measure_quote_quality
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, SpotSource, infer_chain_step_and_range
+from src.storage.schema import (
+    OPTION_CHAIN_POLARS_SCHEMA,
+    PartialReason,
+    SnapshotMeta,
+    SpotSource,
+    infer_chain_step_and_range,
+)
+from src.storage.watchlist_store import WatchlistStore, resolve_watchlist_path
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class TickerRefreshOutcome:
+    """Result of one locked per-ticker refresh (fetch -> enrich -> save -> paper-trade quote).
+
+    For a partial save (`save_partial_ticker_locked`) `partial_reason` is set and
+    `latest_updated` tells whether `data/latest/{T}_latest.csv` was (first-ever) replaced.
+    """
+
+    symbol: str
+    enriched: pl.DataFrame
+    meta: SnapshotMeta
+    plan: ChainPlan
+    actual_step: float
+    requested_step: float
+    available_strike_steps: list[float]
+    available_range_pcts: list[float]
+    validated_count: int
+    notices: list[str]
+    partial_reason: PartialReason | None = None
+    latest_updated: bool = True
+
+    @property
+    def partial(self) -> bool:
+        return self.partial_reason is not None
+
+
+@dataclass(frozen=True, slots=True)
+class LiveFeedsStopped:
+    """IBKR lines freed by `AnalyzerService._stop_live_feeds` per live feed."""
+
+    corridor_lines: int = 0
+    screener_lines: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyCandidateOutcome:
+    """One preset's Strategy Lab Autobuild result: an `evaluation`, or the engine's `error`.
+
+    Exactly one of the two is set. `error` is the `ValueError` the analytics engine raised
+    (`StrategyFilterError` for builder rejections); it keeps its traceback, so long-lived
+    callers (the screener cache) keep only `reason` / `skip_reason`.
+    """
+
+    kind: PresetStrategyKind
+    evaluation: StrategyEvaluationResponse | None = None
+    error: ValueError | None = None
+
+    def __post_init__(self) -> None:
+        if (self.evaluation is None) == (self.error is None):
+            raise ValueError("StrategyCandidateOutcome needs exactly one of evaluation / error")
+
+    @property
+    def skip_reason(self) -> str | None:
+        """Builder code of a `StrategyFilterError` (e.g. `BELOW_MIN_ROR`), else `None`."""
+        return self.error.skip_reason if isinstance(self.error, StrategyFilterError) else None
+
+    @property
+    def reason(self) -> str | None:
+        """Client-safe single-line error text: the wording Strategy Lab's 422 shows for it.
+
+        An engine-internal pydantic `ValidationError` (a bug, not a "cannot build" condition)
+        gets the generic message instead of its raw multi-line text.
+        """
+        if self.error is None:
+            return None
+        if isinstance(self.error, ValidationError):
+            return GENERIC_ERROR_MESSAGE
+        return describe_error(InvalidRequestError(str(self.error))).message
 
 
 class AnalyzerService:
@@ -95,11 +185,16 @@ class AnalyzerService:
         corridor: CorridorQuoteService | None = None,
         ledger_service: LedgerService | None = None,
         paper_trades: PaperTradeService | None = None,
+        watchlist_service: WatchlistService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
         self.broker_client = broker_client or IBKRBrokerClient(self.settings)
         self.fetcher = fetcher or PagedOptionChainFetcher(self.broker_client, self.settings)
+        self.validator = TickerValidator(
+            watchlist=self.settings.watchlist.hardcoded_tickers,
+            allow_custom=self.settings.watchlist.allow_custom_ticker,
+        )
         self.corridor = corridor or CorridorQuoteService(
             self.broker_client,
             self.settings,
@@ -117,6 +212,7 @@ class AnalyzerService:
             broker_client=self.broker_client,
             sleep=self.fetcher.sleep,
             corridor_stopper=self._stop_corridor_for_ledger,
+            screener_stopper=self._stop_screener_for_ledger,
             refresh_acquire=self.acquire_refresh,
             refresh_release=self.release_refresh,
             refresh_owner_getter=lambda: self.refresh_owner,
@@ -129,12 +225,46 @@ class AnalyzerService:
             self.fetcher,
             clock=self.fetcher.clock,
         )
-        self.validator = TickerValidator(
-            watchlist=self.settings.watchlist.hardcoded_tickers,
-            allow_custom=self.settings.watchlist.allow_custom_ticker,
+        # ONE store per service; same validator (custom-ticker guard) as every other entry point.
+        self.watchlist = watchlist_service or WatchlistService(
+            WatchlistStore(
+                resolve_watchlist_path(self.settings.storage, root=self.repo.root),
+                self.settings.watchlist,
+                validator=self.validator,
+                clock=self.fetcher.clock,
+            ),
+            self.repo,
+            clock=self.fetcher.clock,
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
         self.corridor_cache = CorridorQuoteCache()
+        # Best Option screener: cached CSVs only (never IBKR, never `refresh_lock`); it builds
+        # candidates through this service's own Autobuild path (`build_strategy_candidates`).
+        self.screener = ScreenerService(
+            self,
+            self.watchlist,
+            self.repo,
+            settings=self.settings,
+            clock=self.fetcher.clock,
+        )
+        # Live screener: exact leg lines (<= 90 incl. spots) re-picked about every second;
+        # display-only. Never touches the broker client before a stream is opened.
+        self.live_legs = LiveLegQuoteService(
+            self.broker_client,
+            self.settings,
+            clock=self.fetcher.clock,
+            sleep=self.fetcher.sleep,
+            greeks_fallback=make_bsm_greeks_fallback(self.settings.analytics.risk_free_rate),
+        )
+        self.screener_live = ScreenerLiveService(
+            self.screener,
+            self.live_legs,
+            settings=self.settings,
+            clock=self.fetcher.clock,
+            is_busy=self.refresh_lock.locked,
+            busy_error=self._busy_error,
+            stop_corridor=self._stop_corridor_for_screener,
+        )
 
     @property
     def tracked_dir(self) -> Path:
@@ -161,6 +291,11 @@ class AnalyzerService:
         self.refresh_owner = owner
         return True
 
+    def set_refresh_owner(self, owner: str) -> None:
+        """Relabel the current lock holder (batch progress); no-op when the lock is free."""
+        if self.refresh_lock.locked():
+            self.refresh_owner = owner
+
     def release_refresh(self) -> None:
         """Release the IBKR refresh lock if currently held."""
         self.refresh_owner = None
@@ -175,7 +310,8 @@ class AnalyzerService:
             retry_after_sec=10,
         )
 
-    async def _stop_corridor(self, *, reason: str, ticker: str | None = None) -> int:
+    async def _stop_corridor_feed(self, *, reason: str, ticker: str | None = None) -> int:
+        """Stop the Wall Corridor stream(s) only; records `last_corridor_stop`."""
         if self.corridor.active_stream_count <= 0:
             return 0
         stopped = await self.corridor.stop_all_streams()
@@ -187,8 +323,58 @@ class AnalyzerService:
         }
         return stopped
 
+    def _stop_screener_feed(self, *, reason: ScreenerLiveStopReason) -> int:
+        """Stop the live screener stream(s) only (synchronous); returns the lines freed."""
+        return self.screener_live.stop_now(reason=reason)
+
+    async def _stop_live_feeds(
+        self, *, reason: ScreenerLiveStopReason, ticker: str | None = None
+    ) -> LiveFeedsStopped:
+        """Stop EVERY live feed (Wall Corridor + live screener) before a `refresh_lock` pull.
+
+        Called by every lock holder (single refresh, batch load, Gateway ledger sync, MTM,
+        Corridor snapshot) right after acquiring the lock; the screener is stopped even when
+        stopping the Corridor fails.
+        """
+        corridor_lines = 0
+        try:
+            corridor_lines = await self._stop_corridor_feed(reason=reason, ticker=ticker)
+        finally:
+            screener_lines = self._stop_screener_feed(reason=reason)
+        return LiveFeedsStopped(corridor_lines=corridor_lines, screener_lines=screener_lines)
+
+    async def _stop_corridor(
+        self, *, reason: ScreenerLiveStopReason, ticker: str | None = None
+    ) -> int:
+        """Thin alias of `_stop_live_feeds` (stops EVERY live feed) returning only the
+        Corridor's freed line count.
+
+        No `src/` caller is left; kept because `tests/integration/test_corridor_api.py` drives
+        the Corridor-era lock-holder stop through it. New code calls `_stop_live_feeds`.
+        """
+        stopped = await self._stop_live_feeds(reason=reason, ticker=ticker)
+        return stopped.corridor_lines
+
     async def _stop_corridor_for_ledger(self) -> int:
-        return await self._stop_corridor(reason="ledger")
+        """Ledger Gateway step: Corridor only (the ledger stops the screener separately)."""
+        return await self._stop_corridor_feed(reason="ledger")
+
+    async def _stop_screener_for_ledger(self) -> int:
+        return self._stop_screener_feed(reason="ledger")
+
+    async def _stop_corridor_for_screener(self) -> int:
+        """The live screener claims the single live feed: stop the Corridor stream."""
+        return await self._stop_corridor_feed(reason="screener_stream")
+
+    def _on_corridor_stream_register(self) -> list[str]:
+        """The Corridor stream claims the single live feed: stop the live screener stream."""
+        stopped = self._stop_screener_feed(reason="corridor_stream")
+        if stopped <= 0:
+            return []
+        return [
+            f"Stopped the live Best Option screener stream ({stopped} line(s)): one live feed "
+            "at a time."
+        ]
 
     def _handle_ledger_changed(self) -> None:
         if hasattr(self, "paper_trades"):
@@ -206,10 +392,11 @@ class AnalyzerService:
         return self.paper_trades.sync_from_ledger_report(report)
 
     def ensure_layout(self) -> None:
-        """Ensure chain CSV, ledger archive, and paper-trade directories exist."""
+        """Ensure chain CSV, ledger archive, paper-trade and watchlist directories exist."""
         self.repo.ensure_layout()
         self.ledger.ensure_layout()
         self.paper_trades.ensure_layout()
+        self.watchlist.ensure_layout()
         if hasattr(self.ledger, "repo") and self.ledger.repo.load_positions().height > 0:
             self._safe_sync_paper_trades_from_ledger("startup")
 
@@ -249,7 +436,7 @@ class AnalyzerService:
                 getattr(self.broker_client, "live_subscription_missing", False)
             ),
             default_ticker=wl.default_ticker,
-            watchlist=list(wl.hardcoded_tickers),
+            watchlist=self.watchlist.cached_tickers(),
             allow_custom_ticker=wl.allow_custom_ticker,
             default_range_pct=oc.default_range_pct,
             allowed_range_pcts=list(oc.allowed_range_pcts),
@@ -273,9 +460,14 @@ class AnalyzerService:
     def list_snapshots(self, raw_ticker: str) -> SnapshotsListResponse:
         symbol = self.validate_ticker(raw_ticker)
         snaps = self.repo.list_snapshots(symbol)
+        # The id `load_latest` serves: the latest cache file (a partial snapshot never replaces
+        # it), else the newest complete archive, else the newest one.
+        latest_id = self.repo.latest_cache_snapshot_id(symbol)
+        if latest_id is None and snaps:
+            latest_id = next((m for m in snaps if not m.is_partial), snaps[0]).snapshot_id
         return SnapshotsListResponse(
             ticker=symbol,
-            latest_snapshot_id=snaps[0].snapshot_id if snaps else None,
+            latest_snapshot_id=latest_id,
             snapshots=snaps,
         )
 
@@ -306,6 +498,8 @@ class AnalyzerService:
         quoted_contract_count: int | None = None,
         quote_coverage: float | None = None,
         prior_close_only_count: int | None = None,
+        partial: bool = False,
+        partial_reason: PartialReason | None = None,
     ) -> ChainAnalyticsResponse:
         enriched = self._enrich_if_needed(df)
         first = enriched.row(0, named=True)
@@ -406,6 +600,8 @@ class AnalyzerService:
             anomalies=anomalies,
             profiles=profiles,
             contracts=contracts,
+            partial=partial or partial_reason is not None,
+            partial_reason=partial_reason,
         )
 
     def _isolate_dashboard_dte(
@@ -501,6 +697,8 @@ class AnalyzerService:
             prior_close_only_count=(
                 snap_meta.prior_close_only_count if snap_meta and has_meta_quality else None
             ),
+            partial=snap_meta is not None and snap_meta.is_partial,
+            partial_reason=snap_meta.partial_reason if snap_meta else None,
         )
 
     def resolve_csv_path(self, raw_ticker: str, snapshot_id: str | None = None) -> Path:
@@ -537,6 +735,20 @@ class AnalyzerService:
         if apply_corridor_overlay:
             enriched = self.corridor_cache.overlay(enriched, symbol, loaded_snap_id)
         return symbol, loaded_snap_id, enriched
+
+    def load_enriched_snapshot(self, raw_ticker: str, snapshot_id: str) -> pl.DataFrame:
+        """Archived snapshot `snapshot_id`, BSM-enriched exactly as Strategy Lab loads it.
+
+        No Wall Corridor live overlay: the screener computes from cached CSVs only. Blocking
+        disk read (callers on the event loop run it through a thread). Raises
+        `SnapshotNotFoundError` / `StorageSchemaError` for a missing or corrupt archive.
+        """
+        if not snapshot_id.strip():
+            raise InvalidRequestError("snapshot_id is required to load an archived snapshot")
+        _, _, enriched = self._load_enriched_chain(
+            raw_ticker, snapshot_id, apply_corridor_overlay=False
+        )
+        return enriched
 
     def _select_corridor(
         self,
@@ -582,12 +794,18 @@ class AnalyzerService:
         if not await self.acquire_refresh(f"corridor:{symbol}"):
             raise self._busy_error()
         try:
-            await self._stop_corridor(reason="corridor_snapshot", ticker=symbol)
-            return await self.corridor.fetch_corridor_quotes(
+            stopped = await self._stop_live_feeds(reason="corridor_snapshot", ticker=symbol)
+            frame = await self.corridor.fetch_corridor_quotes(
                 selection,
                 snapshot_id=snap_id,
                 on_frame=self.corridor_cache.record,
             )
+            if stopped.screener_lines > 0:
+                notice = screener_stop_notice(
+                    stopped.screener_lines, "before the Wall Corridor snapshot"
+                )
+                frame = frame.model_copy(update={"notices": [*frame.notices, notice]})
+            return frame
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
         finally:
@@ -608,7 +826,11 @@ class AnalyzerService:
         """Validate inputs and Gateway connectivity, then return an un-started frame stream.
 
         Raising here (before streaming begins) lets the HTTP layer answer `422` / `503`
-        instead of opening an SSE response that immediately errors.
+        instead of opening an SSE response that immediately errors. The stream subscribes
+        lazily, so `refresh_lock.locked` is injected as `is_busy` and re-checked right before
+        the first `reqMktData` (`CorridorBusyError` -> SSE `error` event, zero lines opened).
+        When it registers it stops the live screener stream (one live feed at a time; the
+        notice leads the first frame's notices).
         """
         if self.refresh_lock.locked():
             raise self._busy_error()
@@ -633,6 +855,8 @@ class AnalyzerService:
             is_disconnected=is_disconnected,
             max_frames=max_frames,
             on_frame=self.corridor_cache.record,
+            is_busy=self.refresh_lock.locked,
+            on_register=self._on_corridor_stream_register,
         )
 
     async def stop_corridor_streams(self) -> CorridorStopResponse:
@@ -667,45 +891,94 @@ class AnalyzerService:
             _clean("min_ror_pct", min_ror_pct, upper=1000.0),
         )
 
+    def build_strategy_candidates(
+        self,
+        symbol: str,
+        enriched: pl.DataFrame,
+        kinds: Sequence[PresetStrategyKind],
+        *,
+        target_expiry: str | None = None,
+        dte_min: int | None = None,
+        dte_max: int | None = None,
+        days_forward: int = 0,
+        iv_shift: float = 0.0,
+        qty_multiplier: int = 1,
+        min_net_credit_dollars: float | None = None,
+        min_ror_pct: float | None = None,
+    ) -> list[StrategyCandidateOutcome]:
+        """Strategy Lab Autobuild of `kinds` on one enriched chain (shared with the screener).
+
+        Scopes the chain like the dashboard (explicit `dte_min` / `dte_max`, else short-DTE
+        isolation on merged snapshots, keeping `target_expiry`), computes the walls once, then
+        builds one candidate per kind with the analytics engine. The entry floors are normalized
+        (`0` = off) and passed into the build, where only the credit verticals apply them. A
+        kind the engine cannot build yields an outcome carrying its `ValueError`. Outcomes
+        follow `kinds` order. Pure CPU work on the given frame: no I/O, no IBKR, no lock.
+
+        Raises `InvalidRequestError` for invalid floors / DTE bounds, or when an explicit DTE
+        window leaves no contracts.
+        """
+        min_credit, min_ror = self._normalize_strategy_filters(min_net_credit_dollars, min_ror_pct)
+        scoped_df, explicit_filter = self._isolate_dashboard_dte(
+            enriched,
+            dte_min=dte_min,
+            dte_max=dte_max,
+            preserve_expiry=target_expiry,
+        )
+        if explicit_filter and scoped_df.height == 0:
+            raise InvalidRequestError(f"No contracts found in requested DTE range for {symbol}")
+        walls = compute_walls(scoped_df, top_n=self.settings.analytics.top_walls_count)
+        outcomes: list[StrategyCandidateOutcome] = []
+        for kind in kinds:
+            try:
+                evaluation = evaluate_strategy_engine(
+                    scoped_df,
+                    strategy_kind=kind,
+                    target_expiry=target_expiry,
+                    days_forward=days_forward,
+                    iv_shift=iv_shift,
+                    qty_multiplier=qty_multiplier,
+                    risk_free_rate=self.settings.analytics.risk_free_rate,
+                    walls_report=walls,
+                    min_net_credit_dollars=min_credit,
+                    min_ror_pct=min_ror,
+                )
+            except ValueError as exc:
+                outcomes.append(StrategyCandidateOutcome(kind=kind, error=exc))
+            else:
+                outcomes.append(StrategyCandidateOutcome(kind=kind, evaluation=evaluation))
+        return outcomes
+
     def suggest_strategies(self, payload: StrategySuggestRequest) -> StrategySuggestResponse:
         min_credit, min_ror = self._normalize_strategy_filters(
             payload.min_net_credit_dollars, payload.min_ror_pct
         )
         symbol, snap_id, enriched = self._load_enriched_chain(payload.ticker, payload.snapshot_id)
-        scoped_df, explicit_filter = self._isolate_dashboard_dte(
-            enriched,
-            dte_min=payload.dte_min,
-            dte_max=payload.dte_max,
-            preserve_expiry=payload.target_expiry,
-        )
-        if explicit_filter and scoped_df.height == 0:
-            raise InvalidRequestError(f"No contracts found in requested DTE range for {symbol}")
-        walls = compute_walls(scoped_df, top_n=self.settings.analytics.top_walls_count)
         kinds: tuple[PresetStrategyKind, ...] = (
             (payload.strategy_kind,) if payload.strategy_kind is not None else PRESET_STRATEGIES
         )
+        outcomes = self.build_strategy_candidates(
+            symbol,
+            enriched,
+            kinds,
+            target_expiry=payload.target_expiry,
+            dte_min=payload.dte_min,
+            dte_max=payload.dte_max,
+            days_forward=payload.days_forward,
+            iv_shift=payload.iv_shift,
+            qty_multiplier=payload.qty_multiplier,
+            min_net_credit_dollars=min_credit,
+            min_ror_pct=min_ror,
+        )
         evaluations: list[StrategyEvaluationResponse] = []
         errors: list[str] = []
-        for kind in kinds:
-            try:
-                evaluations.append(
-                    evaluate_strategy_engine(
-                        scoped_df,
-                        strategy_kind=kind,
-                        target_expiry=payload.target_expiry,
-                        days_forward=payload.days_forward,
-                        iv_shift=payload.iv_shift,
-                        qty_multiplier=payload.qty_multiplier,
-                        risk_free_rate=self.settings.analytics.risk_free_rate,
-                        walls_report=walls,
-                        min_net_credit_dollars=min_credit,
-                        min_ror_pct=min_ror,
-                    )
-                )
-            except ValueError as exc:
-                if payload.strategy_kind is not None:
-                    raise InvalidRequestError(str(exc)) from exc
-                errors.append(f"{kind}: {exc}")
+        for outcome in outcomes:
+            if outcome.evaluation is not None:
+                evaluations.append(outcome.evaluation)
+                continue
+            if payload.strategy_kind is not None:
+                raise InvalidRequestError(str(outcome.error)) from outcome.error
+            errors.append(f"{outcome.kind}: {outcome.error}")
 
         if not evaluations:
             detail = "; ".join(errors) or "Unable to construct any preset strategy from snapshot"
@@ -750,34 +1023,195 @@ class AnalyzerService:
         except ValueError as exc:
             raise InvalidRequestError(str(exc)) from exc
 
-    async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
-        symbol = self.validate_ticker(req.ticker)
+    def resolve_fetch_window(
+        self,
+        dte_min: int | None,
+        dte_max: int | None,
+        include_short_dte: bool | None,
+    ) -> tuple[int, int, bool]:
+        """Effective `(dte_min, dte_max, include_short_dte)` after config defaults; validates."""
         oc = self.settings.options_chain
-        eff_dte_min = oc.dte_min if req.dte_min is None else int(req.dte_min)
-        eff_dte_max = oc.dte_max if req.dte_max is None else int(req.dte_max)
+        eff_dte_min = oc.dte_min if dte_min is None else int(dte_min)
+        eff_dte_max = oc.dte_max if dte_max is None else int(dte_max)
         if eff_dte_min > eff_dte_max:
             raise InvalidRequestError("dte_min must be <= dte_max")
+        include_short = (
+            oc.include_short_dte_for_backtest
+            if include_short_dte is None
+            else bool(include_short_dte)
+        )
+        return eff_dte_min, eff_dte_max, include_short
+
+    async def refresh_ticker_locked(
+        self,
+        raw_ticker: str,
+        *,
+        range_pct: float,
+        strike_step: float | None,
+        dte_min: int | None,
+        dte_max: int | None,
+        include_short_dte: bool,
+        progress: ChainFetchProgress | None = None,
+        on_saved: Callable[[TickerRefreshOutcome], None] | None = None,
+    ) -> TickerRefreshOutcome:
+        """Fetch -> BSM enrich -> save Mode 1 snapshot -> quote active paper trades for ONE ticker.
+
+        The caller MUST already hold `refresh_lock` (and have stopped the live feeds); this
+        method neither acquires nor releases it, so `refresh_chain` and the batch orchestrator
+        share one implementation. The fetcher's own `finally` cleanup cancels every line.
+        `progress` (optional, caller-owned) collects finished pages so an interrupted fetch can
+        be archived afterwards via `save_partial_ticker_locked`; `on_saved` is called as soon as
+        the complete snapshot is archived (before paper-trade quoting), so a caller interrupting
+        the quoting step knows the snapshot already exists.
+        """
+        self._require_refresh_lock("refresh_ticker_locked")
+        symbol = self.validate_ticker(raw_ticker)
+        fetch_res = await self.fetcher.fetch_option_chain(
+            symbol,
+            range_pct=range_pct,
+            strike_step=strike_step,
+            dte_min=dte_min,
+            dte_max=dte_max,
+            include_short_dte=include_short_dte,
+            progress=progress,
+        )
+        outcome = self._save_fetch_result(symbol, fetch_res, partial_reason=None)
+        if on_saved is not None:
+            on_saved(outcome)
+        _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
+            symbol,
+            underlying_conid=outcome.plan.underlying.conid,
+        )
+        outcome.notices.extend(quote_notices)
+        return outcome
+
+    def save_partial_ticker_locked(
+        self,
+        raw_ticker: str,
+        progress: ChainFetchProgress,
+        reason: PartialReason,
+    ) -> TickerRefreshOutcome | None:
+        """Archive the FINISHED pages of an interrupted ticker refresh as a partial snapshot.
+
+        Same enrich -> save path as a complete refresh (BSM fallback, step inference), but the
+        snapshot is flagged `partial` / `reason` and never replaces `data/latest` unless the
+        ticker has none yet. No paper-trade quoting and no IBKR request. Returns `None` when no
+        page finished. The caller MUST hold `refresh_lock`.
+        """
+        self._require_refresh_lock("save_partial_ticker_locked")
+        symbol = self.validate_ticker(raw_ticker)
+        fetch_res = self.fetcher.build_partial_result(progress)
+        if fetch_res is None:
+            return None
+        if fetch_res.plan.underlying.symbol != symbol:
+            raise RuntimeError("partial fetch progress belongs to another ticker")
+        return self._save_fetch_result(symbol, fetch_res, partial_reason=reason)
+
+    def _require_refresh_lock(self, caller: str) -> None:
+        if not self.refresh_lock.locked():
+            raise RuntimeError(f"{caller}() requires refresh_lock to be held")
+
+    def _save_fetch_result(
+        self,
+        symbol: str,
+        fetch_res: FetchResult,
+        *,
+        partial_reason: PartialReason | None,
+    ) -> TickerRefreshOutcome:
+        """BSM-enrich a fetch result and archive it (complete or partial) as a Mode 1 snapshot."""
+        oc = self.settings.options_chain
+        notices: list[str] = []
+        raw_df = pl.DataFrame(
+            [r.model_dump() for r in fetch_res.rows],
+            schema=OPTION_CHAIN_POLARS_SCHEMA,
+        )
+        enriched_df = BSMFallbackEngine.enrich_missing_greeks(
+            raw_df, risk_free_rate=self.settings.analytics.risk_free_rate
+        )
+        inferred_step, _ = infer_chain_step_and_range(enriched_df)
+        plan = fetch_res.plan
+        plan_step = plan.strikes.effective_step
+        actual_step = (
+            inferred_step
+            if (inferred_step is not None and inferred_step > plan_step + 1e-6)
+            else plan_step
+        )
+        req_step = plan.strikes.requested_step
+        notices.extend(fetch_res.notices)
+        if actual_step > plan_step + 1e-6:
+            notices.append(
+                f"IBKR strikes for {symbol} spaced at ${actual_step:g} (requested ${req_step:g})."
+            )
+        avail_steps = (
+            list(plan.available_strike_steps)
+            if plan.available_strike_steps
+            else list(oc.allowed_strike_steps)
+        )
+        avail_ranges = (
+            list(plan.available_range_pcts)
+            if plan.available_range_pcts
+            else list(oc.allowed_range_pcts)
+        )
+        validated_count = (
+            int(plan.exchange_validated_strike_count)
+            if plan.exchange_validated_strike_count > 0
+            else len({float(r.strike) for r in fetch_res.rows})
+        )
+        if partial_reason is None:
+            # Capabilities come only from complete refreshes (a partial row set may undercount).
+            self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
+        saved = self.repo.save_snapshot_result(
+            symbol,
+            enriched_df.to_dicts(),
+            range_pct=plan.range_pct,
+            strike_step=actual_step,
+            requested_strike_step=req_step,
+            spot_source=plan.underlying.spot_source,
+            partial_reason=partial_reason,
+        )
+        if partial_reason is not None and not saved.latest_updated:
+            notices.append(
+                f"Partial snapshot {saved.meta.snapshot_id} archived; the latest cache for "
+                f"{symbol} still holds the previous complete snapshot."
+            )
+        return TickerRefreshOutcome(
+            symbol=symbol,
+            enriched=enriched_df,
+            meta=saved.meta,
+            plan=plan,
+            actual_step=actual_step,
+            requested_step=req_step,
+            available_strike_steps=avail_steps,
+            available_range_pcts=avail_ranges,
+            validated_count=validated_count,
+            notices=notices,
+            partial_reason=partial_reason,
+            latest_updated=saved.latest_updated,
+        )
+
+    async def refresh_chain(self, req: RefreshRequest) -> ChainAnalyticsResponse:
+        symbol = self.validate_ticker(req.ticker)
+        eff_dte_min, eff_dte_max, include_short = self.resolve_fetch_window(
+            req.dte_min, req.dte_max, req.include_short_dte
+        )
         disp_min = eff_dte_min if req.display_dte_min is None else int(req.display_dte_min)
         disp_max = eff_dte_max if req.display_dte_max is None else int(req.display_dte_max)
         if disp_min > disp_max:
             raise InvalidRequestError("display_dte_min must be <= display_dte_max")
-        include_short = (
-            oc.include_short_dte_for_backtest
-            if req.include_short_dte is None
-            else bool(req.include_short_dte)
-        )
 
         if not await self.acquire_refresh(f"refresh:{symbol}"):
             raise self._busy_error()
         try:
             notices: list[str] = []
-            stopped_lines = await self._stop_corridor(reason="refresh_chain", ticker=symbol)
-            if stopped_lines > 0:
+            stopped = await self._stop_live_feeds(reason="refresh_chain", ticker=symbol)
+            if stopped.corridor_lines > 0:
                 notices.append(
-                    f"Stopped {stopped_lines} active Wall Corridor quote stream(s) "
+                    f"Stopped {stopped.corridor_lines} active Wall Corridor quote stream(s) "
                     "before chain refresh to stay within IBKR's 100-line ceiling."
                 )
-            fetch_res = await self.fetcher.fetch_option_chain(
+            if stopped.screener_lines > 0:
+                notices.append(screener_stop_notice(stopped.screener_lines, "before chain refresh"))
+            outcome = await self.refresh_ticker_locked(
                 symbol,
                 range_pct=req.range_pct,
                 strike_step=req.strike_step,
@@ -785,57 +1219,10 @@ class AnalyzerService:
                 dte_max=req.dte_max,
                 include_short_dte=include_short,
             )
-            raw_df = pl.DataFrame(
-                [r.model_dump() for r in fetch_res.rows],
-                schema=OPTION_CHAIN_POLARS_SCHEMA,
-            )
-            enriched_df = BSMFallbackEngine.enrich_missing_greeks(
-                raw_df, risk_free_rate=self.settings.analytics.risk_free_rate
-            )
-            inferred_step, _ = infer_chain_step_and_range(enriched_df)
-            plan = fetch_res.plan
-            plan_step = plan.strikes.effective_step
-            actual_step = (
-                inferred_step
-                if (inferred_step is not None and inferred_step > plan_step + 1e-6)
-                else plan_step
-            )
-            req_step = plan.strikes.requested_step
-            notices.extend(fetch_res.notices)
-            if actual_step > plan_step + 1e-6:
-                notices.append(
-                    f"IBKR strikes for {symbol} spaced at ${actual_step:g} "
-                    f"(requested ${req_step:g})."
-                )
-            avail_steps = (
-                list(plan.available_strike_steps)
-                if plan.available_strike_steps
-                else list(oc.allowed_strike_steps)
-            )
-            avail_ranges = (
-                list(plan.available_range_pcts)
-                if plan.available_range_pcts
-                else list(oc.allowed_range_pcts)
-            )
-            validated_count = (
-                int(plan.exchange_validated_strike_count)
-                if plan.exchange_validated_strike_count > 0
-                else len({float(r.strike) for r in fetch_res.rows})
-            )
-            self._ticker_capabilities[symbol] = (avail_steps, avail_ranges, validated_count)
-            meta = self.repo.save_snapshot(
-                symbol,
-                enriched_df.to_dicts(),
-                range_pct=plan.range_pct,
-                strike_step=actual_step,
-                requested_strike_step=req_step,
-                spot_source=plan.underlying.spot_source,
-            )
-            _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
-                symbol,
-                underlying_conid=plan.underlying.conid,
-            )
-            notices.extend(quote_notices)
+            notices.extend(outcome.notices)
+            enriched_df = outcome.enriched
+            meta = outcome.meta
+            plan = outcome.plan
 
             display_df = enriched_df.filter(pl.col("dte").is_between(disp_min, disp_max))
             if display_df.height == 0 and enriched_df.height > 0:
@@ -850,12 +1237,12 @@ class AnalyzerService:
                 source="LIVE_REFRESH",
                 notices=notices,
                 range_pct=plan.range_pct,
-                strike_step=actual_step,
-                requested_strike_step=req_step,
-                exchange_validated_strike_count=validated_count,
+                strike_step=outcome.actual_step,
+                requested_strike_step=outcome.requested_step,
+                exchange_validated_strike_count=outcome.validated_count,
                 exchange_native_verified=bool(plan.exchange_native_verified),
-                available_strike_steps=avail_steps,
-                available_range_pcts=avail_ranges,
+                available_strike_steps=outcome.available_strike_steps,
+                available_range_pcts=outcome.available_range_pcts,
                 spot_source=meta.spot_source,
                 quoted_contract_count=meta.quoted_contract_count if same_slice else None,
                 quote_coverage=meta.quote_coverage if same_slice else None,
@@ -899,7 +1286,7 @@ class AnalyzerService:
                 if not await self.acquire_refresh("ledger:sync"):
                     raise self._busy_error()
                 try:
-                    await self._stop_corridor(reason="ledger_sync")
+                    await self._stop_live_feeds(reason="ledger_sync")
                     res = await self.ledger.sync_ledger(mode=mode, include_gateway=include_gateway)
                 finally:
                     self.release_refresh()
@@ -921,7 +1308,7 @@ class AnalyzerService:
         if not await self.acquire_refresh("ledger:mtm"):
             raise self._busy_error()
         try:
-            await self._stop_corridor(reason="ledger_mtm")
+            await self._stop_live_feeds(reason="ledger_mtm")
             return await self.ledger.refresh_open_mtm()
         finally:
             self.release_refresh()

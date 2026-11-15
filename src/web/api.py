@@ -4,21 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from typing import Any, Literal
 
-from fastapi import APIRouter, Body, Depends, File, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Body, Depends, File, HTTPException, Path, Query, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 
 from src.core.exceptions import (
+    CorridorBusyError,
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidRequestError,
     OptionChainFetchError,
     PacingViolationError,
+    ScreenerLiveBusyError,
 )
 from src.services.analyzer import AnalyzerService
+from src.services.batch_refresh import BATCH_ID_PATTERN, BatchRefreshService
+from src.services.error_messages import GENERIC_ERROR_CODE, GENERIC_ERROR_MESSAGE, describe_error
 from src.services.schemas import (
     MAX_LEDGER_IMPORT_BYTES,
+    BatchRefreshRequest,
+    BatchRefreshStatus,
     ChainAnalyticsResponse,
     CorridorLegRef,
     CorridorQuoteFrame,
@@ -34,14 +43,26 @@ from src.services.schemas import (
     LedgerView,
     LedgerWindow,
     RefreshRequest,
+    ScreenerLiveReallocateRequest,
+    ScreenerLiveReallocateResponse,
+    ScreenerLiveRequest,
+    ScreenerLiveStopResponse,
+    ScreenerRunRequest,
+    ScreenerRunResponse,
     SnapshotsListResponse,
     StrategyEvaluateRequest,
     StrategyEvaluationResponse,
     StrategySuggestRequest,
     StrategySuggestResponse,
+    WatchlistResponse,
+    WatchlistTickerRequest,
 )
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
+logger = logging.getLogger(__name__)
+
+#: Cap of the JSON `q` query parameter of `GET /api/screener/stream` (120 row ids x 64 chars).
+SCREENER_STREAM_QUERY_MAX_CHARS = 12_000
 
 
 def _parse_priority_legs_query(raw: str | None) -> list[CorridorLegRef]:
@@ -77,6 +98,18 @@ def _parse_priority_legs_query(raw: str | None) -> list[CorridorLegRef]:
     return refs
 
 
+class _ClosingStreamingResponse(StreamingResponse):
+    """`StreamingResponse` that always closes its body generator (frees IBKR lines on cancel)."""
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            aclose = getattr(self.body_iterator, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+
 def _format_sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, separators=(',', ':'))}\n\n"
 
@@ -88,6 +121,19 @@ async def get_web_service(request: Request) -> AnalyzerService:
         svc = AnalyzerService()
         request.app.state.service = svc
     return svc
+
+
+async def get_batch_service(request: Request) -> BatchRefreshService:
+    """FastAPI dependency returning the application's `BatchRefreshService` instance."""
+    batch: BatchRefreshService | None = getattr(request.app.state, "batch_refresh", None)
+    if batch is None:
+        svc = await get_web_service(request)
+        batch = BatchRefreshService(svc)
+        request.app.state.batch_refresh = batch
+    return batch
+
+
+BatchIdPath = Path(pattern=BATCH_ID_PATTERN)
 
 
 # ------------------------------------------------------------------ routes
@@ -139,6 +185,60 @@ async def api_refresh(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
     return await svc.refresh_chain(payload)
+
+
+@router.post("/refresh/batch", response_model=BatchRefreshStatus, status_code=202)
+async def api_batch_start(
+    payload: BatchRefreshRequest,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return await batch.start(payload)
+
+
+@router.get("/refresh/batch/current", response_model=BatchRefreshStatus | None)
+async def api_batch_current(
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus | None:
+    return batch.current()
+
+
+@router.get("/refresh/batch/{batch_id}", response_model=BatchRefreshStatus)
+async def api_batch_get(
+    batch_id: str = BatchIdPath,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return batch.get(batch_id)
+
+
+@router.post("/refresh/batch/{batch_id}/cancel", response_model=BatchRefreshStatus)
+async def api_batch_cancel(
+    batch_id: str = BatchIdPath,
+    batch: BatchRefreshService = Depends(get_batch_service),  # noqa: B008
+) -> BatchRefreshStatus:
+    return batch.cancel(batch_id)
+
+
+@router.get("/watchlist", response_model=WatchlistResponse)
+async def api_watchlist(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.get_watchlist()
+
+
+@router.post("/watchlist/tickers", response_model=WatchlistResponse)
+async def api_watchlist_add(
+    payload: WatchlistTickerRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.add_ticker(payload.ticker)
+
+
+@router.delete("/watchlist/tickers/{ticker}", response_model=WatchlistResponse)
+async def api_watchlist_remove(
+    ticker: str,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> WatchlistResponse:
+    return await svc.watchlist.remove_ticker(ticker)
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)
@@ -199,6 +299,12 @@ async def api_corridor_stream(
         try:
             async for frame in gen:
                 yield _format_sse_event("frame", frame.model_dump())
+        except GatewayTimeoutError as exc:
+            safe = describe_error(exc, ibkr=svc.settings.ibkr)
+            yield _format_sse_event(
+                "error",
+                {"error_code": safe.code, "status": 503, "message": safe.message},
+            )
         except GatewayConnectionError as exc:
             yield _format_sse_event(
                 "error",
@@ -208,6 +314,15 @@ async def api_corridor_stream(
                     "message": (
                         f"{exc} — IBKR Gateway connection lost during live corridor stream."
                     ),
+                },
+            )
+        except CorridorBusyError as exc:
+            yield _format_sse_event(
+                "error",
+                {
+                    "error_code": "REFRESH_BUSY",
+                    "status": 409,
+                    "message": str(exc),
                 },
             )
         except (OptionChainFetchError, PacingViolationError) as exc:
@@ -224,7 +339,7 @@ async def api_corridor_stream(
         finally:
             await gen.aclose()
 
-    return StreamingResponse(
+    return _ClosingStreamingResponse(
         _event_stream(),
         media_type="text/event-stream",
         headers={
@@ -233,6 +348,119 @@ async def api_corridor_stream(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.post("/screener/run", response_model=ScreenerRunResponse)
+async def api_screener_run(
+    payload: ScreenerRunRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> ScreenerRunResponse:
+    return await svc.screener.run(payload)
+
+
+def _parse_screener_live_query(raw: str) -> ScreenerLiveRequest:
+    """Strictly parse the JSON `q` query parameter of the live screener SSE endpoint."""
+    if len(raw) > SCREENER_STREAM_QUERY_MAX_CHARS:
+        raise InvalidRequestError("Live screener request is too large.")
+    if len(raw.strip()) < 2:
+        raise InvalidRequestError("Live screener request is empty.")
+    try:
+        return ScreenerLiveRequest.model_validate_json(raw)
+    except ValidationError as exc:
+        # Never echo client input: only fixed tokens, int indexes and known field names.
+        first = exc.errors(include_input=False, include_url=False)[0]
+        if first.get("type") == "json_invalid":
+            raise InvalidRequestError("Live screener request is not valid JSON.") from None
+        if first.get("type") == "extra_forbidden":
+            raise InvalidRequestError("Live screener request has an unexpected field.") from None
+        known = ScreenerLiveRequest.model_fields
+        parts = [
+            str(part) if isinstance(part, int) or part in known else "<field>"
+            for part in first.get("loc", ())
+        ]
+        loc = ".".join(parts)
+        msg = str(first.get("msg", "invalid value"))
+        raise InvalidRequestError(
+            f"Invalid live screener request ({loc or 'body'}): {msg}"[:300]
+        ) from None
+
+
+@router.get("/screener/stream")
+async def api_screener_stream(
+    request: Request,
+    q: str = Query(),
+    max_frames: int | None = Query(default=None, ge=1, le=200),
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> StreamingResponse:
+    live_request = _parse_screener_live_query(q)
+    stream = await svc.screener_live.open_live_stream(
+        live_request,
+        is_disconnected=request.is_disconnected,
+        max_frames=max_frames,
+    )
+
+    def _error(code: str, status: int, message: str) -> str:
+        return _format_sse_event(
+            "error", {"error_code": code, "status": status, "message": message}
+        )
+
+    async def _event_stream() -> AsyncIterator[str]:
+        try:
+            yield _format_sse_event(
+                "open",
+                {
+                    "stream_id": stream.stream_id,
+                    "lines_budget": svc.screener_live.lines_budget,
+                    "option_lines_budget": svc.screener_live.option_lines_budget,
+                },
+            )
+            async for frame in stream:
+                if frame.stopped:
+                    yield _format_sse_event("stopped", frame.model_dump())
+                    break
+                yield _format_sse_event("frame", frame.model_dump())
+        except GatewayTimeoutError as exc:
+            safe = describe_error(exc, ibkr=svc.settings.ibkr)
+            yield _error(safe.code, 503, safe.message)
+        except GatewayConnectionError as exc:
+            safe = describe_error(exc, ibkr=svc.settings.ibkr)
+            yield _error("GATEWAY_OFFLINE", 503, safe.message)
+        except ScreenerLiveBusyError as exc:
+            yield _error("REFRESH_BUSY", 409, str(exc))
+        except (OptionChainFetchError, PacingViolationError) as exc:
+            yield _error("SCREENER_STREAM_ERROR", 502, describe_error(exc).message)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("live screener stream failed unexpectedly")
+            yield _error(GENERIC_ERROR_CODE, 500, GENERIC_ERROR_MESSAGE)
+        finally:
+            await stream.aclose()
+
+    return _ClosingStreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@router.post("/screener/stream/reallocate", response_model=ScreenerLiveReallocateResponse)
+async def api_screener_reallocate(
+    payload: ScreenerLiveReallocateRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> ScreenerLiveReallocateResponse:
+    return await svc.screener_live.reallocate(payload)
+
+
+@router.post("/screener/stop", response_model=ScreenerLiveStopResponse)
+async def api_screener_stop(
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> ScreenerLiveStopResponse:
+    return await svc.screener_live.stop_live_streams(reason="manual_stop")
 
 
 @router.get("/ledger", response_model=LedgerDashboardResponse)

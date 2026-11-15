@@ -116,7 +116,7 @@ def _leg_signature(legs: Sequence[PaperTradeLeg]) -> LegSignature:
 class PaperTradeLeg(BaseModel):
     """One option contract leg inside a paper trade (supports 1..8 legs per trade)."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     side: Literal["BUY", "SELL"]
     right: Literal["C", "P"]
@@ -152,7 +152,7 @@ class PaperTradeLeg(BaseModel):
 class PaperTrade(BaseModel):
     """Registered multi-leg paper trade persisted in `paper_trades.json`."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     id: str = Field(min_length=1)
     ticker: str
@@ -312,7 +312,7 @@ def _build_new_ledger_trade(
 class PaperQuoteRecord(BaseModel):
     """One append-only quote run entry persisted in `paper_quotes.jsonl`."""
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     quote_id: str = Field(min_length=1)
     quoted_at_utc: str

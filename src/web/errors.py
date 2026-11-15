@@ -12,12 +12,15 @@ from fastapi.responses import JSONResponse
 
 from src.core.exceptions import (
     BacktestValidationError,
+    BatchNotFoundError,
     ConfigurationError,
     DuplicatePaperTradeError,
     FlexServiceError,
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidRequestError,
     InvalidTickerError,
+    LiveStreamNotFoundError,
     OptionChainFetchError,
     PacingViolationError,
     PaperTradeCapError,
@@ -26,9 +29,12 @@ from src.core.exceptions import (
     SecurityViolationError,
     SnapshotNotFoundError,
     StorageSchemaError,
+    StorageUnavailableError,
     UnderlyingPriceUnavailableError,
+    WatchlistCapError,
 )
 from src.services.analyzer import AnalyzerService
+from src.services.error_messages import describe_error
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -41,6 +47,16 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error_code": "INVALID_TICKER", "message": str(exc)},
         )
 
+    @app.exception_handler(LiveStreamNotFoundError)
+    async def _handle_live_stream_not_found(
+        _req: Request, exc: LiveStreamNotFoundError
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=404,
+            content={"error_code": "LIVE_STREAM_NOT_FOUND", "message": msg, "detail": msg},
+        )
+
     @app.exception_handler(InvalidRequestError)
     async def _handle_invalid_request(_req: Request, exc: InvalidRequestError) -> JSONResponse:
         # `detail` mirrors FastAPI's HTTPException body, which the dashboard reads first.
@@ -49,11 +65,46 @@ def register_exception_handlers(app: FastAPI) -> None:
             content={"error_code": "INVALID_REQUEST", "message": str(exc), "detail": str(exc)},
         )
 
+    @app.exception_handler(WatchlistCapError)
+    async def _handle_watchlist_full(_req: Request, exc: WatchlistCapError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=409,
+            content={"error_code": "WATCHLIST_FULL", "message": msg, "detail": msg},
+        )
+
+    @app.exception_handler(StorageUnavailableError)
+    async def _handle_storage_unavailable(
+        _req: Request, exc: StorageUnavailableError
+    ) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=503,
+            content={"error_code": "STORAGE_UNAVAILABLE", "message": msg, "detail": msg},
+        )
+
+    @app.exception_handler(BatchNotFoundError)
+    async def _handle_batch_not_found(_req: Request, exc: BatchNotFoundError) -> JSONResponse:
+        msg = str(exc)
+        return JSONResponse(
+            status_code=404,
+            content={"error_code": "BATCH_NOT_FOUND", "message": msg, "detail": msg},
+        )
+
     @app.exception_handler(SnapshotNotFoundError)
     async def _handle_snapshot_not_found(_req: Request, exc: SnapshotNotFoundError) -> JSONResponse:
         return JSONResponse(
             status_code=404,
             content={"error_code": "SNAPSHOT_NOT_FOUND", "message": str(exc)},
+        )
+
+    @app.exception_handler(GatewayTimeoutError)
+    async def _handle_gateway_timeout(req: Request, exc: GatewayTimeoutError) -> JSONResponse:
+        svc: AnalyzerService | None = getattr(req.app.state, "service", None)
+        safe = describe_error(exc, ibkr=svc.settings.ibkr if svc is not None else None)
+        return JSONResponse(
+            status_code=503,
+            content={"error_code": safe.code, "message": safe.message},
         )
 
     @app.exception_handler(GatewayConnectionError)

@@ -107,4 +107,21 @@
     grid-column: span 1;
     min-width: 0;
   }
+  .wl-picker__panel {
+    min-width: 0;
+    width: calc(100vw - 20px);
+  }
+  .wl-picker__load {
+    margin-left: 0;
+    flex: 1 0 100%;
+  }
+  .wl-load-bar {
+    flex: 1 0 100%;
+  }
+  .wl-add__input {
+    width: 96px;
+  }
+  .wl-progress__track {
+    flex: 1 1 100%;
+  }
 }

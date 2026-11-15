@@ -7,6 +7,28 @@ milestones in git history.
 
 ## [Unreleased]
 
+### Fixed
+- **Paper trade forward-compatibility (`extra="ignore"`):** Relaxed model configurations on `PaperTrade`, `PaperTradeLeg`, and `PaperQuoteRecord` to `extra="ignore"` so legacy/newer persisted metadata fields do not break registry deserialization or quote logging.
+- **Post-save paper-trade quoting fault isolation:** In `PaperTradeService.quote_active_trades_for_refresh()` and `BatchRefreshService._run_one()`, paper-trade quoting errors (or quote log write issues) after a snapshot has already been written to disk no longer cause chain refresh or batch execution to revert the completed snapshot to failed; the saved complete snapshot remains preserved with a clear diagnostic notice.
+- **Frontend cache-buster:** Bumped asset query strings to `?v=20261115b` across CSS/JS imports.
+
+## [0.4.1] - 2026-11-15
+
+### Added
+- **Best Option screener (`#best-option-card`):** best strategy per watchlist ticker from cached complete snapshots (zero IBKR calls), with Best per ticker / Selected strategy / All combinations modes, sortable and filterable columns, EV/risk and POP, min credit / RoR / POP filters, a Columns menu, `Open in Strategy Lab`, and an opt-in `Live` checkbox that streams the top rows' legs (+/-1-strike re-picks, <= 88 option / <= 90 total lines, mutually exclusive with the Wall Corridor feed, never persisted). New routes `POST /api/screener/run`, `GET /api/screener/stream` (SSE), `POST /api/screener/stream/reallocate`, `POST /api/screener/stop`.
+- **Strategy Lab Bear Call / Bear Put presets and new risk metrics:** `BEAR_CALL_SPREAD`, `BEAR_PUT_SPREAD` (preset pills in Strategy Lab and the screener), `expected_return_on_risk_pct` (EV/risk) and `nearest_breakeven_distance_pct` in the risk metrics.
+- **16-ticker default watchlist:** `watchlist.hardcoded_tickers` and `DEFAULT_WATCHLIST` now seed `NVDA`, `AVGO`, `CRDO`, `MRVL`, `META`, `MSFT`, `AMZN`, `TSLA`, `SPCX`, `LITE`, `AMD`, `ORCL`, `PLTR`, `ALAB`, `MU`, `GOOGL`; the list is stored server-side in `data/watchlist.json`.
+- **Watchlist & batch refresh API:** `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel` (sequential multi-ticker refresh; new codes `WATCHLIST_FULL`, `STORAGE_UNAVAILABLE`, `BATCH_NOT_FOUND`).
+- **Collapsible watchlist panel with multi-ticker batch load (`#watchlist-picker`):** add/remove tickers, select All / None / Stale only, `LOAD SELECTED` with a polled progress strip (cancel, retry unfinished), replacing the fixed ticker pills and custom ticker box.
+- **Config key `watchlist.max_size`** (default `20`, `1..50`, must be `>= len(hardcoded_tickers)`): caps the persisted watchlist.
+
+### Fixed
+- **Strategy Lab / Backtest:** Iron Condor (and any preset) on an expiry missing calls or puts now reports a clear reason (`NO_CALL_CONTRACTS`, `NO_PUT_CONTRACTS`, `EMPTY_CHAIN`) instead of a raw Python error.
+- **Cancel stops a batch immediately; interrupted tickers keep finished pages as a PARTIAL snapshot; Gateway connection loss or a 240 s per-ticker time-out stops the batch (remaining tickers "not started").** New config key `watchlist.batch_ticker_timeout_sec` (default `240`, `30..1800`). UI: Cancel shows `Stopping…`, summary reports not-started / partial / cancelled counts, `Retry (n)` re-runs every non-done ticker, `PARTIAL` snapshot tag and chain warning, an aborted batch shows a warning banner, and a Gateway time-out on a single refresh returns `503 GATEWAY_TIMEOUT`.
+- **IBKR requests now time out after 20 s and fail fast on Gateway upstream loss (a batch could hang forever).** New config key `ibkr.request_timeout_sec` (default `20`, `0 < x <= 120`); `GatewayTimeoutError` and upstream-loss notices surface as sanitized `GatewayConnectionError` messages naming the stage.
+- **Interrupted refreshes can be archived as partial snapshots** (`SnapshotMeta.partial` / `partial_reason` `cancelled|timeout|connection_lost`): a partial save never replaces an existing `data/latest/{TICKER}_latest.csv` and is excluded from the quality gate.
+- **Wall Corridor stream no longer subscribes market-data lines when a refresh starts between stream open and first read;** it ends with an SSE `error` event instead.
+
 ## [0.4.0] - 2026-11-14
 
 ### Added

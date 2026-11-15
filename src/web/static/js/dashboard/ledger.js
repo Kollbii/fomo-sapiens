@@ -1798,6 +1798,7 @@ export async function syncLedgerFromUI() {
     });
   } finally {
     setLedgerBusy(false, "");
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }
 
@@ -1856,6 +1857,7 @@ export async function importLedgerFile(file) {
       dom.ledgerImportFile.value = "";
     }
     setLedgerBusy(false, "");
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }
 
@@ -1901,5 +1903,6 @@ export async function refreshOpenLedgerMtm() {
     });
   } finally {
     setLedgerBusy(false, "");
+    document.dispatchEvent(new Event("ibkr:lock-released"));
   }
 }

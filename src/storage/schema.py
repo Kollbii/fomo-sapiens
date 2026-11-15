@@ -24,6 +24,8 @@ GreeksSource = Literal["IBKR_MODEL", "BSM_FALLBACK", "NONE"]
 OptionRight = Literal["C", "P"]
 WallBasis = Literal["OPEN_INTEREST", "VOLUME"]
 SpotSource = Literal["LAST", "MID", "CLOSE"]
+# Why a refresh stopped early and archived only its finished pages (`SnapshotMeta.partial_reason`).
+PartialReason = Literal["cancelled", "timeout", "connection_lost"]
 
 
 def _is_missing(value: Any) -> bool:
@@ -230,6 +232,21 @@ class SnapshotMeta(BaseModel):
     quoted_contract_count: int | None = None
     quote_coverage: float | None = None
     prior_close_only_count: int | None = None
+    # Interrupted refresh (cancel / time-out / Gateway loss) that archived only finished pages.
+    # `None` = legacy or rebuilt entry (read as not partial); never stored in the CSV itself.
+    partial: bool | None = None
+    partial_reason: PartialReason | None = None
+
+    @model_validator(mode="after")
+    def _partial_consistency(self) -> Self:
+        if self.partial_reason is not None and self.partial is not True:
+            raise ValueError("partial_reason requires partial=True")
+        return self
+
+    @property
+    def is_partial(self) -> bool:
+        """True only for snapshots explicitly flagged partial (legacy entries are complete)."""
+        return self.partial is True
 
 
 def infer_chain_step_and_range(df: pl.DataFrame) -> tuple[float | None, float | None]:

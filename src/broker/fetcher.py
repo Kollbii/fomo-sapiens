@@ -62,6 +62,8 @@ class FetchResult:
     primary_contract_count: int | None = None
     short_dte_contract_count: int = 0
     short_dte_range: tuple[int, int] | None = None
+    #: True only for `build_partial_result()` output (finished pages of an interrupted fetch).
+    partial: bool = False
 
 
 def _row_quote_score(row: OptionContractRow) -> int:
@@ -92,6 +94,104 @@ def _merge_and_dedupe_rows(
         (pair[1] for pair in best.values()),
         key=lambda r: (r.expiry, r.strike, r.right),
     )
+
+
+PageCallback = Callable[[Sequence[Any], Sequence[Any]], None]
+
+
+@dataclass(frozen=True)
+class _FinishedPage:
+    """One page whose poll completed and whose lines were all cancelled."""
+
+    contracts: tuple[Any, ...]
+    tickers: tuple[Any, ...]
+
+
+class ChainFetchProgress:
+    """Caller-owned collector that `fetch_option_chain` fills while it works.
+
+    It holds the Pass 1 plan as soon as it exists (range / strike step / spot-source
+    metadata) and every FINISHED page of Pass 1 and Pass 2: a page is recorded only after its
+    poll completed and `_cancel_paced` sent 100% of its `cancelMktData` calls, so the page in
+    flight when the fetch is interrupted is never included. Rows are parsed from the frozen
+    tickers of those finished pages and merged/deduplicated exactly like the normal result,
+    so after a successful fetch `rows(result_context)` equals `FetchResult.rows`. A collector
+    is reset at the start of every `fetch_option_chain` call that receives it.
+    """
+
+    def __init__(self) -> None:
+        self.plan: ChainPlan | None = None
+        self.short_plan: ChainPlan | None = None
+        self.short_dte_range: tuple[int, int] | None = None
+        self.context: SnapshotContext | None = None
+        self.notices: list[str] = []
+        self.completed = False
+        self._pages: dict[int, list[_FinishedPage]] = {1: [], 2: []}
+
+    def reset(self) -> None:
+        """Forget everything collected by a previous fetch."""
+        self.plan = None
+        self.short_plan = None
+        self.short_dte_range = None
+        self.context = None
+        self.notices = []
+        self.completed = False
+        self._pages = {1: [], 2: []}
+
+    @property
+    def pages_finished(self) -> int:
+        return len(self._pages[1]) + len(self._pages[2])
+
+    @property
+    def contracts_finished(self) -> int:
+        return sum(len(pg.contracts) for pages in self._pages.values() for pg in pages)
+
+    def page_quote_counts(self) -> tuple[int, ...]:
+        """Real-quote count per finished page (Pass 1 pages first)."""
+        return tuple(
+            sum(1 for tk in pg.tickers if has_real_quote(tk))
+            for pass_no in (1, 2)
+            for pg in self._pages[pass_no]
+        )
+
+    def record_page(
+        self, pass_no: Literal[1, 2], contracts: Sequence[Any], tickers: Sequence[Any]
+    ) -> None:
+        """Record one finished page (`contracts[i]` <-> `tickers[i]`)."""
+        if len(contracts) != len(tickers):
+            raise ValueError("finished page must pair every contract with its ticker")
+        self._pages[pass_no].append(_FinishedPage(tuple(contracts), tuple(tickers)))
+
+    def discard_short_pass(self) -> None:
+        """Drop Pass 2 (it was skipped as non-fatal, so the normal result omits it)."""
+        self._pages[2] = []
+        self.short_plan = None
+        self.short_dte_range = None
+
+    def pass_rows(
+        self, pass_no: Literal[1, 2], context: SnapshotContext
+    ) -> list[OptionContractRow]:
+        """Parse the finished pages of one pass in fetch order."""
+        plan = self.plan if pass_no == 1 else self.short_plan
+        if plan is None:
+            return []
+        dte_map = {m.ib_expiry: m.dte for m in plan.expirations}
+        out: list[OptionContractRow] = []
+        for pg in self._pages[pass_no]:
+            for contract, tk in zip(pg.contracts, pg.tickers, strict=True):
+                ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
+                out.append(
+                    TickerParser.parse_ticker(
+                        tk, contract=contract, context=context, dte=dte_map.get(ib_exp)
+                    )
+                )
+        return out
+
+    def rows(self, context: SnapshotContext) -> list[OptionContractRow]:
+        """Finished-page rows merged exactly like `fetch_option_chain` merges its result."""
+        rows1 = self.pass_rows(1, context)
+        rows2 = self.pass_rows(2, context)
+        return _merge_and_dedupe_rows(rows1, rows2) if rows2 else rows1
 
 
 @dataclass(frozen=True)
@@ -322,12 +422,15 @@ class PagedOptionChainFetcher:
         oc = self.settings.options_chain
         ib = self.client.ib
         stage = f"market-data collection ({len(page_contracts)} contracts)"
+        since = self.client.link_checkpoint()
         subscribed: list[Any] = []
         tickers: list[Any] = []
         try:
             for idx, contract in enumerate(page_contracts):
                 if idx % PAGE_PACING_CHUNK_SIZE == 0:
                     await self.sleep(PAGE_PACING_PAUSE_SEC)
+                    # Upstream lost: open no further lines (the finally still cancels all).
+                    self.client.ensure_link_alive(stage=stage, since=since)
                 ticker = ib.reqMktData(
                     contract,
                     genericTickList=generic_tick_list,
@@ -337,14 +440,18 @@ class PagedOptionChainFetcher:
                 subscribed.append(contract)
                 tickers.append(ticker)
 
-            # The poll window starts only after the last request of the page was sent.
+            # The poll window starts only after the last request of the page was sent. An
+            # upstream-loss notice ends the (bounded) wait at once and fails the page below.
             await poll_until(
-                lambda: all(ready_predicate(t) for t in tickers),
+                lambda: (
+                    self.client.link_lost_since(since) or all(ready_predicate(t) for t in tickers)
+                ),
                 oc.page_collect_timeout_sec,
                 oc.page_poll_interval_sec,
                 self.sleep,
             )
             self.client.ensure_still_connected(stage=stage)
+            self.client.ensure_link_alive(stage=stage, since=since)
             return tickers
         except Exception as exc:
             self.client.handle_stage_error(exc, stage=stage)
@@ -461,8 +568,17 @@ class PagedOptionChainFetcher:
             check_live_downgrade=True,
         )
 
-    async def fetch_pages(self, contracts: Sequence[Any]) -> tuple[list[Any], int]:
-        """Partition `contracts` into `<= 80`-contract pages and collect all tickers."""
+    async def fetch_pages(
+        self,
+        contracts: Sequence[Any],
+        *,
+        on_page: PageCallback | None = None,
+    ) -> tuple[list[Any], int]:
+        """Partition `contracts` into `<= 80`-contract pages and collect all tickers.
+
+        `on_page(page_contracts, page_tickers)` runs after each page FINISHED (its poll done
+        and every line cancelled); it never sees the page in flight.
+        """
         pages = self.partition_pages(contracts)
         self.active_cooldown_sec = self.settings.options_chain.inter_page_cooldown_sec
         all_tickers: list[Any] = []
@@ -474,6 +590,8 @@ class PagedOptionChainFetcher:
             else:
                 page_tickers = await self._fetch_page_delayed(page, allow_fallback=(idx == 0))
             all_tickers.extend(page_tickers)
+            if on_page is not None:
+                on_page(page, page_tickers)
 
             if self.client.consume_pacing_warning():
                 self.active_cooldown_sec = max(self.active_cooldown_sec, PACING_COOLDOWN_SEC)
@@ -494,10 +612,21 @@ class PagedOptionChainFetcher:
         include_short_dte: bool = False,
         short_dte_min: int | None = None,
         short_dte_max: int | None = None,
+        progress: ChainFetchProgress | None = None,
     ) -> FetchResult:
-        """Execute the full 5-stage pipeline (and optional sequential short-DTE pass)."""
+        """Execute the full 5-stage pipeline (and optional sequential short-DTE pass).
+
+        `progress` (optional, caller-owned) is reset and then filled as work completes: the
+        Pass 1 plan and every finished page. When the fetch is interrupted (cancel, request
+        time-out, Gateway connection loss) the exception still propagates and the caller may
+        turn the finished pages into a partial result via `build_partial_result(progress)`.
+        Every IBKR await in this call is bounded and fails fast on upstream loss.
+        """
         t0 = time.perf_counter()
         self._notices = []
+        prog = progress if progress is not None else ChainFetchProgress()
+        prog.reset()
+        prog.notices = self._notices
         oc = self.settings.options_chain
         eff_dte_min = oc.dte_min if dte_min is None else int(dte_min)
         eff_dte_max = oc.dte_max if dte_max is None else int(dte_max)
@@ -510,7 +639,87 @@ class PagedOptionChainFetcher:
 
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
+        with self.client.link_watch():
+            return await self._fetch_option_chain_watched(
+                ticker,
+                range_pct=range_pct,
+                strike_step=strike_step,
+                eff_dte_min=eff_dte_min,
+                eff_dte_max=eff_dte_max,
+                include_short_dte=include_short_dte,
+                eff_short_min=eff_short_min,
+                eff_short_max=eff_short_max,
+                prog=prog,
+                t0=t0,
+            )
 
+    def _snapshot_context(self, plan: ChainPlan) -> SnapshotContext:
+        """Snapshot-level metadata stamped on every row (timestamp = now)."""
+        now_utc = self.clock().astimezone(UTC)
+        return SnapshotContext(
+            snapshot_id=make_snapshot_id(plan.underlying.symbol, now_utc),
+            snapshot_ts_utc=now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            market_date=plan.market_date.isoformat(),
+            market_data_type=self.client.get_active_market_data_type(),
+            underlying=plan.underlying.symbol,
+            underlying_conid=plan.underlying.conid,
+            underlying_price=plan.underlying.spot,
+        )
+
+    def build_partial_result(self, progress: ChainFetchProgress) -> FetchResult | None:
+        """Build a `partial=True` result from the FINISHED pages of an interrupted fetch.
+
+        Returns `None` when no plan exists or no page finished. The page in flight was never
+        recorded. Rows reuse the Pass 1 snapshot context when Pass 1 completed (so Pass 2 rows
+        match), otherwise a context stamped now. Pure: issues no IBKR request.
+        """
+        plan = progress.plan
+        if plan is None or progress.contracts_finished == 0:
+            return None
+        ctx = progress.context if progress.context is not None else self._snapshot_context(plan)
+        rows1 = progress.pass_rows(1, ctx)
+        rows2 = progress.pass_rows(2, ctx)
+        rows = _merge_and_dedupe_rows(rows1, rows2) if rows2 else rows1
+        if not rows:
+            return None
+        pages = progress.pages_finished
+        notice = (
+            f"Partial snapshot: kept {len(rows)} contract(s) from {pages} finished page(s); "
+            "the page in flight was dropped."
+        )
+        logger.info("partial_capture ticker=%s %s", plan.underlying.symbol, notice)
+        return FetchResult(
+            snapshot_id=ctx.snapshot_id,
+            snapshot_ts_utc=ctx.snapshot_ts_utc,
+            market_date=ctx.market_date,
+            market_data_type=ctx.market_data_type,
+            plan=plan,
+            rows=rows,
+            pages_fetched=pages,
+            elapsed_ms=0.0,
+            notices=(*plan.notices, *progress.notices, notice),
+            page_quote_counts=progress.page_quote_counts(),
+            primary_contract_count=len(rows1),
+            short_dte_contract_count=len(rows2),
+            short_dte_range=progress.short_dte_range if rows2 else None,
+            partial=True,
+        )
+
+    async def _fetch_option_chain_watched(
+        self,
+        ticker: str,
+        *,
+        range_pct: float | None,
+        strike_step: float | None,
+        eff_dte_min: int,
+        eff_dte_max: int,
+        include_short_dte: bool,
+        eff_short_min: int,
+        eff_short_max: int,
+        prog: ChainFetchProgress,
+        t0: float,
+    ) -> FetchResult:
+        """Body of `fetch_option_chain` inside one `link_watch()` scope."""
         plan = await self.discovery.build_plan(
             ticker,
             range_pct=range_pct,
@@ -518,43 +727,24 @@ class PagedOptionChainFetcher:
             dte_min=eff_dte_min,
             dte_max=eff_dte_max,
         )
+        prog.plan = plan
         candidates = self.build_candidate_contracts(plan)
         qualified = await self.qualify_option_contracts(candidates)
-        tickers, pages_fetched = await self.fetch_pages(qualified)
+        tickers, pages_fetched = await self.fetch_pages(
+            qualified, on_page=lambda pc, pt: prog.record_page(1, pc, pt)
+        )
 
         sub_notice = self.client.consume_subscription_fallback_notice()
         if sub_notice and sub_notice not in self._notices:
             self._notices.append(sub_notice)
-        active_md_type = self.client.get_active_market_data_type()
+        ctx = self._snapshot_context(plan)
+        prog.context = ctx
+        active_md_type = ctx.market_data_type
+        snapshot_id = ctx.snapshot_id
+        snapshot_ts_utc = ctx.snapshot_ts_utc
+        market_date_str = ctx.market_date
 
-        now_utc = self.clock().astimezone(UTC)
-        snapshot_id = make_snapshot_id(plan.underlying.symbol, now_utc)
-        snapshot_ts_utc = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
-        market_date_str = plan.market_date.isoformat()
-
-        ctx = SnapshotContext(
-            snapshot_id=snapshot_id,
-            snapshot_ts_utc=snapshot_ts_utc,
-            market_date=market_date_str,
-            market_data_type=active_md_type,
-            underlying=plan.underlying.symbol,
-            underlying_conid=plan.underlying.conid,
-            underlying_price=plan.underlying.spot,
-        )
-        dte_map = {m.ib_expiry: m.dte for m in plan.expirations}
-
-        rows1: list[OptionContractRow] = []
-        for contract, tk in zip(qualified, tickers, strict=True):
-            ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
-            dte = dte_map.get(ib_exp)
-            rows1.append(
-                TickerParser.parse_ticker(
-                    tk,
-                    contract=contract,
-                    context=ctx,
-                    dte=dte,
-                )
-            )
+        rows1 = prog.pass_rows(1, ctx)
 
         page_size = self.max_contracts_per_page
         page_quote_counts1 = tuple(
@@ -584,28 +774,21 @@ class PagedOptionChainFetcher:
                     smart_chains=plan.smart_chains or None,
                     market_date=plan.market_date,
                 )
+                prog.short_plan = plan2
+                prog.short_dte_range = (pass2_min, pass2_max)
                 candidates2 = self.build_candidate_contracts(plan2)
                 qualified2 = await self.qualify_option_contracts(candidates2)
                 if self.active_cooldown_sec > 0:
                     await self.sleep(self.active_cooldown_sec)
-                tickers2, pages2 = await self.fetch_pages(qualified2)
+                tickers2, pages2 = await self.fetch_pages(
+                    qualified2, on_page=lambda pc, pt: prog.record_page(2, pc, pt)
+                )
 
                 sub_notice2 = self.client.consume_subscription_fallback_notice()
                 if sub_notice2 and sub_notice2 not in self._notices:
                     self._notices.append(sub_notice2)
 
-                dte_map2 = {m.ib_expiry: m.dte for m in plan2.expirations}
-                for contract, tk in zip(qualified2, tickers2, strict=True):
-                    ib_exp = str(getattr(contract, "lastTradeDateOrContractMonth", ""))[:8]
-                    dte2 = dte_map2.get(ib_exp)
-                    rows2.append(
-                        TickerParser.parse_ticker(
-                            tk,
-                            contract=contract,
-                            context=ctx,
-                            dte=dte2,
-                        )
-                    )
+                rows2 = prog.pass_rows(2, ctx)
                 page_quote_counts2 = tuple(
                     sum(1 for tk in tickers2[i : i + page_size] if has_real_quote(tk))
                     for i in range(0, len(tickers2), page_size)
@@ -617,19 +800,19 @@ class PagedOptionChainFetcher:
                     if tagged not in self._notices:
                         self._notices.append(tagged)
             except OptionChainFetchError as exc:
+                prog.discard_short_pass()
                 skip_msg = f"Backtest short-DTE [{pass2_min}, {pass2_max}] sync skipped: {exc}"
                 self._notices.append(skip_msg)
                 logger.info("%s", skip_msg)
 
+        rows = prog.rows(ctx)
         if rows2:
-            rows = _merge_and_dedupe_rows(rows1, rows2)
             self._notices.append(
                 f"Synced {eff_dte_min}–{eff_dte_max}d ({len(rows1)} contracts) + "
                 f"{pass2_min}–{pass2_max}d for Backtest ({len(rows2)} contracts) -> "
                 f"{len(rows)} total archived"
             )
-        else:
-            rows = rows1
+        prog.completed = True
 
         total_pages = pages_fetched + pages2
         page_quote_counts = (*page_quote_counts1, *page_quote_counts2)
@@ -704,7 +887,16 @@ class PagedOptionChainFetcher:
         self._notices = []
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
+        with self.client.link_watch():
+            return await self._fetch_exact_watched(symbol, unique_specs, underlying_conid)
 
+    async def _fetch_exact_watched(
+        self,
+        symbol: str,
+        unique_specs: Sequence[ExactContractSpec],
+        underlying_conid: int,
+    ) -> ExactQuoteResult:
+        """Body of `fetch_exact_contracts` inside one `link_watch()` scope."""
         if underlying_conid > 0:
             stock: Any = Stock(
                 conId=underlying_conid, symbol=symbol, exchange="SMART", currency="USD"

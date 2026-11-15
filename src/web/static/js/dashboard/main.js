@@ -38,6 +38,12 @@ import {
 import {
   initBacktestPanel,
 } from "./backtest.js";
+import {
+  initWatchlist,
+} from "./watchlist.js";
+import {
+  initScreener,
+} from "./screener.js";
 
 // ------------------------------------------------------------------ Init
 function init() {
@@ -56,6 +62,8 @@ function init() {
   loadChain(state.ticker, "");
   loadLedger();
   initBacktestPanel();
+  initWatchlist();
+  initScreener();
 }
 
 if (document.readyState === "loading") {

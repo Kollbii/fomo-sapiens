@@ -1,91 +1,61 @@
 """`CorridorQuoteService`: bounded IBKR subscriptions, one-shot pulls and SSE-ready streams.
 
 Every `reqMktData` is paired with `cancelMktData` in `finally:` (stop, disconnect,
-`aclose()`, Gateway drop, lifespan exit)."""
+`aclose()`, Gateway drop, lifespan exit). Paced subscription, the initial-poll cascade, quote
+building and line cleanup are the shared primitives of `src/broker/corridor/lines.py` (also used
+by the live screener leg stream, `src/broker/live_legs.py`)."""
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-import numpy as np
-from ib_async import Option, Stock
+from ib_async import Stock
 
-from src.broker.client import IBKRBrokerClient, SleepFn, market_data_type_label, poll_until
+from src.broker.client import IBKRBrokerClient, SleepFn
 from src.broker.contracts import extract_spot
+from src.broker.corridor.lines import (
+    BurstPacer,
+    MarketDataSession,
+    build_quote_rows,
+    contract_from_spec,
+    is_client_disconnected,
+    poll_initial_quotes,
+    subscribe_lines,
+)
 from src.broker.corridor.models import (
     CORRIDOR_MAX_CONTRACTS,
     CorridorContractSpec,
     CorridorQuoteFrame,
     CorridorQuoteRow,
     CorridorSelection,
-    FloatArray,
     GreeksFallback,
     corridor_quote_key,
 )
-from src.broker.corridor.quotes import compute_mid, compute_spread_pct
-from src.broker.fetcher import (
-    DELAYED_GENERIC_TICKS,
-    EMPTY_QUOTE_FALLBACK_THRESHOLD,
-    LIVE_OPRA_GENERIC_TICKS,
-    PAGE_PACING_CHUNK_SIZE,
-    PAGE_PACING_PAUSE_SEC,
-    empty_quote_ratio,
-)
-from src.broker.parser import extract_model_greeks, extract_open_interest, has_usable_quote
+from src.broker.fetcher import DELAYED_GENERIC_TICKS, LIVE_OPRA_GENERIC_TICKS
 from src.core.config import Settings
 from src.core.exceptions import (
+    CorridorBusyError,
     GatewayConnectionError,
     OptionChainFetchError,
     PacingViolationError,
 )
-from src.storage.schema import (
-    sanitize_count,
-    sanitize_price,
-)
 
 logger = logging.getLogger(__name__)
 
+CORRIDOR_BUSY_MESSAGE = (
+    "Live Wall Corridor stream not started: another IBKR operation (chain refresh, batch "
+    "load or ledger sync) holds the market-data line budget. Retry once it finishes."
+)
+_SUBSCRIBE_LOST_MESSAGE = "IBKR Gateway connection lost while subscribing corridor quotes"
 
-@dataclass
-class _ActiveCorridorSession:
-    session_id: str
-    ib: Any
-    subscribed_contracts: list[Any] = field(default_factory=list)
-    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    cleaned_up: bool = False
-
-
-async def _is_client_disconnected(
-    callback: Callable[[], bool | Awaitable[bool]] | None,
-) -> bool:
-    if callback is None:
-        return False
-    res = callback()
-    if inspect.isawaitable(res):
-        return bool(await res)
-    return bool(res)
-
-
-def _contract_from_spec(spec: CorridorContractSpec) -> Option:
-    """Build an IBKR `Option` reusing pre-qualified `conId` when available."""
-    return Option(
-        conId=spec.option_conid if spec.option_conid > 0 else 0,
-        symbol=spec.symbol,
-        lastTradeDateOrContractMonth=spec.ib_expiry,
-        strike=spec.strike,
-        right=spec.right,
-        exchange="SMART",
-        multiplier="100",
-        currency="USD",
-    )
+#: A Wall Corridor session is a shared `MarketDataSession` (one-shot pull or stream).
+_ActiveCorridorSession = MarketDataSession
 
 
 def _build_frame_quotes(
@@ -97,122 +67,13 @@ def _build_frame_quotes(
     greeks_fallback: GreeksFallback | None,
 ) -> list[CorridorQuoteRow]:
     """Convert raw IBKR `Ticker` objects to `CorridorQuoteRow` items (Greeks fallback injected)."""
-    interim: list[tuple[CorridorContractSpec, dict[str, Any]]] = []
-    missing_indices: list[int] = []
-
-    for idx, (spec, tk) in enumerate(zip(specs, tickers, strict=True)):
-        bid = sanitize_price(getattr(tk, "bid", None))
-        ask = sanitize_price(getattr(tk, "ask", None))
-        last = sanitize_price(getattr(tk, "last", None))
-        close = sanitize_price(getattr(tk, "close", None))
-        if bid is None and ask is None and last is None and close is None:
-            bid = spec.cached_bid
-            ask = spec.cached_ask
-            last = spec.cached_last
-            close = spec.cached_close
-        mid = compute_mid(bid, ask, last, close, spec.cached_mid)
-        spread_pct = compute_spread_pct(bid, ask, mid)
-        vol = sanitize_count(getattr(tk, "volume", None))
-        if vol is None:
-            vol = spec.cached_volume
-        oi = extract_open_interest(tk, spec.right)
-        if oi is None:
-            oi = spec.cached_open_interest
-
-        iv, delta, gamma, theta, vega, g_source = extract_model_greeks(tk)
-        if g_source != "IBKR_MODEL":
-            missing_indices.append(idx)
-
-        interim.append(
-            (
-                spec,
-                {
-                    "bid": bid,
-                    "ask": ask,
-                    "mid": mid,
-                    "last": last,
-                    "close": close,
-                    "spread_pct": spread_pct,
-                    "volume": vol,
-                    "open_interest": oi,
-                    "iv": iv,
-                    "delta": delta,
-                    "gamma": gamma,
-                    "theta": theta,
-                    "vega": vega,
-                    "greeks_source": g_source,
-                },
-            )
-        )
-
-    # Rows without IBKR modelGreeks: injected fallback (vectorized BSM, <= 90 rows) when
-    # available, otherwise / when unusable the cached snapshot Greeks are kept.
-    usable = np.zeros(len(missing_indices), dtype=np.bool_)
-    computed: tuple[FloatArray, FloatArray, FloatArray, FloatArray, FloatArray] | None = None
-    if missing_indices and greeks_fallback is not None and spot > 0.0:
-        miss_specs = [interim[i][0] for i in missing_indices]
-        iv_arr, d_arr, g_arr, th_arr, v_arr, usable = greeks_fallback(
-            mark_price=np.array(
-                [float(interim[i][1]["mid"] or 0.0) for i in missing_indices], dtype=np.float64
-            ),
-            spot=np.full(len(missing_indices), spot, dtype=np.float64),
-            strike=np.array([s.strike for s in miss_specs], dtype=np.float64),
-            dte=np.array([float(s.dte) for s in miss_specs], dtype=np.float64),
-            is_call=np.array([s.right == "C" for s in miss_specs], dtype=np.bool_),
-            fallback_iv=np.array(
-                [s.cached_iv if s.cached_iv is not None else np.nan for s in miss_specs],
-                dtype=np.float64,
-            ),
-        )
-        computed = (iv_arr, d_arr, g_arr, th_arr, v_arr)
-    for pos, row_idx in enumerate(missing_indices):
-        spec_i, data_i = interim[row_idx]
-        if computed is not None and bool(usable[pos]):
-            iv_arr, d_arr, g_arr, th_arr, v_arr = computed
-            data_i["iv"] = round(float(iv_arr[pos]), 4)
-            data_i["delta"] = round(float(d_arr[pos]), 4)
-            data_i["gamma"] = round(float(g_arr[pos]), 5)
-            data_i["theta"] = round(float(th_arr[pos]), 4)
-            data_i["vega"] = round(float(v_arr[pos]), 4)
-            data_i["greeks_source"] = "BSM_FALLBACK"
-        else:
-            data_i["iv"] = spec_i.cached_iv
-            data_i["delta"] = spec_i.cached_delta
-            data_i["gamma"] = spec_i.cached_gamma
-            data_i["theta"] = spec_i.cached_theta
-            data_i["vega"] = spec_i.cached_vega
-            data_i["greeks_source"] = spec_i.cached_greeks_source
-
-    rows: list[CorridorQuoteRow] = []
-    for spec, d in interim:
-        rows.append(
-            CorridorQuoteRow(
-                option_conid=spec.option_conid,
-                expiry=spec.expiry,
-                dte=spec.dte,
-                strike=spec.strike,
-                right=spec.right,
-                zone=spec.zone,
-                is_put_wall=spec.is_put_wall,
-                is_call_wall=spec.is_call_wall,
-                is_strategy_leg=spec.is_strategy_leg,
-                bid=round(float(d["bid"]), 4) if d["bid"] is not None else None,
-                ask=round(float(d["ask"]), 4) if d["ask"] is not None else None,
-                mid=round(float(d["mid"]), 4) if d["mid"] is not None else None,
-                last=round(float(d["last"]), 4) if d["last"] is not None else None,
-                close=round(float(d["close"]), 4) if d["close"] is not None else None,
-                spread_pct=d["spread_pct"],
-                volume=d["volume"],
-                open_interest=d["open_interest"],
-                iv=d["iv"],
-                delta=d["delta"],
-                gamma=d["gamma"],
-                theta=d["theta"],
-                vega=d["vega"],
-                greeks_source=d["greeks_source"],
-                updated_ts_utc=updated_ts_utc,
-            )
-        )
+    rows, _ = build_quote_rows(
+        specs,
+        tickers,
+        spots=[spot] * len(specs),
+        updated_ts_utc=updated_ts_utc,
+        greeks_fallback=greeks_fallback,
+    )
     return rows
 
 
@@ -258,14 +119,7 @@ class CorridorQuoteService:
         return DELAYED_GENERIC_TICKS
 
     def _cleanup_session(self, session: _ActiveCorridorSession) -> None:
-        session.stop_event.set()
-        if not session.cleaned_up:
-            session.cleaned_up = True
-            for contract in session.subscribed_contracts:
-                try:
-                    session.ib.cancelMktData(contract)
-                except Exception:  # pragma: no cover - defensive cleanup
-                    logger.exception("corridor cancelMktData failed for %s", contract)
+        session.release(label="corridor")
         self._active_sessions.pop(session.session_id, None)
 
     async def stop_all_streams(self) -> int:
@@ -287,10 +141,16 @@ class CorridorQuoteService:
                 f"Corridor selection {len(selection.specs)} exceeds {CORRIDOR_MAX_CONTRACTS} limit"
             )
 
-        candidates = [_contract_from_spec(spec) for spec in selection.specs]
+        candidates = [contract_from_spec(spec) for spec in selection.specs]
         unqualified = [c for c in candidates if int(getattr(c, "conId", 0) or 0) <= 0]
         if unqualified:
-            res = list(await self.client.ib.qualifyContractsAsync(*unqualified) or [])
+            res = list(
+                await self.client.run_stage(
+                    f"corridor contract qualification ({len(unqualified)} contracts)",
+                    self.client.ib.qualifyContractsAsync(*unqualified),
+                )
+                or []
+            )
             if res and len(res) == len(unqualified):
                 res_iter = iter(res)
                 candidates = [
@@ -309,8 +169,11 @@ class CorridorQuoteService:
                 )
             else:
                 qual_spot = list(
-                    await self.client.ib.qualifyContractsAsync(
-                        Stock(selection.ticker, "SMART", "USD")
+                    await self.client.run_stage(
+                        f"corridor underlying qualification ({selection.ticker})",
+                        self.client.ib.qualifyContractsAsync(
+                            Stock(selection.ticker, "SMART", "USD")
+                        ),
                     )
                     or []
                 )
@@ -333,54 +196,22 @@ class CorridorQuoteService:
         *,
         generic_ticks: str,
     ) -> tuple[list[Any], Any | None]:
-        ib = self.client.ib
-        spot_ticker: Any | None = None
-        option_tickers: list[Any] = []
-        subscribed_calls = 0
-
-        async def _pace_and_guard() -> bool:
-            if session is not None and session.stop_event.is_set():
-                return False
-            if not ib.isConnected():
-                raise GatewayConnectionError(
-                    "IBKR Gateway connection lost while subscribing corridor quotes"
-                )
-            if subscribed_calls > 0 and subscribed_calls % PAGE_PACING_CHUNK_SIZE == 0:
-                await self.sleep(PAGE_PACING_PAUSE_SEC)
-                if session is not None and session.stop_event.is_set():
-                    return False
-                if not ib.isConnected():
-                    raise GatewayConnectionError(
-                        "IBKR Gateway connection lost while subscribing corridor quotes"
-                    )
-            return True
-
+        # Spot first (no generic ticks), then the options; one burst pacer for the whole set.
+        requests: list[tuple[Any, str]] = []
         if spot_contract is not None:
-            if not await _pace_and_guard():
-                return option_tickers, spot_ticker
-            spot_ticker = ib.reqMktData(
-                spot_contract,
-                genericTickList="",
-                snapshot=False,
-                regulatorySnapshot=False,
-            )
-            session.subscribed_contracts.append(spot_contract)
-            subscribed_calls += 1
-
-        for contract in option_contracts:
-            if not await _pace_and_guard():
-                break
-            tk = ib.reqMktData(
-                contract,
-                genericTickList=generic_ticks,
-                snapshot=False,
-                regulatorySnapshot=False,
-            )
-            session.subscribed_contracts.append(contract)
-            option_tickers.append(tk)
-            subscribed_calls += 1
-
-        return option_tickers, spot_ticker
+            requests.append((spot_contract, ""))
+        requests.extend((contract, generic_ticks) for contract in option_contracts)
+        tickers = await subscribe_lines(
+            session,
+            requests,
+            pacer=BurstPacer(self.sleep),
+            lost_message=_SUBSCRIBE_LOST_MESSAGE,
+        )
+        if spot_contract is None:
+            return tickers, None
+        if not tickers:
+            return [], None
+        return tickers[1:], tickers[0]
 
     async def _poll_initial_corridor(
         self,
@@ -391,20 +222,20 @@ class CorridorQuoteService:
         resubscribe_on_fallback: bool,
     ) -> tuple[_ActiveCorridorSession, list[Any], Any | None, list[str]]:
         """Subscribe corridor, wait for initial ticks, and apply dynamic Type fallback if needed."""
-        oc = self.settings.options_chain
-        corridor_cfg = self.settings.corridor
-        notices: list[str] = []
+        current = session
+        option_tickers: list[Any] = []
+        spot_ticker: Any | None = None
 
-        async def _resubscribe(suffix: str) -> tuple[list[Any], Any | None]:
-            nonlocal session
-            self._cleanup_session(session)
-            session = _ActiveCorridorSession(
-                session_id=f"{session.session_id}-{suffix}",
+        async def _resubscribe(suffix: str) -> None:
+            nonlocal current, option_tickers, spot_ticker
+            self._cleanup_session(current)
+            current = _ActiveCorridorSession(
+                session_id=f"{current.session_id}-{suffix}",
                 ib=self.client.ib,
             )
-            self._active_sessions[session.session_id] = session
-            return await self._subscribe_corridor(
-                session,
+            self._active_sessions[current.session_id] = current
+            option_tickers, spot_ticker = await self._subscribe_corridor(
+                current,
                 option_contracts,
                 spot_contract,
                 generic_ticks=self._generic_ticks(),
@@ -412,79 +243,25 @@ class CorridorQuoteService:
 
         try:
             option_tickers, spot_ticker = await self._subscribe_corridor(
-                session,
+                current,
                 option_contracts,
                 spot_contract,
                 generic_ticks=self._generic_ticks(),
             )
-            if session.stop_event.is_set():
-                return session, option_tickers, spot_ticker, notices
-
-            await poll_until(
-                lambda: (
-                    session.stop_event.is_set()
-                    or all(has_usable_quote(tk) for tk in option_tickers)
-                ),
-                corridor_cfg.oneshot_collect_timeout_sec,
-                oc.page_poll_interval_sec,
-                self.sleep,
+            if current.stop_event.is_set():
+                return current, option_tickers, spot_ticker, []
+            notices = await poll_initial_quotes(
+                self.client,
+                self.settings,
+                sleep=self.sleep,
+                option_tickers=lambda: option_tickers,
+                stopped=lambda: current.stop_event.is_set(),
+                label="Corridor",
+                resubscribe=_resubscribe if resubscribe_on_fallback else None,
             )
-            if session.stop_event.is_set():
-                return session, option_tickers, spot_ticker, notices
-
-            if self.client.live_subscription_missing:
-                sub_notice = self.client.consume_subscription_fallback_notice()
-                if sub_notice:
-                    notices.append(sub_notice)
-                if resubscribe_on_fallback:
-                    option_tickers, spot_ticker = await _resubscribe("dl")
-                    if session.stop_event.is_set():
-                        return session, option_tickers, spot_ticker, notices
-                await poll_until(
-                    lambda: (
-                        session.stop_event.is_set()
-                        or all(has_usable_quote(tk) for tk in option_tickers)
-                    ),
-                    corridor_cfg.oneshot_collect_timeout_sec,
-                    oc.page_poll_interval_sec,
-                    self.sleep,
-                )
-                if session.stop_event.is_set():
-                    return session, option_tickers, spot_ticker, notices
-
-            if (
-                self.client.can_fallback()
-                and empty_quote_ratio(option_tickers) > EMPTY_QUOTE_FALLBACK_THRESHOLD
-            ):
-                prev_type = self.client.current_type
-                new_type = self.client.switch_to_fallback_data_type()
-                notices.append(
-                    f"Corridor Type {prev_type} ({market_data_type_label(prev_type)}) quotes were "
-                    f">80% empty; cascaded to Type {new_type} ({market_data_type_label(new_type)})."
-                )
-                if resubscribe_on_fallback:
-                    option_tickers, spot_ticker = await _resubscribe("fb")
-                    if session.stop_event.is_set():
-                        return session, option_tickers, spot_ticker, notices
-                    timeout_sec = corridor_cfg.oneshot_collect_timeout_sec
-                else:
-                    timeout_sec = min(1.5, corridor_cfg.oneshot_collect_timeout_sec)
-                await poll_until(
-                    lambda: (
-                        session.stop_event.is_set()
-                        or all(has_usable_quote(tk) for tk in option_tickers)
-                    ),
-                    timeout_sec,
-                    oc.page_poll_interval_sec,
-                    self.sleep,
-                )
-                if session.stop_event.is_set():
-                    return session, option_tickers, spot_ticker, notices
-
-            self.client.observe_tickers_market_data_type(option_tickers)
-            return session, option_tickers, spot_ticker, notices
+            return current, option_tickers, spot_ticker, notices
         except BaseException:
-            self._cleanup_session(session)
+            self._cleanup_session(current)
             raise
 
     async def fetch_corridor_quotes(
@@ -568,8 +345,28 @@ class CorridorQuoteService:
         is_disconnected: Callable[[], bool | Awaitable[bool]] | None = None,
         max_frames: int | None = None,
         on_frame: Callable[[CorridorQuoteFrame], None] | None = None,
+        is_busy: Callable[[], bool] | None = None,
+        on_register: Callable[[], Sequence[str]] | None = None,
     ) -> AsyncGenerator[CorridorQuoteFrame, None]:
-        """Continuously stream throttled Wall Corridor quotes until stop/disconnect/error."""
+        """Continuously stream throttled Wall Corridor quotes until stop/disconnect/error.
+
+        The generator subscribes lazily (first `anext`). `is_busy` (injected by the service
+        layer, e.g. `refresh_lock.locked`) is re-checked when the generator starts and again
+        right after the session is registered, with no `await` before the first `reqMktData`.
+        A lock holder that acquires later therefore always sees this session and stops it via
+        `stop_all_streams()`; one that acquired earlier makes this check raise
+        `CorridorBusyError` with zero subscriptions opened.
+
+        `on_register` (optional, synchronous) runs in that same step, right after the session is
+        registered: the service layer stops the other live feed there (one live feed at a
+        time); the notices it returns are prepended to the first frame's notices.
+        """
+
+        def _raise_if_busy() -> None:
+            if is_busy is not None and is_busy():
+                raise CorridorBusyError(CORRIDOR_BUSY_MESSAGE)
+
+        _raise_if_busy()
         # Ensure zero overlapping live streams so IBKR line count stays <= 90
         await self.stop_all_streams()
 
@@ -590,12 +387,17 @@ class CorridorQuoteService:
         self._active_sessions[session.session_id] = session
 
         try:
+            # Same synchronous step as the registration above: nothing can acquire the
+            # refresh lock between this check and the first `reqMktData`.
+            register_notices = list(on_register()) if on_register is not None else []
+            _raise_if_busy()
             session, option_tickers, spot_ticker, notices = await self._poll_initial_corridor(
                 session,
                 option_contracts,
                 spot_contract,
                 resubscribe_on_fallback=False,
             )
+            notices = [*register_notices, *notices]
 
             last_sigs: dict[str, tuple[Any, ...]] = {}
             last_spot: float | None = None
@@ -604,7 +406,7 @@ class CorridorQuoteService:
             heartbeat_sec = corridor_cfg.heartbeat_interval_sec
 
             while not session.stop_event.is_set():
-                if await _is_client_disconnected(is_disconnected):
+                if await is_client_disconnected(is_disconnected):
                     break
                 if not self.client.is_connected:
                     raise GatewayConnectionError(
@@ -669,7 +471,7 @@ class CorridorQuoteService:
                 else:
                     idle_elapsed += eff_poll
 
-                if session.stop_event.is_set() or await _is_client_disconnected(is_disconnected):
+                if session.stop_event.is_set() or await is_client_disconnected(is_disconnected):
                     break
                 await self.sleep(eff_poll)
         finally:

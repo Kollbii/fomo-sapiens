@@ -19,6 +19,7 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
     ├── tracked/
     │   └── NVDA/
     │       └── NVDA_20261112_153000.csv   # immutable paper-trade leg quotes (outside snapshots/)
+    ├── watchlist.json            # user watchlist (+ watchlist.corrupt.json backup)
     ├── latest/
     │   ├── NVDA_latest.csv
     │   ├── AVGO_latest.csv
@@ -41,7 +42,7 @@ All option chain snapshots are persisted locally as structured UTF-8 CSV files m
   1. Validate rows via `Pydantic` and build a strict `polars.DataFrame`.
   2. Write to temporary hidden file `data/snapshots/{TICKER}/.{TICKER}_{YYYYMMDD_HHMMSS}.csv.tmp`.
   3. Call `os.replace()` to atomically move the temporary file to `data/snapshots/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`.
-  4. Write to `data/latest/.{TICKER}_latest.csv.tmp` and `os.replace()` to `data/latest/{TICKER}_latest.csv`.
+  4. Write to `data/latest/.{TICKER}_latest.csv.tmp` and `os.replace()` to `data/latest/{TICKER}_latest.csv` (skipped for a partial snapshot unless no latest file exists yet, see §4).
   5. Update `data/metadata/snapshot_index.json` atomically via `.tmp` + `os.replace()`.
 
 ---
@@ -90,7 +91,7 @@ IBKR uses sentinel numbers (`-1.0`, `float('nan')`, `2147483647`) for missing va
 ---
 
 ## 4. Snapshot Metadata Index (`data/metadata/snapshot_index.json`)
-Maintained automatically by `CSVRepository` for instant UI history dropdown rendering:
+Maintained automatically by `CSVRepository` for instant UI history dropdown rendering (`CSVRepository.latest_snapshots(tickers)` returns the newest `SnapshotMeta` per ticker from one index read; tickers without data are omitted):
 
     {
       "updated_at_utc": "2026-11-11T15:50:04Z",
@@ -114,7 +115,9 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
               "spot_source": "LAST",
               "quoted_contract_count": 118,
               "quote_coverage": 0.9833,
-              "prior_close_only_count": 2
+              "prior_close_only_count": 2,
+              "partial": false,
+              "partial_reason": null
             }
           ]
         }
@@ -123,7 +126,9 @@ Maintained automatically by `CSVRepository` for instant UI history dropdown rend
 
 `SnapshotMeta` defines optional quality/provenance fields alongside pull scope: `spot_source` (`SpotSource = Literal["LAST", "MID", "CLOSE"]`), `quoted_contract_count` (contracts with `bid > 0` or `ask > 0` or `last > 0`), `quote_coverage` (`quoted_contract_count / contract_count`), and `prior_close_only_count` (contracts with `close > 0` but no `bid`/`ask`/`last`). `src/storage/quality.py` uses these fields (`MIN_QUOTE_COVERAGE = 0.90`, `USABLE_SPOT_SOURCES = {"LAST", "MID"}`, `USABLE_MARKET_DATA_TYPES = {1, 3}`) to score each snapshot for daily-bar backtest selection and off-hours UI indicators.
 
-If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible, recomputing quote quality from each CSV, and preserving any prior `spot_source`).
+Partial snapshots: `CSVRepository.save_snapshot(..., partial_reason=)` / `save_snapshot_result()` (returns `SnapshotSaveResult(meta, latest_updated)`) archive an interrupted refresh (finished pages only) as a new immutable CSV (same 27-column schema) with `SnapshotMeta.partial = true` and `partial_reason` (`PartialReason = Literal["cancelled", "timeout", "connection_lost"]`; `SnapshotMeta.is_partial` is the accessor). A partial save does NOT update `data/latest/{TICKER}_latest.csv` unless none exists for the ticker. `latest_snapshot_id` names the snapshot actually held in the latest file (`CSVRepository.latest_cache_snapshot_id()`), which can therefore be older than the newest archive. Index entries written before these fields exist read as not partial. `load_latest` falls back to the newest complete archive (partial only if nothing complete is readable), and `latest_snapshots(tickers, include_partial=...)` controls whether partial entries count. `evaluate_snapshot` treats a partial snapshot as not usable (reason `partial snapshot (<reason>)`).
+
+If `snapshot_index.json` is missing or corrupted, `CSVRepository.rebuild_index()` scans `data/snapshots/*/*.csv` on startup and reconstructs the index automatically (inferring `strike_step` and `range_pct` from the CSV strike grid when possible, recomputing quote quality from each CSV, and preserving any prior `spot_source`; partial flags are not recoverable from CSVs, so rebuilt entries read as complete).
 
 ---
 
@@ -201,15 +206,29 @@ Forward paper trades registered via `POST /api/backtest/paper-trades` and leg qu
 
 1. **Paper Trade Registry (`data/metadata/paper_trades.json`, `PaperTradeStore` in `src/storage/paper_trade_store.py`):**
    - Stores registered `PaperTrade` records keyed inside `trades`, guarded by `threading.RLock` and written atomically via `.tmp` + `os.replace()`.
-   - Each `PaperTrade` holds `id` (`PAPER_TRADE_ID_RE`), `ticker` (`TickerValidator`-validated), `strategy_kind`, `status: PaperTradeStatus` (`"ACTIVE" | "EXPIRED" | "STOPPED" | "CLOSED"`), `legs` (`1..8` `PaperTradeLeg` items with `side`, `right`, `expiry`, `strike`, `con_id >= 0` [default `0`], `qty_ratio` [`1..100`, default `1`], and optional finite `entry_price >= 0.0`), `qty` (`>= 1`), `underlying_conid` (`>= 0`, default `0`), optional `created_from_snapshot_id` (`str | None`, validated against `SNAPSHOT_ID_RE` when non-`None`), `created_utc`, `market_date`, `expiry` (earliest leg expiry), `entry_net_cash`, optional `status_changed_utc` / `last_quote_utc`, `source: PaperTradeSource` (`"MANUAL" | "LEDGER"`, default `"MANUAL"` for backwards compatibility), `ledger_campaign_id` (`str | None`), and `ledger_strategy_label` (`str | None`). Active trade count is bounded by `tracker.max_active_trades` (default `120`, max `200`).
+   - Each `PaperTrade` holds `id` (`PAPER_TRADE_ID_RE`), `ticker` (`TickerValidator`-validated), `strategy_kind`, `status: PaperTradeStatus` (`"ACTIVE" | "EXPIRED" | "STOPPED" | "CLOSED"`), `legs` (`1..8` `PaperTradeLeg` items with `side`, `right`, `expiry`, `strike`, `con_id >= 0` [default `0`], `qty_ratio` [`1..100`, default `1`], and optional finite `entry_price >= 0.0`), `qty` (`>= 1`), `underlying_conid` (`>= 0`, default `0`), optional `created_from_snapshot_id` (`str | None`, validated against `SNAPSHOT_ID_RE` when non-`None`), `created_utc`, `market_date`, `expiry` (earliest leg expiry), `entry_net_cash`, optional `status_changed_utc` / `last_quote_utc`, `source: PaperTradeSource` (`"MANUAL" | "LEDGER"`, default `"MANUAL"` for backwards compatibility), `ledger_campaign_id` (`str | None`), and `ledger_strategy_label` (`str | None`). Both `PaperTrade` and `PaperTradeLeg` use `model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)` for forward-compatibility with newer/legacy fields. Active trade count is bounded by `tracker.max_active_trades` (default `120`, max `200`).
    - **Ledger Synchronization & Provenance (`PaperTradeStore.sync_ledger_trades`, `LedgerOpenPositionView`):** `LedgerOpenPositionView` (`src/analytics/ledger/models.py`) carries `conid` and `opened_at` (`min(lot.opened_at)` / `min(sl.executed_at)` for open lots, `updated_at` for unmatched `open_positions.csv` rows) into `PaperTradeService.sync_from_ledger_report()`. `sync_ledger_trades()` deduplicates incoming `LEDGER` trades, matches existing `LEDGER` rows by `(ticker, ledger_campaign_id)` then fallback `(ticker, _leg_signature(legs))` (which includes `qty_ratio`), preserves `MANUAL` trades untouched (beyond standard expiry checks), auto-expires past-due (`expiry < today_et`) trades, and transitions unmatched active `LEDGER` rows to `status="CLOSED"`. Backtest replays of fill-anchored trades record `StepMarkSource`/`LegPriceSource`/`LegQuoteSource` = `"BROKER_FILL"` (`FLAG_BROKER_FILL_ENTRY`) on the Day-0 anchor step.
 2. **Tracked Quote Follow-Up Log (`data/metadata/paper_quotes.jsonl`):**
-   - Append-only JSON Lines ledger of `PaperQuoteRecord` events (`quote_id`, `quoted_at_utc`, `market_date`, `ticker`, `trade_ids`, `status`: `"QUOTED" | "ERROR"`, `tracked_snapshot_id`, `spot`, `spot_source`, `market_data_type`, `error`), flushed with `os.fsync()` after each manual-refresh follow-up.
+   - Append-only JSON Lines ledger of `PaperQuoteRecord` events (`quote_id`, `quoted_at_utc`, `market_date`, `ticker`, `trade_ids`, `status`: `"QUOTED" | "ERROR"`, `tracked_snapshot_id`, `spot`, `spot_source`, `market_data_type`, `error`), configured with `extra="ignore"` for forward-compatibility, flushed with `os.fsync()` after each manual-refresh follow-up.
 3. **Immutable Tracked Leg-Quote Snapshots (`data/tracked/{TICKER}/{TICKER}_{YYYYMMDD_HHMMSS}.csv`):**
    - Uses the exact canonical **27-column `OPTION_CHAIN_POLARS_SCHEMA`** (`src/storage/schema.py`), written atomically via `.tmp` + `os.replace()` with overwrite refusal (`StorageSchemaError` on duplicate path).
    - Populated solely during manual `POST /api/refresh` follow-ups (`PaperTradeService.quote_active_trades_for_refresh`) for non-expired active paper-trade legs, ensuring `< 30 DTE` legs falling outside `[30, 120]` chain snapshots remain markable down to expiration.
 4. **Daily Bar Selection & Merging (`src/storage/backtest_store.py`):**
    - `select_daily_bar_snapshots()` pre-filters archive filenames in `O(window)` by `[start_date, end_date]` before parsing metadata/CSVs, selects one canonical snapshot per NYSE trading day (preferring the latest usable snapshot per `quality.is_usable_snapshot()`, otherwise the latest snapshot with `NO_USABLE_DAILY_SNAPSHOT`), and `load_daily_chain_bars()` attaches same-ET-date `data/tracked/{TICKER}/` CSV slices (`load_tracked_quotes_by_date()`) for leg-level fallback pricing.
+
+---
+
+## 6.1 Watchlist File (`data/watchlist.json`, `WatchlistStore` in `src/storage/watchlist_store.py`)
+Path is `{storage.data_dir}/watchlist.json` (`resolve_watchlist_path()`, returns a resolved absolute path). JSON shape (`WatchlistFile`, `extra="forbid"`):
+
+    {"version": 1, "tickers": ["NVDA", "AVGO"], "updated_at": "2026-11-14T12:00:00Z"}
+
+- `tickers`: ordered, deduplicated; new tickers append at the end; each entry passes `TickerValidator`; length `<= watchlist.max_size` (default `20`, bounds `1..50`, must be `>= len(watchlist.hardcoded_tickers)`). An empty list `[]` is a valid persisted state and is never re-seeded.
+- **Lazy seed:** a missing file serves `watchlist.hardcoded_tickers` (reads never write); the file is created on the first `add` / `remove`. Adding beyond the cap raises `WatchlistCapError`.
+- **Read states (`WatchlistFileStatus`, exposed as `WatchlistState.status` and `.writable`):** `ok`, `corrupt`, `unreadable`. Reads are bounded: at most `MAX_WATCHLIST_FILE_BYTES` (`65536`, 64 KiB) are read.
+  - **`corrupt`** (invalid JSON/UTF-8, schema, ticker, over-cap content, file over 64 KiB, or deeply nested JSON raising `RecursionError`): seed list is served with `CORRUPT_WATCHLIST_NOTICE`; the file is left untouched until the next successful write, which first copies it atomically to `data/watchlist.corrupt.json`.
+  - **`unreadable`** (`OSError` on open/read, or a directory at the path): seed list is served with `UNREADABLE_WATCHLIST_NOTICE`, `writable` is `False`, and `add()` / `remove()` raise `StorageUnavailableError` without writing or backing up anything (protects the saved list from transient file locks).
+- `WatchlistFile.version` must be the integer `1` (bool, float, and str are rejected). Writes are atomic (`.tmp` + `fsync` + `os.replace()`, same for the corrupt backup); `updated_at` is UTC `%Y-%m-%dT%H:%M:%SZ`. The store never touches `data/snapshots/` or `data/latest/`.
 
 ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -17,21 +18,24 @@ from src.broker.fetcher import (
     PACING_COOLDOWN_SEC,
     PAGE_PACING_CHUNK_SIZE,
     PAGE_PACING_PAUSE_SEC,
+    ChainFetchProgress,
     ExactContractSpec,
     PagedOptionChainFetcher,
+    _contract_key,
     empty_quote_ratio,
     empty_real_quote_ratio,
     has_real_quote,
     paginate_contracts,
 )
-from src.core.config import IBKRSettings, Settings
+from src.core.config import IBKRSettings, OptionsChainSettings, Settings
 from src.core.exceptions import (
     GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidTickerError,
     OptionChainFetchError,
     PacingViolationError,
 )
-from tests.support.aio import noop_sleep, run_coro
+from tests.support.aio import noop_sleep, run_coro, run_virtual_loop
 from tests.support.ib_fakes import FakeChainIB
 
 
@@ -619,3 +623,267 @@ def test_merge_and_dedupe_rows_prefers_better_quote_then_pass1() -> None:
     p2_tie = [_make_row(30, "2026-12-13", 3.1, 3.3, 202)]
     merged_tie = _merge_and_dedupe_rows(p1_good, p2_tie)
     assert [r.option_conid for r in merged_tie] == [201]  # Pass 1 wins tie
+
+
+# ------------------------------------------------- partial capture (progress collector)
+_PROGRESS_NOW = datetime(2026, 11, 13, 15, 30, 0, tzinfo=UTC)  # Friday 2026-11-13
+
+
+def _small_page_settings() -> Settings:
+    # 6 contracts/page: Pass 1 (DTE 35, 63) = 2 pages, Pass 2 (DTE 0, 7, 14, 28) = 4 pages.
+    return Settings(options_chain=OptionsChainSettings(max_contracts_per_page=6))
+
+
+def _two_pass_fake_ib() -> FakeChainIB:
+    fake_ib = FakeChainIB()
+    mkt = date(2026, 11, 13)
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (0, 7, 14, 28, 35, 63)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=[135.0, 140.0, 145.0],
+        )
+    ]
+    return fake_ib
+
+
+def _stk_ticker(contract: Any) -> Any:
+    return SimpleNamespace(contract=contract, bid=139.9, ask=140.1, last=140.0, close=139.8)
+
+
+def _opt_ticker(contract: Any, *, quoted: bool = True) -> Any:
+    if not quoted:
+        return SimpleNamespace(contract=contract, bid=None, ask=None, last=None, close=None)
+    return SimpleNamespace(
+        contract=contract,
+        bid=4.0,
+        ask=4.4,
+        last=4.2,
+        close=4.1,
+        volume=50,
+        callOpenInterest=100,
+        putOpenInterest=100,
+        modelGreeks=None,
+    )
+
+
+def _assert_every_line_cancelled(fake_ib: FakeChainIB) -> None:
+    subscribed = Counter(id(sub[0]) for sub in fake_ib.subscribed)
+    cancelled = Counter(id(c) for c in fake_ib.cancelled)
+    assert subscribed == cancelled
+
+
+def test_progress_collector_equals_result_on_success() -> None:
+    fake_ib = _two_pass_fake_ib()
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+    client = IBKRBrokerClient(_small_page_settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=noop_sleep)
+    progress = ChainFetchProgress()
+    progress.notices.append("stale notice from an older fetch")
+
+    res = run_coro(
+        fetcher.fetch_option_chain(
+            "NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True, progress=progress
+        )
+    )
+    assert progress.completed is True
+    assert progress.plan is res.plan
+    assert progress.short_plan is not None
+    assert progress.short_dte_range == (0, 29)
+    assert progress.context is not None
+    assert progress.pages_finished == res.pages_fetched == 6
+    assert progress.contracts_finished == 36
+    assert progress.rows(progress.context) == res.rows
+    assert progress.page_quote_counts() == res.page_quote_counts
+    assert "stale notice from an older fetch" not in progress.notices
+    assert res.partial is False
+    _assert_every_line_cancelled(fake_ib)
+
+    # Building a "partial" from a complete collector yields the very same rows.
+    partial = fetcher.build_partial_result(progress)
+    assert partial is not None
+    assert partial.partial is True
+    assert partial.rows == res.rows
+    assert partial.snapshot_id == res.snapshot_id
+
+    # Single pass (no Pass 2): rows stay in fetch order exactly like the normal result.
+    res1 = run_coro(
+        fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, progress=progress)
+    )
+    assert progress.short_plan is None
+    assert progress.pages_finished == 2
+    assert progress.context is not None
+    assert progress.rows(progress.context) == res1.rows
+
+
+def test_progress_keeps_finished_pages_when_pass2_is_cancelled_mid_page() -> None:
+    fake_ib = _two_pass_fake_ib()
+    opt_subs = 0
+    in_flight: list[Any] = []
+
+    def _factory(contract: Any, _ticks: str) -> Any:
+        nonlocal opt_subs
+        if contract.secType == "STK":
+            return _stk_ticker(contract)
+        opt_subs += 1
+        if opt_subs == 19:  # first line of Pass 2 page 2 (12 Pass 1 + 6 Pass 2 page 1 before)
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()  # real task cancellation, delivered at the page's next await (poll)
+        if opt_subs >= 19:
+            in_flight.append(contract)
+            return _opt_ticker(contract, quoted=False)
+        return _opt_ticker(contract)
+
+    fake_ib.ticker_factory = _factory
+
+    async def _yield(_sec: float) -> None:
+        await asyncio.sleep(0)
+
+    client = IBKRBrokerClient(_small_page_settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=_yield)
+    progress = ChainFetchProgress()
+
+    with pytest.raises(asyncio.CancelledError):
+        run_virtual_loop(
+            fetcher.fetch_option_chain(
+                "NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True, progress=progress
+            )
+        )
+
+    # Cleanup ran on CancelledError: every opened line (incl. the in-flight page) was cancelled.
+    assert len(in_flight) == 6
+    _assert_every_line_cancelled(fake_ib)
+    assert all(any(c is f for c in fake_ib.cancelled) for f in in_flight)
+    assert client._link_scope_since is None
+
+    # Collector: 2 finished Pass 1 pages + 1 finished Pass 2 page; the in-flight page is absent.
+    assert progress.completed is False
+    assert progress.pages_finished == 3
+    assert progress.contracts_finished == 18
+    partial = fetcher.build_partial_result(progress)
+    assert partial is not None
+    assert partial.partial is True
+    assert partial.primary_contract_count == 12
+    assert partial.short_dte_contract_count == 6
+    assert partial.short_dte_range == (0, 29)
+    assert partial.pages_fetched == 3
+    assert len(partial.rows) == 18
+    assert sorted({r.dte for r in partial.rows}) == [0, 35, 63]
+    in_flight_keys = {_contract_key(c) for c in in_flight}
+    assert not in_flight_keys & {(r.expiry, round(r.strike, 4), r.right) for r in partial.rows}
+    # Pass 2 rows share the Pass 1 snapshot context (unified snapshot metadata).
+    assert progress.context is not None
+    assert {r.snapshot_id for r in partial.rows} == {progress.context.snapshot_id}
+    assert partial.plan is progress.plan
+    assert any("Partial snapshot: kept 18 contract(s) from 3" in n for n in partial.notices)
+
+
+def test_upstream_loss_mid_page_fails_fast_and_keeps_finished_pages() -> None:
+    fake_ib = _two_pass_fake_ib()
+    opt_subs = 0
+    polls: list[float] = []
+
+    def _factory(contract: Any, _ticks: str) -> Any:
+        nonlocal opt_subs
+        if contract.secType == "STK":
+            return _stk_ticker(contract)
+        opt_subs += 1
+        if opt_subs == 7:  # first line of Pass 1 page 2: the Gateway loses its upstream
+            fake_ib.errorEvent.emit(-1, 1100, "Connectivity between IB and TWS lost", None)
+        return _opt_ticker(contract, quoted=opt_subs < 7)
+
+    async def _rec_sleep(sec: float) -> None:
+        polls.append(sec)
+
+    fake_ib.ticker_factory = _factory
+    settings = _small_page_settings()
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=_rec_sleep)
+    progress = ChainFetchProgress()
+
+    with pytest.raises(GatewayConnectionError) as exc_info:
+        run_coro(
+            fetcher.fetch_option_chain(
+                "NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True, progress=progress
+            )
+        )
+    assert not isinstance(exc_info.value, GatewayTimeoutError)
+    assert "lost its upstream connection during market-data collection (6 contracts)" in str(
+        exc_info.value
+    )
+    assert "IBKR 1100" in str(exc_info.value)
+    # Fast-fail: the empty page was not polled for the full window (no poll-interval sleeps).
+    assert settings.options_chain.page_poll_interval_sec not in polls
+    # Upstream loss alone keeps the local socket; all lines are closed; 1 page was kept.
+    assert client.is_connected
+    _assert_every_line_cancelled(fake_ib)
+    assert opt_subs == 12
+    assert progress.pages_finished == 1
+    partial = fetcher.build_partial_result(progress)
+    assert partial is not None
+    assert len(partial.rows) == 6
+    assert partial.primary_contract_count == 6
+    assert partial.short_dte_contract_count == 0
+    assert partial.short_dte_range is None
+    assert {r.dte for r in partial.rows} == {35}
+
+    # No page finished -> nothing to save.
+    empty = ChainFetchProgress()
+    assert fetcher.build_partial_result(empty) is None
+    empty.plan = partial.plan
+    assert fetcher.build_partial_result(empty) is None
+
+
+def test_upstream_loss_during_exact_prefetch_propagates_instead_of_fallback() -> None:
+    fake_ib = _two_pass_fake_ib()
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+
+    def _details(_probe: Any) -> list[Any]:
+        fake_ib.errorEvent.emit(-1, 2110, "Connectivity between TWS and server is broken", None)
+        return []
+
+    fake_ib.contract_details_handler = _details
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=noop_sleep)
+    progress = ChainFetchProgress()
+    with pytest.raises(GatewayConnectionError, match=r"exact contract prefetch.*IBKR 2110"):
+        run_coro(
+            fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, progress=progress)
+        )
+    assert progress.plan is None
+    assert fetcher.build_partial_result(progress) is None
+    _assert_every_line_cancelled(fake_ib)  # the spot line was closed
+
+
+def test_stage_timeout_in_fetch_raises_gateway_timeout_error_with_cleanup() -> None:
+    fake_ib = _two_pass_fake_ib()
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+    settings = Settings(
+        ibkr=IBKRSettings(request_timeout_sec=5.0),
+        options_chain=OptionsChainSettings(max_contracts_per_page=6),
+    )
+    orig_qualify = fake_ib.qualifyContractsAsync
+
+    async def _qualify(*contracts: Any) -> list[Any]:
+        if contracts and contracts[0].secType == "OPT":
+            await asyncio.get_running_loop().create_future()  # never answered
+        return await orig_qualify(*contracts)
+
+    fake_ib.qualifyContractsAsync = _qualify  # type: ignore[method-assign]
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=noop_sleep)
+    progress = ChainFetchProgress()
+    with pytest.raises(
+        GatewayTimeoutError, match=r"contract qualification \(6 contracts\) within 5 s"
+    ):
+        run_virtual_loop(
+            fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, progress=progress)
+        )
+    assert progress.plan is not None  # plan kept for metadata, but no page finished
+    assert fetcher.build_partial_result(progress) is None
+    assert client.is_connected
+    _assert_every_line_cancelled(fake_ib)

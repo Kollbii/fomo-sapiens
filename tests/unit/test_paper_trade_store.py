@@ -562,3 +562,65 @@ def test_sync_ledger_trades_expires_past_cutoff_without_double_closing(tmp_path:
     by_id2 = {t.id: t for t in all_ledger2}
     assert by_id2["NVDA-LEDGER-exp2"].status == "EXPIRED"
     assert by_id2["NVDA-LEDGER-exp2"].status_changed_utc == "2026-11-21T16:00:00Z"
+
+
+def test_paper_trade_schema_tolerates_extra_fields(tmp_path: Path) -> None:
+    """Extra fields in paper trades, legs, and quote records are ignored without error."""
+    leg_data: dict[str, Any] = {
+        "side": "BUY",
+        "right": "C",
+        "expiry": "2026-12-18",
+        "strike": 145.0,
+        "con_id": 100,
+        "unknown_leg_field": "ignore_me",
+    }
+    leg = PaperTradeLeg.model_validate(leg_data)
+    assert leg.strike == 145.0
+    assert not hasattr(leg, "unknown_leg_field")
+
+    # Still validates constraints on known fields
+    with pytest.raises(ValidationError):
+        PaperTradeLeg.model_validate({**leg_data, "strike": -10.0})
+
+    trade_data: dict[str, Any] = {
+        "id": "NVDA-EXTRA-1",
+        "ticker": "NVDA",
+        "strategy_kind": "LONG_CALL",
+        "status": "ACTIVE",
+        "legs": [leg_data],
+        "qty": 1,
+        "created_utc": "2026-11-10T15:00:00Z",
+        "market_date": "2026-11-10",
+        "entry_net_cash": -150.0,
+        "future_field_xyz": 12345,
+    }
+    trade = PaperTrade.model_validate(trade_data)
+    assert trade.ticker == "NVDA"
+    assert not hasattr(trade, "future_field_xyz")
+
+    # Still validates constraints on known fields
+    with pytest.raises(ValidationError):
+        PaperTrade.model_validate({**trade_data, "ticker": "INVALID$$"})
+
+    quote_data: dict[str, Any] = {
+        "quote_id": "Q123",
+        "quoted_at_utc": "2026-11-10T15:00:00Z",
+        "market_date": "2026-11-10",
+        "ticker": "NVDA",
+        "status": "QUOTED",
+        "extra_quote_data": [1, 2, 3],
+    }
+    quote = PaperQuoteRecord.model_validate(quote_data)
+    assert quote.ticker == "NVDA"
+
+    store = PaperTradeStore(tmp_path / "metadata", tmp_path / "tracked")
+    store.ensure_layout()
+    # Write JSON directly with extra fields to test store deserialization
+    reg_file = tmp_path / "metadata" / "paper_trades.json"
+    reg_file.write_text(
+        json.dumps({"trades": [trade_data]}, indent=2),
+        encoding="utf-8",
+    )
+    loaded = store.load_trades()
+    assert len(loaded) == 1
+    assert loaded[0].id == "NVDA-EXTRA-1"

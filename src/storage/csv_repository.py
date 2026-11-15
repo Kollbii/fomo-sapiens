@@ -7,7 +7,8 @@ import logging
 import os
 import shutil
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,7 @@ from src.storage.schema import (
     OPTION_CHAIN_POLARS_SCHEMA,
     SNAPSHOT_ID_RE,
     OptionContractRow,
+    PartialReason,
     SnapshotMeta,
     SpotSource,
     infer_chain_step_and_range,
@@ -55,6 +57,18 @@ def _atomic_copy(src: Path, dest: Path) -> None:
     tmp = dest.with_name(f".{dest.name}.tmp")
     shutil.copyfile(src, tmp)
     os.replace(tmp, dest)
+
+
+@dataclass(frozen=True)
+class SnapshotSaveResult:
+    """Outcome of `CSVRepository.save_snapshot_result`.
+
+    `latest_updated` is False only for a partial snapshot saved while `data/latest/{T}_latest.csv`
+    already existed (the previous complete cache is kept).
+    """
+
+    meta: SnapshotMeta
+    latest_updated: bool
 
 
 def validate_frame(
@@ -124,8 +138,39 @@ class CSVRepository:
         strike_step: float | None = None,
         requested_strike_step: float | None = None,
         spot_source: SpotSource | None = None,
+        partial_reason: PartialReason | None = None,
     ) -> SnapshotMeta:
-        """Validate rows and archive them as a new immutable snapshot (never overwrites)."""
+        """Validate rows and archive them as a new immutable snapshot (never overwrites).
+
+        See `save_snapshot_result` for the `partial_reason` semantics.
+        """
+        return self.save_snapshot_result(
+            ticker,
+            rows,
+            range_pct=range_pct,
+            strike_step=strike_step,
+            requested_strike_step=requested_strike_step,
+            spot_source=spot_source,
+            partial_reason=partial_reason,
+        ).meta
+
+    def save_snapshot_result(
+        self,
+        ticker: str,
+        rows: Sequence[OptionContractRow | Mapping[str, Any]],
+        *,
+        range_pct: float | None = None,
+        strike_step: float | None = None,
+        requested_strike_step: float | None = None,
+        spot_source: SpotSource | None = None,
+        partial_reason: PartialReason | None = None,
+    ) -> SnapshotSaveResult:
+        """Archive a new immutable snapshot and report whether the `latest` cache was updated.
+
+        A complete snapshot (`partial_reason=None`) always refreshes `data/latest/{T}_latest.csv`.
+        A partial one (interrupted refresh) is archived and indexed with `partial=True` +
+        `partial_reason`, but only becomes the latest cache when none exists for the ticker yet.
+        """
         symbol = TickerValidator.validate(ticker)
         if not rows:
             raise StorageSchemaError("Refusing to save an empty snapshot")
@@ -149,26 +194,46 @@ class CSVRepository:
             pl.DataFrame([m.model_dump() for m in models], schema=OPTION_CHAIN_POLARS_SCHEMA),
             snapshot_id,
         )
-        meta = self._meta_from_frame(
+        base = self._meta_from_frame(
             df,
             target,
             range_pct,
             strike_step,
             requested_strike_step=requested_strike_step,
-        ).model_copy(update={"spot_source": spot_source})
+        )
+        try:
+            meta = SnapshotMeta.model_validate(
+                {
+                    **base.model_dump(),
+                    "spot_source": spot_source,
+                    "partial": partial_reason is not None,
+                    "partial_reason": partial_reason,
+                }
+            )
+        except ValidationError as exc:
+            raise StorageSchemaError(f"Snapshot metadata validation failed: {exc}") from exc
 
         with self._lock:
             if target.exists():
                 raise StorageSchemaError(f"Snapshot already exists (immutable): {snapshot_id}")
+            latest = self.latest_path(symbol)
+            update_latest = partial_reason is None or not latest.is_file()
             target.parent.mkdir(parents=True, exist_ok=True)
             self.latest_dir.mkdir(parents=True, exist_ok=True)
             tmp = target.with_name(f".{target.name}.tmp")
             df.write_csv(tmp)
             os.replace(tmp, target)
-            _atomic_copy(target, self.latest_path(symbol))
-            self._index_add(symbol, meta)
-        logger.info("snapshot saved id=%s contracts=%d", snapshot_id, meta.contract_count)
-        return meta
+            if update_latest:
+                _atomic_copy(target, latest)
+            self._index_add(symbol, meta, latest_snapshot_id=snapshot_id if update_latest else None)
+        logger.info(
+            "snapshot saved id=%s contracts=%d partial=%s latest_updated=%s",
+            snapshot_id,
+            meta.contract_count,
+            partial_reason or "no",
+            update_latest,
+        )
+        return SnapshotSaveResult(meta=meta, latest_updated=update_latest)
 
     # ------------------------------------------------------------------ read
     def _read_csv(self, path: Path) -> pl.DataFrame:
@@ -201,7 +266,8 @@ class CSVRepository:
                 return self._read_csv(path)
             except StorageSchemaError:
                 logger.warning("latest cache for %s is corrupt; falling back to archive", symbol)
-        for meta in self.list_snapshots(symbol):
+        # Newest complete snapshot first; partial ones only when nothing complete is readable.
+        for meta in sorted(self.list_snapshots(symbol), key=lambda m: m.is_partial):
             try:
                 return self.load_snapshot(symbol, meta.snapshot_id)
             except (StorageSchemaError, SnapshotNotFoundError):
@@ -215,6 +281,56 @@ class CSVRepository:
         if not entry:
             return []
         return [SnapshotMeta.model_validate(s) for s in entry["snapshots"]]
+
+    def latest_snapshots(
+        self,
+        tickers: Iterable[str],
+        *,
+        include_partial: bool = True,
+    ) -> dict[str, SnapshotMeta]:
+        """Newest `SnapshotMeta` per ticker from ONE index read (tickers without data omitted).
+
+        `include_partial=False` skips snapshots flagged `partial` and returns the newest complete
+        one (tickers with only partial snapshots are omitted); use it for freshness checks.
+        """
+        index_tickers = self.load_index().get("tickers", {})
+        out: dict[str, SnapshotMeta] = {}
+        for raw in tickers:
+            symbol = TickerValidator.validate(raw)
+            entry = index_tickers.get(symbol)
+            snaps = entry.get("snapshots") if isinstance(entry, dict) else None
+            for snap in snaps or ():  # index is newest-first
+                meta = SnapshotMeta.model_validate(snap)
+                if include_partial or not meta.is_partial:
+                    out[symbol] = meta
+                    break
+        return out
+
+    def latest_cache_snapshot_id(self, ticker: str) -> str | None:
+        """`snapshot_id` held by `data/latest/{T}_latest.csv` (None if missing or unreadable)."""
+        symbol = TickerValidator.validate(ticker)
+        path = self.latest_path(symbol)
+        if not path.is_file():
+            return None
+        try:
+            head = pl.read_csv(
+                path,
+                n_rows=1,
+                columns=["snapshot_id"],
+                schema_overrides={"snapshot_id": pl.Utf8},
+            )
+        except (pl.exceptions.PolarsError, UnicodeDecodeError, OSError, ValueError):
+            return None
+        if head.height == 0:
+            return None
+        value = head["snapshot_id"][0]
+        if (
+            not isinstance(value, str)
+            or SNAPSHOT_ID_RE.fullmatch(value) is None
+            or not value.startswith(f"{symbol}_")
+        ):
+            return None
+        return value
 
     # ------------------------------------------------------------------ index
     def _meta_from_frame(
@@ -260,34 +376,55 @@ class CSVRepository:
         _atomic_write_bytes(self.index_path, json.dumps(index, indent=2).encode("utf-8"))
         return index
 
-    def _ticker_entry(self, symbol: str, metas: list[SnapshotMeta]) -> dict[str, Any]:
+    def _ticker_entry(
+        self,
+        symbol: str,
+        metas: list[SnapshotMeta],
+        *,
+        latest_snapshot_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Index entry; `latest_snapshot_id` names the snapshot held by the latest cache file.
+
+        When not given it is read from the cache file itself (partial snapshots may leave an
+        older complete one there), falling back to the newest snapshot.
+        """
         ordered = sorted(metas, key=lambda m: m.snapshot_id, reverse=True)
+        known = {m.snapshot_id for m in ordered}
+        cached = latest_snapshot_id or self.latest_cache_snapshot_id(symbol)
         return {
-            "latest_snapshot_id": ordered[0].snapshot_id,
+            "latest_snapshot_id": cached if cached in known else ordered[0].snapshot_id,
             "latest_file": self._rel(self.latest_path(symbol)),
             "snapshots": [m.model_dump() for m in ordered],
         }
 
-    def _index_add(self, symbol: str, meta: SnapshotMeta) -> None:
+    def _index_add(
+        self,
+        symbol: str,
+        meta: SnapshotMeta,
+        *,
+        latest_snapshot_id: str | None = None,
+    ) -> None:
         try:
             tickers = self._read_index_file()["tickers"]
         except StorageSchemaError:
             rebuilt = self.rebuild_index()  # already includes the freshly written snapshot
             entry = rebuilt["tickers"].get(symbol)
             if entry is not None:
-                for snap in entry["snapshots"]:
-                    if snap["snapshot_id"] == meta.snapshot_id:
-                        snap["range_pct"] = meta.range_pct
-                        snap["strike_step"] = meta.strike_step
-                        snap["requested_strike_step"] = meta.requested_strike_step
-                        snap["spot_source"] = meta.spot_source
+                # Restore the caller-supplied fields a CSV rescan cannot recover (range/step,
+                # spot_source, partial flag): store exactly what the normal path would.
+                entry["snapshots"] = [
+                    meta.model_dump() if snap["snapshot_id"] == meta.snapshot_id else snap
+                    for snap in entry["snapshots"]
+                ]
                 self._write_index(rebuilt["tickers"])
             return
         existing = [
             SnapshotMeta.model_validate(s) for s in tickers.get(symbol, {}).get("snapshots", [])
         ]
         existing = [m for m in existing if m.snapshot_id != meta.snapshot_id]
-        tickers[symbol] = self._ticker_entry(symbol, [*existing, meta])
+        tickers[symbol] = self._ticker_entry(
+            symbol, [*existing, meta], latest_snapshot_id=latest_snapshot_id
+        )
         self._write_index(tickers)
 
     def _read_index_file(self) -> dict[str, Any]:

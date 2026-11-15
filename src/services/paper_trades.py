@@ -536,28 +536,29 @@ class PaperTradeService:
     ) -> tuple[PaperQuoteRecord | None, list[str]]:
         """Quote unique legs of `ACTIVE` trades for `ticker` after chain refresh cleanup."""
         symbol = TickerValidator.validate(ticker)
-        trades = self._load_synced_trades()
-        active_for_ticker = [t for t in trades if t.status == "ACTIVE" and t.ticker == symbol]
-        if not active_for_ticker:
-            return None, []
-
-        spec_map: dict[tuple[str, float, str], ExactContractSpec] = {}
-        for trade in active_for_ticker:
-            for leg in trade.legs:
-                spec = ExactContractSpec(
-                    option_conid=leg.con_id,
-                    expiry=leg.expiry,
-                    strike=leg.strike,
-                    right=leg.right,
-                )
-                key = spec.key()
-                prev = spec_map.get(key)
-                if prev is None or (prev.option_conid <= 0 and spec.option_conid > 0):
-                    spec_map[key] = spec
-
-        specs = list(spec_map.values())
-        trade_ids = [t.id for t in active_for_ticker]
+        trade_ids: list[str] = []
         try:
+            trades = self._load_synced_trades()
+            active_for_ticker = [t for t in trades if t.status == "ACTIVE" and t.ticker == symbol]
+            if not active_for_ticker:
+                return None, []
+
+            spec_map: dict[tuple[str, float, str], ExactContractSpec] = {}
+            for trade in active_for_ticker:
+                for leg in trade.legs:
+                    spec = ExactContractSpec(
+                        option_conid=leg.con_id,
+                        expiry=leg.expiry,
+                        strike=leg.strike,
+                        right=leg.right,
+                    )
+                    key = spec.key()
+                    prev = spec_map.get(key)
+                    if prev is None or (prev.option_conid <= 0 and spec.option_conid > 0):
+                        spec_map[key] = spec
+
+            specs = list(spec_map.values())
+            trade_ids = [t.id for t in active_for_ticker]
             result = await self.fetcher.fetch_exact_contracts(
                 symbol,
                 specs,
@@ -642,6 +643,6 @@ class PaperTradeService:
             )
             try:
                 self.store.append_quote_record(err_rec)
-            except OSError as log_exc:  # pragma: no cover - defensive
+            except (AnalyzerError, OSError, ValueError) as log_exc:  # pragma: no cover - defensive
                 logger.warning("failed to append paper quote error log: %s", log_exc)
             return err_rec, [f"Paper trade leg quote refresh warning for {symbol}: {exc}"]

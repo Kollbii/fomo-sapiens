@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import Counter
-from collections.abc import Awaitable, Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Any, Protocol, TypeVar
+from typing import Any, Protocol
 
 from ib_async import Option, Stock
 
@@ -16,6 +16,8 @@ from src.broker.client import IBKRBrokerClient, SleepFn, poll_until
 from src.core.calendar import et_date
 from src.core.config import Settings
 from src.core.exceptions import (
+    GatewayConnectionError,
+    GatewayTimeoutError,
     InvalidTickerError,
     OptionChainFetchError,
     UnderlyingPriceUnavailableError,
@@ -27,7 +29,6 @@ logger = logging.getLogger(__name__)
 _EPS = 1e-9
 _CANONICAL_STEPS: tuple[float, ...] = (0.5, 1.0, 2.0, 2.5, 5.0, 10.0, 20.0, 25.0, 50.0, 100.0)
 EXACT_PREFETCH_MAX_CONCURRENCY = 3
-_T = TypeVar("_T")
 
 
 class OptionChainLike(Protocol):
@@ -460,13 +461,6 @@ def _has_running_event_loop() -> bool:
     return True
 
 
-async def _await_with_optional_timeout(awaitable: Awaitable[_T], timeout_sec: float) -> _T:
-    """Apply `asyncio.wait_for` when an event loop is running; step directly otherwise."""
-    if not _has_running_event_loop():
-        return await awaitable
-    return await asyncio.wait_for(awaitable, timeout=timeout_sec)
-
-
 def _clock_utc(clock: Callable[[], datetime]) -> datetime:
     dt = clock()
     return dt.astimezone(UTC) if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
@@ -541,19 +535,23 @@ class ContractDiscoveryService:
         oc = self.settings.options_chain
         ib = self.client.ib
         stage = f"spot lookup ({getattr(contract, 'symbol', '?')})"
+        since = self.client.link_checkpoint()
         ticker: Any = None
         subscribed = False
         try:
+            self.client.ensure_link_alive(stage=stage, since=since)
             ticker = ib.reqMktData(contract, "", False, False)
             subscribed = True
             # Wait for last + bid/ask so the cross-check can run; on timeout take what arrived.
+            # An upstream-loss notice ends the wait at once (bounded poll, fast-fail below).
             await poll_until(
-                lambda: _spot_fields_complete(ticker),
+                lambda: self.client.link_lost_since(since) or _spot_fields_complete(ticker),
                 oc.page_collect_timeout_sec,
                 oc.page_poll_interval_sec,
                 self.sleep,
             )
             self.client.ensure_still_connected(stage=stage)
+            self.client.ensure_link_alive(stage=stage, since=since)
             picked = select_spot(ticker)
             logger.info(
                 "spot fields %s: last=%s bid=%s ask=%s close=%s -> %s",
@@ -643,12 +641,13 @@ class ContractDiscoveryService:
         )
         stage = f"exact contract prefetch ({symbol} {exp.ib_expiry})"
         try:
-            details = await _await_with_optional_timeout(
+            details = await self.client.await_guarded(
                 req_fn(probe),
-                oc.contract_details_timeout_sec,
+                stage=stage,
+                timeout_sec=oc.contract_details_timeout_sec,
             )
             self.client.ensure_still_connected(stage=stage)
-        except TimeoutError as exc:
+        except (GatewayTimeoutError, TimeoutError) as exc:
             if self.client.was_connected and not self.client.is_connected:
                 self.client.raise_transport_error(exc, stage=stage)
             logger.warning(
@@ -658,6 +657,9 @@ class ContractDiscoveryService:
                 exc,
             )
             return {}
+        except GatewayConnectionError:
+            # Upstream loss / dropped socket: never degrade to the secdef fallback.
+            raise
         except (OSError, ConnectionError) as exc:
             self.client.raise_transport_error(exc, stage=stage)
         except Exception as exc:
@@ -711,9 +713,18 @@ class ContractDiscoveryService:
                         self._cache_store(cache_key, exact_map)
                         resolved[exp.ib_expiry] = (exp_chain, exact_map)
 
-                await asyncio.gather(
-                    *(_fetch_one(idx, exp, ec, ck) for idx, (exp, ec, ck) in enumerate(pending))
-                )
+                tasks = [
+                    asyncio.ensure_future(_fetch_one(idx, exp, ec, ck))
+                    for idx, (exp, ec, ck) in enumerate(pending)
+                ]
+                try:
+                    await asyncio.gather(*tasks)
+                except BaseException:
+                    # One failure (e.g. upstream loss) or a cancel stops every sibling request.
+                    for task in tasks:
+                        if not task.done():
+                            task.cancel()
+                    raise
             else:
                 for idx, (exp, exp_chain, cache_key) in enumerate(pending):
                     if idx > 0 and oc.contract_details_cooldown_sec > 0:

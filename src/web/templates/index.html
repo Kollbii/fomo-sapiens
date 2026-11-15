@@ -37,31 +37,74 @@
 <!-- Row 3: Control Bar -->
 <section class="control-bar" aria-label="Chain Controls and Filters">
   <div class="control-group">
-    <div id="watchlist-pills" class="watchlist-pills" role="group" aria-label="Watchlist Tickers">
-      {% for sym in watchlist %}
+    <div class="wl-picker" id="watchlist-picker">
       <button
         type="button"
-        class="pill-btn{% if sym == default_ticker %} active{% endif %}"
-        data-ticker="{{ sym }}"
+        id="watchlist-toggle"
+        class="btn wl-picker__toggle"
+        aria-haspopup="true"
+        aria-expanded="false"
+        aria-controls="watchlist-panel"
       >
-        {{ sym }}
+        <span id="watchlist-active" class="wl-picker__active">{{ default_ticker }}</span>
+        <span class="wl-picker__caret" aria-hidden="true">&#9662;</span>
+        <span class="wl-picker__label">Watchlist (<span id="watchlist-count">{{ watchlist | length }}</span>)</span>
       </button>
-      {% endfor %}
+      <div id="watchlist-panel" class="wl-picker__panel" role="group" aria-label="Watchlist" hidden>
+        <p id="watchlist-notice" class="wl-picker__notice" role="status" hidden></p>
+        <p id="watchlist-empty" class="wl-picker__empty" hidden>Watchlist is empty. Add a ticker.</p>
+        <ul id="watchlist-rows" class="wl-picker__rows"></ul>
+        <div class="wl-picker__footer">
+          <button type="button" id="watchlist-select-all" class="btn wl-btn-small">All</button>
+          <button type="button" id="watchlist-select-none" class="btn wl-btn-small">None</button>
+          <button type="button" id="watchlist-select-stale" class="btn wl-btn-small">Stale only</button>
+          <button type="button" id="watchlist-load-selected" class="btn btn-primary wl-btn-small wl-picker__load" disabled>
+            LOAD SELECTED (<span id="watchlist-selected-count">0</span>)
+          </button>
+        </div>
+      </div>
     </div>
 
-    <form id="custom-ticker-form" class="field-group" autocomplete="off">
-      <label for="custom-ticker-input" class="field-label">Ticker</label>
+    <form id="watchlist-add-form" class="field-group wl-add" autocomplete="off">
+      <label for="watchlist-add-input" class="sr-only">Add ticker to watchlist and load it from IBKR</label>
       <input
-        id="custom-ticker-input"
-        class="input-control"
+        id="watchlist-add-input"
+        class="input-control wl-add__input"
         type="text"
         maxlength="5"
         pattern="[A-Za-z]{1,5}"
-        placeholder="e.g. AAPL"
-        aria-label="Custom US Stock Ticker"
+        placeholder="+ add ticker"
+        title="Add a US stock ticker to the watchlist and load it from IBKR (Enter)"
       />
-      <button id="custom-ticker-submit" class="btn" type="submit">LOAD</button>
+      <button id="watchlist-add-submit" class="btn" type="submit" title="Add ticker and load it from IBKR">ADD</button>
     </form>
+
+    <button type="button" id="watchlist-load-bar" class="btn btn-primary wl-load-bar" disabled>
+      LOAD SELECTED (<span id="watchlist-load-bar-count">0</span>)
+    </button>
+  </div>
+
+  <div id="watchlist-progress" class="wl-progress" hidden>
+    <div id="watchlist-progress-running" class="wl-progress__running" hidden>
+      <div
+        id="watchlist-progress-track"
+        class="wl-progress__track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        aria-valuenow="0"
+        aria-label="Batch load progress"
+      >
+        <div id="watchlist-progress-fill" class="wl-progress__fill"></div>
+      </div>
+      <span id="watchlist-progress-text" class="wl-progress__text" role="status" aria-live="polite"></span>
+      <button type="button" id="watchlist-cancel" class="btn wl-btn-small">Cancel</button>
+    </div>
+    <div id="watchlist-progress-summary" class="wl-progress__summary" hidden>
+      <span id="watchlist-summary-text" class="wl-progress__text" role="status"></span>
+      <button type="button" id="watchlist-retry" class="btn wl-btn-small" hidden>Retry</button>
+      <button type="button" id="watchlist-summary-dismiss" class="btn wl-btn-small" aria-label="Dismiss batch summary" title="Dismiss">&times;</button>
+    </div>
   </div>
 
   <div class="control-group">
@@ -218,6 +261,15 @@
       >
         <span class="panel-toggle-dot" aria-hidden="true"></span>
         <span>Backtest</span>
+      </button>
+      <button
+        type="button"
+        class="panel-toggle-pill active"
+        data-panel-target="best_option"
+        aria-pressed="true"
+      >
+        <span class="panel-toggle-dot" aria-hidden="true"></span>
+        <span>Best Option</span>
       </button>
     </div>
     <button
@@ -531,6 +583,8 @@
         >
           <button type="button" class="pill-btn strategy-preset-btn active" data-strategy-preset="BULL_PUT_SPREAD" title="Credit Put Spread anchored near Put Wall">Bull Put</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BULL_CALL_SPREAD" title="Debit Call Spread capped near Call Wall">Bull Call</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BEAR_CALL_SPREAD" title="Credit Call Spread anchored near Call Wall">Bear Call</button>
+          <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="BEAR_PUT_SPREAD" title="Debit Put Spread reaching toward Put Wall">Bear Put</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="DIAGONAL_SPREAD" title="Calendar Diagonal Spread across DTEs">Diagonal</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="IRON_CONDOR" title="4-leg Iron Condor anchored between Put &amp; Call Walls">Iron Condor</button>
           <button type="button" class="pill-btn strategy-preset-btn" data-strategy-preset="CUSTOM" title="Evaluate custom hand-picked legs">Custom</button>
@@ -1129,6 +1183,101 @@
       <ul id="backtest-assumptions" class="backtest-assumptions" aria-label="Simulation Assumptions"></ul>
     </div>
   </article>
+
+  <article id="best-option-card" class="panel-card panel-card--span-12 panel-card--best-option" data-panel-id="best_option" data-default-span="12">
+    <div class="panel-head">
+      <div class="panel-head-left">
+        <h2 class="panel-title">Best Option Screener</h2>
+        <span class="panel-meta">WATCHLIST-WIDE STRATEGY RANKING FROM CACHED SNAPSHOTS</span>
+      </div>
+      <div class="panel-actions screener-head-actions">
+        <span id="screener-live-badge" class="badge badge--muted" hidden></span>
+        <span id="screener-md-label" class="badge badge--delayed" hidden></span>
+      </div>
+    </div>
+
+    <div class="panel-body screener-body">
+      <form id="screener-form" class="screener-controls" autocomplete="off">
+        <label class="screener-field">
+          <span class="field-label">Mode</span>
+          <select id="screener-mode" class="select-control" aria-label="Screener mode">
+            <option value="best" selected>Best per ticker</option>
+            <option value="selected">Selected strategy</option>
+            <option value="all">All combinations</option>
+          </select>
+        </label>
+        <label class="screener-field">
+          <span class="field-label">Strategy</span>
+          <select id="screener-strategy" class="select-control" aria-label="Screener strategy" disabled>
+            <option value="BULL_PUT_SPREAD" selected>Bull Put</option>
+            <option value="BEAR_CALL_SPREAD">Bear Call</option>
+            <option value="BULL_CALL_SPREAD">Bull Call</option>
+            <option value="BEAR_PUT_SPREAD">Bear Put</option>
+            <option value="DIAGONAL_SPREAD">Diagonal</option>
+            <option value="IRON_CONDOR">Iron Condor</option>
+          </select>
+        </label>
+        <label class="screener-field">
+          <span class="field-label">DTE</span>
+          <select id="screener-dte" class="select-control" aria-label="Screener DTE window">
+            <option value="60">30&ndash;60d</option>
+            <option value="90">30&ndash;90d</option>
+            <option value="120" selected>30&ndash;120d</option>
+            <option value="0:29">0&ndash;29d (Short)</option>
+            <option value="0:120">0&ndash;120d (All)</option>
+          </select>
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min credit $</span>
+          <input id="screener-min-credit" class="input-control" type="number" min="0" step="any" inputmode="decimal" placeholder="off" title="Minimum net credit in dollars (credit strategies only)" />
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min RoR %</span>
+          <input id="screener-min-ror" class="input-control" type="number" min="0" max="1000" step="any" inputmode="decimal" placeholder="off" />
+        </label>
+        <label class="screener-field screener-field--num">
+          <span class="field-label">Min POP %</span>
+          <input id="screener-min-pop" class="input-control" type="number" min="0" max="100" step="any" inputmode="decimal" placeholder="off" />
+        </label>
+        <button type="submit" id="screener-recalc-btn" class="btn btn-primary">Recalculate</button>
+        <label class="screener-check" title="Stream live quotes for the top rows of the current sort (display only)">
+          <input id="screener-live" type="checkbox" />
+          <span>Live</span>
+        </label>
+        <label class="screener-check">
+          <input id="screener-show-status" type="checkbox" checked />
+          <span>Show status rows</span>
+        </label>
+        <button type="button" id="screener-reset-filters" class="btn btn-xs" title="Clear every header filter">Reset filters</button>
+        <div class="screener-columns-wrap">
+          <button
+            type="button"
+            id="screener-columns-btn"
+            class="btn btn-xs screener-columns-btn"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="screener-columns-menu"
+            title="Show or hide columns"
+          ><span aria-hidden="true">&#9638;</span><span>Columns</span></button>
+          <div id="screener-columns-menu" class="screener-columns-menu" role="group" aria-label="Screener columns" hidden></div>
+        </div>
+      </form>
+
+      <div id="screener-status" class="screener-status" role="status" aria-live="polite">Waiting for the first calculation&hellip;</div>
+      <ul id="screener-notices" class="screener-notices" hidden></ul>
+
+      <div id="screener-scroll" class="screener-scroll">
+        <table id="screener-table" class="screener-table">
+          <thead>
+            <tr id="screener-head-row"></tr>
+            <tr id="screener-filter-row" class="screener-filter-row"></tr>
+          </thead>
+          <tbody id="screener-body"></tbody>
+        </table>
+        <div id="screener-empty" class="screener-empty" hidden></div>
+      </div>
+    </div>
+  </article>
 </section>
 
 <!-- Row 6: High-Density Option Chain Table -->
@@ -1288,6 +1437,8 @@
   "defaultTicker": default_ticker,
   "defaultTheme": default_theme,
   "watchlist": watchlist,
+  "watchlistMaxSize": watchlist_max_size,
+  "watchlistAllowCustom": watchlist_allow_custom,
   "defaultRangePct": default_range_pct,
   "defaultStrikeStep": default_strike_step,
   "ibkrHost": ibkr_host,
@@ -1303,5 +1454,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261114c"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261115b"></script>
 {% endblock %}

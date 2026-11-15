@@ -77,6 +77,9 @@ import {
   wireSnapshotPicker,
 } from "./snapshots.js";
 import {
+  wireWatchlist,
+} from "./watchlist.js";
+import {
   bindBacktestEvents,
   rerenderBacktestChartOnTheme,
 } from "./backtest.js";
@@ -105,27 +108,7 @@ export function bindEvents() {
   wireSnapshotPicker();
   bindBacktestEvents();
 
-  if (dom.watchlistPills) {
-    dom.watchlistPills.addEventListener("click", function (ev) {
-      var target = ev.target;
-      if (target && target.matches && target.matches(".pill-btn")) {
-        var sym = target.getAttribute("data-ticker");
-        if (sym) {
-          if (dom.customInput) dom.customInput.value = "";
-          loadChain(sym, "");
-        }
-      }
-    });
-  }
-
-  if (dom.customForm) {
-    dom.customForm.addEventListener("submit", function (ev) {
-      ev.preventDefault();
-      var raw = dom.customInput ? dom.customInput.value.trim().toUpperCase() : "";
-      if (!raw) return;
-      loadChain(raw, "");
-    });
-  }
+  wireWatchlist();
 
   if (dom.snapshotSelect) {
     dom.snapshotSelect.addEventListener("change", function () {

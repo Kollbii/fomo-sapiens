@@ -1,4 +1,16 @@
-"""Wall-anchored auto-construction of preset strategies (bull put/call, condor, diagonal)."""
+"""Wall-anchored auto-construction of preset strategies (bull/bear verticals, condor, diagonal).
+
+Verticals share two right-parameterized builders:
+- credit verticals (`BULL_PUT_SPREAD` puts, `BEAR_CALL_SPREAD` calls): short leg anchored to the
+  Put / Call Wall, protective wing further OTM, optional `min_net_credit_dollars` /
+  `min_ror_pct` entry floors with structured `skip_reason` codes;
+- debit verticals (`BULL_CALL_SPREAD` calls, `BEAR_PUT_SPREAD` puts): long leg near ATM, short
+  leg toward the Call / Put Wall (entry floors are ignored, as for every non-credit preset).
+
+Missing contracts raise `StrategyFilterError`: `EMPTY_CHAIN` when the frame has no Put / Call
+rows at all, and `NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS` when the Iron Condor's target expiry
+lacks one right.
+"""
 
 from __future__ import annotations
 
@@ -17,10 +29,17 @@ from src.analytics.strategies.chain import (
 )
 from src.analytics.strategies.models import PresetStrategyKind, StrategyLegInput
 from src.analytics.walls import ChainWallsReport, DTEWallSummary, compute_walls
+from src.storage.schema import OptionRight
+
+WingDirection = Literal["BELOW", "ABOVE"]
 
 
 class StrategyFilterError(ValueError):
-    """Raised when strategy auto-selection finds no candidate satisfying entry filters."""
+    """Raised when strategy auto-selection finds no buildable candidate; carries `skip_reason`.
+
+    Entry-filter rejections surface through `suggest_strategy_legs_from_walls`; missing
+    contracts (`EMPTY_CHAIN`, `NO_PUT_CONTRACTS`, `NO_CALL_CONTRACTS`) raise directly.
+    """
 
     def __init__(self, skip_reason: str, message: str) -> None:
         super().__init__(message)
@@ -38,6 +57,34 @@ class StrategySuggestionOutcome:
     skip_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class _VerticalSpec:
+    """Right-specific geometry and wording of a two-leg vertical preset.
+
+    `wing_direction` is where the second leg sits relative to the anchor leg: the protective
+    wing beyond the short strike (credit verticals) or the short cap beyond the long strike
+    (debit verticals).
+    """
+
+    right: OptionRight
+    strategy_label: str
+    wing_direction: WingDirection
+
+    @property
+    def right_label(self) -> str:
+        return "Put" if self.right == "P" else "Call"
+
+
+_BULL_PUT = _VerticalSpec(right="P", strategy_label="Bull Put Spread", wing_direction="BELOW")
+_BEAR_CALL = _VerticalSpec(right="C", strategy_label="Bear Call Spread", wing_direction="ABOVE")
+_BULL_CALL = _VerticalSpec(right="C", strategy_label="Bull Call Spread", wing_direction="ABOVE")
+_BEAR_PUT = _VerticalSpec(right="P", strategy_label="Bear Put Spread", wing_direction="BELOW")
+
+
+def _is_beyond(strike: float, anchor: float, direction: WingDirection) -> bool:
+    return strike < anchor - 1e-6 if direction == "BELOW" else strike > anchor + 1e-6
+
+
 def pick_target_expiry(
     rows: list[PreparedRow],
     preferred_expiry: str | None,
@@ -46,6 +93,11 @@ def pick_target_expiry(
     for r in rows:
         if r.expiry not in exp_dte:
             exp_dte[r.expiry] = r.dte
+    if not exp_dte:
+        # `prepare_rows` drops non-C/P rows, so a non-empty frame can still yield no rows.
+        raise StrategyFilterError(
+            "EMPTY_CHAIN", "No Put or Call contracts found in snapshot for strategy preset"
+        )
     if preferred_expiry and preferred_expiry in exp_dte:
         return preferred_expiry, exp_dte[preferred_expiry]
     best_exp, best_dte = min(
@@ -87,19 +139,11 @@ def _pick_wing_strike(
     pool: list[PreparedRow],
     anchor_strike: float,
     *,
-    direction: Literal["BELOW", "ABOVE"],
+    direction: WingDirection,
     spot: float,
 ) -> PreparedRow:
     ordered = sorted(
-        [
-            r
-            for r in pool
-            if (
-                r.strike < anchor_strike - 1e-6
-                if direction == "BELOW"
-                else r.strike > anchor_strike + 1e-6
-            )
-        ],
+        [r for r in pool if _is_beyond(r.strike, anchor_strike, direction)],
         key=lambda r: abs(r.strike - anchor_strike),
     )
     if not ordered:
@@ -114,7 +158,7 @@ def _pick_wing_strike(
     )
 
 
-def _bull_put_spread_metrics(
+def _credit_vertical_metrics(
     short_row: PreparedRow,
     long_row: PreparedRow,
     entry_price_basis: EntryPriceBasis,
@@ -128,7 +172,7 @@ def _bull_put_spread_metrics(
     net_credit_dollars = round(credit_per_share * 100.0, 2)
     if credit_per_share <= 0.0 or net_credit_dollars <= 0.0:
         return "NON_POSITIVE_CREDIT"
-    width_dollars = round((short_row.strike - long_row.strike) * 100.0, 2)
+    width_dollars = round(abs(short_row.strike - long_row.strike) * 100.0, 2)
     max_loss_dollars = round(width_dollars - net_credit_dollars, 2)
     if max_loss_dollars <= 0.0:
         return "NON_POSITIVE_MAX_LOSS"
@@ -136,26 +180,29 @@ def _bull_put_spread_metrics(
     return net_credit_dollars, max_loss_dollars, ror_pct
 
 
-def _build_bull_put_legs_and_rationale(
-    short_put: PreparedRow,
-    long_put: PreparedRow,
-    put_wall: float | None,
+def _build_credit_vertical_legs_and_rationale(
+    short_row: PreparedRow,
+    long_row: PreparedRow,
+    wall: float | None,
     *,
+    spec: _VerticalSpec,
     entry_price_basis: EntryPriceBasis,
     metrics: tuple[float, float, float] | None = None,
 ) -> tuple[list[StrategyLegInput], list[str]]:
-    wall_note = f"Put Wall ${put_wall:g}" if put_wall is not None else "OTM support"
-    short_px = resolve_entry_leg_price(short_put, "SELL", entry_price_basis) or short_put.mid
+    label = spec.right_label
+    fallback_note = "OTM support" if spec.right == "P" else "OTM resistance"
+    wall_note = f"{label} Wall ${wall:g}" if wall is not None else fallback_note
+    short_px = resolve_entry_leg_price(short_row, "SELL", entry_price_basis) or short_row.mid
     rationale = [
         (
-            f"Short Put ${short_put.strike:g} anchored to {wall_note} "
-            f"(Delta={short_put.delta:.2f}, Mid=${short_px:.2f})."
-            if short_put.delta is not None
-            else f"Short Put ${short_put.strike:g} near {wall_note} (Mid=${short_px:.2f})."
+            f"Short {label} ${short_row.strike:g} anchored to {wall_note} "
+            f"(Delta={short_row.delta:.2f}, Mid=${short_px:.2f})."
+            if short_row.delta is not None
+            else f"Short {label} ${short_row.strike:g} near {wall_note} (Mid=${short_px:.2f})."
         ),
         (
-            f"Long Put wing ${long_put.strike:g} caps risk across "
-            f"${short_put.strike - long_put.strike:g} spread width."
+            f"Long {label} wing ${long_row.strike:g} caps risk across "
+            f"${abs(short_row.strike - long_row.strike):g} spread width."
         ),
     ]
     if metrics is not None:
@@ -167,33 +214,42 @@ def _build_bull_put_legs_and_rationale(
     legs = [
         StrategyLegInput(
             side="SELL",
-            right="P",
-            expiry=short_put.expiry,
-            strike=short_put.strike,
+            right=spec.right,
+            expiry=short_row.expiry,
+            strike=short_row.strike,
             qty=1,
-            selection_reason=f"Short Put near {wall_note}",
+            selection_reason=f"Short {label} near {wall_note}",
         ),
         StrategyLegInput(
             side="BUY",
-            right="P",
-            expiry=long_put.expiry,
-            strike=long_put.strike,
+            right=spec.right,
+            expiry=long_row.expiry,
+            strike=long_row.strike,
             qty=1,
-            selection_reason="Protective Put wing",
+            selection_reason=f"Protective {label} wing",
         ),
     ]
     return legs, rationale
 
 
-def _select_bull_put_spread(
-    exp_puts: list[PreparedRow],
+def _select_credit_vertical(
+    exp_rows: list[PreparedRow],
     spot: float,
-    put_wall: float | None,
+    wall: float | None,
     *,
+    spec: _VerticalSpec,
     min_net_credit_dollars: float | None = None,
     min_ror_pct: float | None = None,
     entry_price_basis: EntryPriceBasis = "MID",
 ) -> tuple[list[StrategyLegInput] | None, list[str], str | None]:
+    """Credit vertical (Bull Put on puts / Bear Call on calls) anchored to the matching Wall.
+
+    The short leg is OTM / near-ATM (puts `<= spot * 1.005`, calls `>= spot * 0.995`) and the
+    protective wing sits further OTM (`spec.wing_direction`). With active entry floors every
+    ranked short and every usable wing are scanned on a per-1-spread `entry_price_basis` baseline.
+    """
+    is_put = spec.right == "P"
+    label = spec.right_label
     eff_min_credit = (
         min_net_credit_dollars
         if (min_net_credit_dollars is not None and min_net_credit_dollars > 0.0)
@@ -206,54 +262,65 @@ def _select_bull_put_spread(
         px = resolve_entry_leg_price(r, "SELL", entry_price_basis)
         return px is not None and px > min_px
 
-    otm_puts = [r for r in exp_puts if r.strike <= spot * 1.005 and _has_sell_px(r)]
-    sorted_strikes = sorted({r.strike for r in exp_puts})
-    anchor_ref = put_wall if (put_wall is not None and put_wall <= spot * 1.02) else spot * 0.95
+    def _is_otm_short(r: PreparedRow) -> bool:
+        return r.strike <= spot * 1.005 if is_put else r.strike >= spot * 0.995
 
-    def _short_put_score(r: PreparedRow) -> float:
+    otm_shorts = [r for r in exp_rows if _is_otm_short(r) and _has_sell_px(r)]
+    sorted_strikes = sorted({r.strike for r in exp_rows})
+    if is_put:
+        anchor_ref = wall if (wall is not None and wall <= spot * 1.02) else spot * 0.95
+    else:
+        anchor_ref = wall if (wall is not None and wall >= spot * 0.98) else spot * 1.05
+
+    def _short_score(r: PreparedRow) -> float:
         eff_delta = r.delta if r.delta is not None else 0.28
         delta_err = abs(abs(eff_delta) - 0.28) * 30.0
-        wall_bonus = 22.0 if (put_wall is not None and abs(r.strike - put_wall) < 1e-4) else 0.0
+        wall_bonus = 22.0 if (wall is not None and abs(r.strike - wall) < 1e-4) else 0.0
         dist_pen = (abs(r.strike - anchor_ref) / max(spot, 1.0)) * 80.0
         return liquidity_score(r) + wall_bonus - delta_err - dist_pen
 
     if not caps_active:
-        pool = otm_puts or [r for r in exp_puts if _has_sell_px(r)] or exp_puts
+        pool = otm_shorts or [r for r in exp_rows if _has_sell_px(r)] or exp_rows
         if len(sorted_strikes) >= 2:
-            min_k = sorted_strikes[0]
-            above_floor = [r for r in pool if r.strike > min_k + 1e-6]
-            if above_floor:
-                pool = above_floor
-        short_put = _best_candidate(pool, _short_put_score)
+            # Drop the outermost strike in the wing direction so a protective wing always exists.
+            edge_k = sorted_strikes[0] if is_put else sorted_strikes[-1]
+            inside = [
+                r
+                for r in pool
+                if (r.strike > edge_k + 1e-6 if is_put else r.strike < edge_k - 1e-6)
+            ]
+            if inside:
+                pool = inside
+        short_row = _best_candidate(pool, _short_score)
         wing_pool = (
             [
                 r
-                for r in exp_puts
+                for r in exp_rows
                 if resolve_entry_leg_price(r, "BUY", entry_price_basis) is not None
             ]
             if entry_price_basis != "MID"
-            else exp_puts
+            else exp_rows
         )
-        long_put = _pick_wing_strike(
-            wing_pool or exp_puts, short_put.strike, direction="BELOW", spot=spot
+        long_row = _pick_wing_strike(
+            wing_pool or exp_rows, short_row.strike, direction=spec.wing_direction, spot=spot
         )
-        legs, rationale = _build_bull_put_legs_and_rationale(
-            short_put, long_put, put_wall, entry_price_basis=entry_price_basis
+        legs, rationale = _build_credit_vertical_legs_and_rationale(
+            short_row, long_row, wall, spec=spec, entry_price_basis=entry_price_basis
         )
         return legs, rationale, None
 
-    if not otm_puts:
+    if not otm_shorts:
         return (
             None,
-            ["No OTM/near-ATM short put candidates with usable entry prices."],
-            "NO_OTM_PUT_CANDIDATES",
+            [f"No OTM/near-ATM short {label.lower()} candidates with usable entry prices."],
+            f"NO_OTM_{label.upper()}_CANDIDATES",
         )
 
-    # Order OTM short puts by wall/delta/liquidity preference; try Put Wall anchor first, then
-    # step through nearby OTM short puts only if no lower-strike wing clears the entry floors.
-    ranked_shorts = sorted(otm_puts, key=_short_put_score, reverse=True)
+    # Order OTM shorts by wall/delta/liquidity preference; try the Wall anchor first, then step
+    # through nearby OTM shorts only if no further-OTM wing clears the entry floors.
+    ranked_shorts = sorted(otm_shorts, key=_short_score, reverse=True)
     usable_wings = [
-        r for r in exp_puts if resolve_entry_leg_price(r, "BUY", entry_price_basis) is not None
+        r for r in exp_rows if resolve_entry_leg_price(r, "BUY", entry_price_basis) is not None
     ]
 
     saw_any_wing = False
@@ -262,19 +329,23 @@ def _select_bull_put_spread(
     any_passed_ror = False
     last_error_reason = "INSUFFICIENT_WINGS"
 
-    for short_put in ranked_shorts:
-        lower_wings = sorted(
-            [r for r in usable_wings if r.strike < short_put.strike - 1e-6],
-            key=lambda r: abs(short_put.strike - r.strike),
+    for short_row in ranked_shorts:
+        wings = sorted(
+            [
+                r
+                for r in usable_wings
+                if _is_beyond(r.strike, short_row.strike, spec.wing_direction)
+            ],
+            key=lambda r: abs(short_row.strike - r.strike),
         )
-        if not lower_wings:
+        if not wings:
             continue
         saw_any_wing = True
-        desired_width = max(spot * 0.025, abs(lower_wings[0].strike - short_put.strike))
+        desired_width = max(spot * 0.025, abs(wings[0].strike - short_row.strike))
         passing: list[tuple[PreparedRow, tuple[float, float, float]]] = []
 
-        for wing in lower_wings:
-            res = _bull_put_spread_metrics(short_put, wing, entry_price_basis)
+        for wing in wings:
+            res = _credit_vertical_metrics(short_row, wing, entry_price_basis)
             if isinstance(res, str):
                 last_error_reason = res
                 continue
@@ -288,32 +359,34 @@ def _select_bull_put_spread(
                 passing.append((wing, res))
 
         if passing:
-            long_put, best_metrics = min(
+            long_row, best_metrics = min(
                 passing,
                 key=lambda item: (
-                    abs(abs(item[0].strike - short_put.strike) - desired_width),
+                    abs(abs(item[0].strike - short_row.strike) - desired_width),
                     -liquidity_score(item[0]),
                 ),
             )
-            legs, rationale = _build_bull_put_legs_and_rationale(
-                short_put,
-                long_put,
-                put_wall,
+            legs, rationale = _build_credit_vertical_legs_and_rationale(
+                short_row,
+                long_row,
+                wall,
+                spec=spec,
                 entry_price_basis=entry_price_basis,
                 metrics=best_metrics,
             )
             return legs, rationale, None
 
     if not saw_any_wing:
+        side_word = "lower" if is_put else "higher"
         return (
             None,
-            ["Insufficient lower-strike Put wings for Bull Put Spread."],
+            [f"Insufficient {side_word}-strike {label} wings for {spec.strategy_label}."],
             "INSUFFICIENT_WINGS",
         )
     if not saw_viable_pair:
         return (
             None,
-            [f"No viable Bull Put Spread pair ({last_error_reason})."],
+            [f"No viable {spec.strategy_label} pair ({last_error_reason})."],
             last_error_reason,
         )
     if eff_min_credit is not None and eff_min_ror is not None:
@@ -330,73 +403,107 @@ def _select_bull_put_spread(
     return (
         None,
         [
-            "No OTM Bull Put Spread met entry quality thresholds "
+            f"No OTM {spec.strategy_label} met entry quality thresholds "
             f"(min_credit=${eff_min_credit or 0.0:g}, min_ror={eff_min_ror or 0.0:g}%)."
         ],
         reason,
     )
 
 
-def _select_bull_call_spread(
-    exp_calls: list[PreparedRow],
+def _select_debit_vertical(
+    exp_rows: list[PreparedRow],
     spot: float,
-    call_wall: float | None,
+    wall: float | None,
+    *,
+    spec: _VerticalSpec,
 ) -> tuple[list[StrategyLegInput], list[str]]:
-    sorted_strikes = sorted({r.strike for r in exp_calls})
-    pool_long = exp_calls
-    if len(sorted_strikes) >= 2:
-        max_k = sorted_strikes[-1]
-        below_cap = [r for r in exp_calls if r.strike < max_k - 1e-6 and r.mid > 0.01]
-        if below_cap:
-            pool_long = below_cap
+    """Debit vertical (Bull Call on calls / Bear Put on puts): long near ATM, short to the Wall.
 
-    def _long_call_score(r: PreparedRow) -> float:
-        eff_delta = r.delta if r.delta is not None else 0.55
+    The long leg targets |Delta| ~0.55 next to spot; the short leg sits beyond it
+    (`spec.wing_direction`) toward the Call Wall (calls) or Put Wall (puts), falling back to
+    `spot * 1.08` / `spot * 0.92` when the Wall is not beyond the long strike.
+    """
+    is_call = spec.right == "C"
+    label = spec.right_label
+
+    def _delta_mag(delta: float | None, default: float) -> float:
+        # Calls keep the signed delta (unchanged Bull Call scoring); puts use |delta|.
+        if delta is None:
+            return default
+        return delta if is_call else abs(delta)
+
+    sorted_strikes = sorted({r.strike for r in exp_rows})
+    pool_long = exp_rows
+    if len(sorted_strikes) >= 2:
+        # Keep the outermost strike in the short direction free for the short leg.
+        if is_call:
+            max_k = sorted_strikes[-1]
+            inside = [r for r in exp_rows if r.strike < max_k - 1e-6 and r.mid > 0.01]
+        else:
+            min_k = sorted_strikes[0]
+            inside = [r for r in exp_rows if r.strike > min_k + 1e-6 and r.mid > 0.01]
+        if inside:
+            pool_long = inside
+
+    def _long_score(r: PreparedRow) -> float:
+        eff_delta = _delta_mag(r.delta, 0.55)
         delta_err = abs(eff_delta - 0.55) * 35.0
         atm_pen = (abs(r.strike - spot) / max(spot, 1.0)) * 120.0
         return liquidity_score(r) - delta_err - atm_pen
 
-    long_call = _best_candidate(pool_long, _long_call_score)
+    long_row = _best_candidate(pool_long, _long_score)
 
-    higher_calls = [r for r in exp_calls if r.strike > long_call.strike + 1e-6]
-    if not higher_calls:
-        raise ValueError("Insufficient higher Call strikes above ATM for Bull Call Spread")
+    beyond = [r for r in exp_rows if _is_beyond(r.strike, long_row.strike, spec.wing_direction)]
+    if not beyond:
+        side_word, where = ("higher", "above") if is_call else ("lower", "below")
+        raise ValueError(
+            f"Insufficient {side_word} {label} strikes {where} ATM for {spec.strategy_label}"
+        )
 
-    target_cap = (
-        call_wall
-        if (call_wall is not None and call_wall > long_call.strike + 1e-6)
-        else spot * 1.08
-    )
+    if is_call:
+        target = wall if (wall is not None and wall > long_row.strike + 1e-6) else spot * 1.08
+    else:
+        target = wall if (wall is not None and wall < long_row.strike - 1e-6) else spot * 0.92
 
-    def _short_call_score(r: PreparedRow) -> float:
-        wall_bonus = 24.0 if (call_wall is not None and abs(r.strike - call_wall) < 1e-4) else 0.0
-        eff_delta = r.delta if r.delta is not None else 0.30
+    def _short_score(r: PreparedRow) -> float:
+        wall_bonus = 24.0 if (wall is not None and abs(r.strike - wall) < 1e-4) else 0.0
+        eff_delta = _delta_mag(r.delta, 0.30)
         delta_err = abs(eff_delta - 0.28) * 25.0
-        dist_pen = (abs(r.strike - target_cap) / max(spot, 1.0)) * 90.0
+        dist_pen = (abs(r.strike - target) / max(spot, 1.0)) * 90.0
         return liquidity_score(r) + wall_bonus - delta_err - dist_pen
 
-    short_call = _best_candidate(higher_calls, _short_call_score)
-    wall_note = f"Call Wall ${call_wall:g}" if call_wall is not None else "upside OTM cap"
+    short_row = _best_candidate(beyond, _short_score)
+    if is_call:
+        wall_note = f"Call Wall ${wall:g}" if wall is not None else "upside OTM cap"
+        cap_line = f"Short Call ${short_row.strike:g} caps upside right at {wall_note}"
+        short_reason = f"Short Call cap at {wall_note}"
+    else:
+        wall_note = f"Put Wall ${wall:g}" if wall is not None else "downside OTM floor"
+        cap_line = f"Short Put ${short_row.strike:g} caps downside right at {wall_note}"
+        short_reason = f"Short Put floor at {wall_note}"
     rationale = [
-        f"Long Call ${long_call.strike:g} selected near ATM for strong directional Delta leverage.",
-        f"Short Call ${short_call.strike:g} caps upside right at {wall_note} to lower net debit.",
+        (
+            f"Long {label} ${long_row.strike:g} selected near ATM for strong directional "
+            "Delta leverage."
+        ),
+        f"{cap_line} to lower net debit.",
     ]
     legs = [
         StrategyLegInput(
             side="BUY",
-            right="C",
-            expiry=long_call.expiry,
-            strike=long_call.strike,
+            right=spec.right,
+            expiry=long_row.expiry,
+            strike=long_row.strike,
             qty=1,
-            selection_reason="ATM/near-ATM Long Call",
+            selection_reason=f"ATM/near-ATM Long {label}",
         ),
         StrategyLegInput(
             side="SELL",
-            right="C",
-            expiry=short_call.expiry,
-            strike=short_call.strike,
+            right=spec.right,
+            expiry=short_row.expiry,
+            strike=short_row.strike,
             qty=1,
-            selection_reason=f"Short Call cap at {wall_note}",
+            selection_reason=short_reason,
         ),
     ]
     return legs, rationale
@@ -408,7 +515,25 @@ def _select_iron_condor(
     spot: float,
     put_wall: float | None,
     call_wall: float | None,
+    *,
+    expiry: str,
 ) -> tuple[list[StrategyLegInput], list[str]]:
+    """Iron Condor at `expiry`: short Put / Call toward the Walls, protective wings beyond.
+
+    Both rights must be listed at `expiry`; a missing side raises `StrategyFilterError`
+    (`NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS`, or `EMPTY_CHAIN` when neither is listed).
+    """
+    if not exp_puts or not exp_calls:
+        if exp_calls:
+            skip_reason, missing = "NO_PUT_CONTRACTS", "Put"
+        elif exp_puts:
+            skip_reason, missing = "NO_CALL_CONTRACTS", "Call"
+        else:
+            skip_reason, missing = "EMPTY_CHAIN", "Put or Call"
+        raise StrategyFilterError(
+            skip_reason, f"No {missing} contracts at {expiry} for Iron Condor"
+        )
+
     put_pool = [r for r in exp_puts if r.strike < spot - 1e-6 and r.mid > 0.01] or exp_puts
     call_pool = [r for r in exp_calls if r.strike > spot + 1e-6 and r.mid > 0.01] or exp_calls
 
@@ -591,7 +716,14 @@ def try_suggest_strategy_legs_from_walls(
     min_ror_pct: float | None = None,
     entry_price_basis: EntryPriceBasis = "MID",
 ) -> StrategySuggestionOutcome:
-    """Choose preset legs from a chain DataFrame, returning `legs=None` on filter rejection."""
+    """Choose preset legs from a chain DataFrame, returning `legs=None` on filter rejection.
+
+    `min_net_credit_dollars` / `min_ror_pct` drive the credit-vertical search
+    (`BULL_PUT_SPREAD`, `BEAR_CALL_SPREAD`) and are ignored by the other presets.
+    Structural failures raise instead: `StrategyFilterError` for missing contracts
+    (`EMPTY_CHAIN`, Iron Condor `NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS`), otherwise a plain
+    `ValueError` (e.g. insufficient wing strikes).
+    """
     _, spot, rows = prepare_rows(df)
     walls = walls_report or compute_walls(df)
     short_exp, short_dte = pick_target_expiry(rows, target_expiry)
@@ -604,11 +736,13 @@ def try_suggest_strategy_legs_from_walls(
         [r for r in rows if r.expiry == short_exp and r.right == "C"], key=lambda r: r.strike
     )
 
-    if strategy_kind == "BULL_PUT_SPREAD":
-        legs_opt, notes, skip_reason = _select_bull_put_spread(
-            exp_puts,
+    if strategy_kind in ("BULL_PUT_SPREAD", "BEAR_CALL_SPREAD"):
+        is_put_credit = strategy_kind == "BULL_PUT_SPREAD"
+        legs_opt, notes, skip_reason = _select_credit_vertical(
+            exp_puts if is_put_credit else exp_calls,
             spot,
-            put_wall,
+            put_wall if is_put_credit else call_wall,
+            spec=_BULL_PUT if is_put_credit else _BEAR_CALL,
             min_net_credit_dollars=min_net_credit_dollars,
             min_ror_pct=min_ror_pct,
             entry_price_basis=entry_price_basis,
@@ -621,9 +755,13 @@ def try_suggest_strategy_legs_from_walls(
             skip_reason=skip_reason,
         )
     if strategy_kind == "BULL_CALL_SPREAD":
-        legs, notes = _select_bull_call_spread(exp_calls, spot, call_wall)
+        legs, notes = _select_debit_vertical(exp_calls, spot, call_wall, spec=_BULL_CALL)
+    elif strategy_kind == "BEAR_PUT_SPREAD":
+        legs, notes = _select_debit_vertical(exp_puts, spot, put_wall, spec=_BEAR_PUT)
     elif strategy_kind == "IRON_CONDOR":
-        legs, notes = _select_iron_condor(exp_puts, exp_calls, spot, put_wall, call_wall)
+        legs, notes = _select_iron_condor(
+            exp_puts, exp_calls, spot, put_wall, call_wall, expiry=short_exp
+        )
     elif strategy_kind == "DIAGONAL_SPREAD":
         legs, notes = _select_diagonal_spread(rows, short_exp, short_dte, spot, call_wall)
     else:

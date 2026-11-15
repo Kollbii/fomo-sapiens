@@ -175,6 +175,8 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 r_index = await client.get("/")
                 assert r_index.status_code == 200
                 assert "editorial-banner-slot" in r_index.text
+                for seed_sym in Settings().watchlist.hardcoded_tickers:
+                    assert f'"{seed_sym}"' in r_index.text
 
                 r_status = await client.get("/api/status")
                 assert r_status.status_code == 200
@@ -184,7 +186,7 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert st["market_data_mode"] == "DELAYED"
                 assert st["default_market_data_type"] == 3
                 assert st["active_market_data_type"] == 3
-                assert st["watchlist"] == ["NVDA", "AVGO", "CRDO", "PLTR"]
+                assert st["watchlist"] == list(Settings().watchlist.hardcoded_tickers)
                 assert st["dte_min"] == 30
                 assert st["dte_max"] == 120
                 assert st["include_short_dte_for_backtest"] is True
@@ -361,8 +363,15 @@ def test_dashboard_html_static_assets_and_csv_download(
                 'id="greeks-source-badge"',
                 'id="theme-toggle"',
                 'id="editorial-banner-slot"',
-                'id="watchlist-pills"',
-                'id="custom-ticker-input"',
+                'id="watchlist-toggle"',
+                'id="watchlist-panel"',
+                'id="watchlist-rows"',
+                'id="watchlist-add-input"',
+                'id="watchlist-load-selected"',
+                'id="watchlist-load-bar"',
+                'id="watchlist-progress"',
+                '"watchlistMaxSize"',
+                '"watchlistAllowCustom"',
                 'id="range-pct-select"',
                 'id="strike-step-select"',
                 'id="snapshot-select"',
@@ -431,7 +440,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261114c"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115b"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -458,7 +467,9 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".chain-add-leg-btn" in r_css.text
             assert ".snap-picker__panel" in r_css.text
             assert ".panel-card--backtest" in r_css.text
-            assert len(sheets) == 11
+            assert len(sheets) == 12
+            assert "/static/css/screener.css" in sheets
+            assert ".screener-scroll" in r_css.text
 
             # Dashboard ES modules: crawl the import graph from the served entry point.
             r_main = await client.get("/static/js/dashboard/main.js")
@@ -505,7 +516,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261114c">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115b">' in html
             assert html.count('<option value="">Auto (Follow Walls)</option>') == 2
             assert 'id="collector-control"' not in html
             assert "Delayed Type 3/4 Feed" not in r_js.text
@@ -605,8 +616,15 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'data-panel-target="corridor"' in html
             assert 'data-panel-target="trade_ledger"' in html
             assert 'data-panel-target="backtest"' in html
+            assert 'data-panel-target="best_option"' in html
+            assert 'data-panel-id="best_option"' in html
+            assert 'id="best-option-card"' in html
+            assert 'id="screener-body"' in html
+            assert 'data-strategy-preset="BEAR_CALL_SPREAD"' in html
+            assert 'data-strategy-preset="BEAR_PUT_SPREAD"' in html
+            assert "ibkr_screener_prefs_v1" in r_js.text
             assert "panel-toggle-btn" not in html
-            assert html.count('class="panel-toggle-pill') == 8
+            assert html.count('class="panel-toggle-pill') == 9
             assert 'data-panel-id="corridor"' in html
             assert 'data-panel-id="trade_ledger"' in html
             assert 'data-panel-id="backtest"' in html
@@ -779,6 +797,8 @@ def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
                 "BULL_CALL_SPREAD",
                 "DIAGONAL_SPREAD",
                 "IRON_CONDOR",
+                "BEAR_CALL_SPREAD",
+                "BEAR_PUT_SPREAD",
             ]
             condor = payload["evaluations"][3]
             assert len(condor["legs"]) == 4

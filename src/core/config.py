@@ -53,6 +53,8 @@ class IBKRSettings(_StrictModel):
     port: int = Field(default=4001, ge=1, le=65535)
     client_id: int = Field(default=77, ge=0)
     connect_timeout_sec: float = Field(default=3.0, gt=0)
+    #: Upper bound for every awaited IBKR request (`run_stage`); upstream loss fails faster.
+    request_timeout_sec: float = Field(default=20.0, gt=0, le=120)
     read_only_enforced: bool = True
     market_data_mode: Literal["DELAYED", "LIVE"] = "DELAYED"
     default_market_data_type: int = Field(default=3, ge=1, le=4)
@@ -124,11 +126,43 @@ class IBKRSettings(_StrictModel):
         return self
 
 
+WATCHLIST_MAX_SIZE_LIMIT = 50
+
+
 class WatchlistSettings(_StrictModel):
     default_ticker: str = "NVDA"
-    hardcoded_tickers: tuple[str, ...] = ("NVDA", "AVGO", "CRDO", "PLTR")
+    hardcoded_tickers: tuple[str, ...] = (
+        "NVDA",
+        "AVGO",
+        "CRDO",
+        "MRVL",
+        "META",
+        "MSFT",
+        "AMZN",
+        "TSLA",
+        "SPCX",
+        "LITE",
+        "AMD",
+        "ORCL",
+        "PLTR",
+        "ALAB",
+        "MU",
+        "GOOGL",
+    )
     allow_custom_ticker: bool = True
     custom_ticker_regex: str = "^[A-Z]{1,5}$"
+    max_size: int = Field(default=20, ge=1, le=WATCHLIST_MAX_SIZE_LIMIT)
+    # Per-ticker wall-clock cap inside a batch refresh; exceeding it stops the batch (`aborted`).
+    batch_ticker_timeout_sec: float = Field(default=240.0, ge=30.0, le=1800.0)
+
+    @model_validator(mode="after")
+    def _check_seed_fits_max_size(self) -> WatchlistSettings:
+        if len(self.hardcoded_tickers) > self.max_size:
+            raise ValueError(
+                f"watchlist.hardcoded_tickers has {len(self.hardcoded_tickers)} entries; "
+                f"must be <= watchlist.max_size ({self.max_size})"
+            )
+        return self
 
 
 class OptionsChainSettings(_StrictModel):

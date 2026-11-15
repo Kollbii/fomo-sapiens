@@ -736,3 +736,18 @@ def test_sync_from_ledger_report_campaigns_gcd_covered_call_unlinked_and_close(
     manual_after = next(t for t in res2.trades if t.id == manual_trade.id)
     assert manual_after.status == "ACTIVE"
     assert manual_after.source == "MANUAL"
+
+
+def test_quote_active_trades_handles_corrupt_paper_trades_file(tmp_path: Path) -> None:
+    """Corrupt paper_trades.json does not raise; returns ERROR quote record and warning notice."""
+    svc, _clock, _fetcher, _repo = _make_service(tmp_path)
+    reg_file = svc.store.registry_path
+    reg_file.write_text("NOT_VALID_JSON{{{", encoding="utf-8")
+
+    rec, notices = run_coro(svc.quote_active_trades_for_refresh("NVDA"))
+    assert rec is not None
+    assert rec.status == "ERROR"
+    assert rec.ticker == "NVDA"
+    assert "paper_trades.json unreadable" in (rec.error or "")
+    assert len(notices) == 1
+    assert "Paper trade leg quote refresh warning for NVDA" in notices[0]

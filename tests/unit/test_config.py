@@ -14,12 +14,33 @@ from src.core.config import (
     PaperTrackerSettings,
     Settings,
     StorageSettings,
+    WatchlistSettings,
     configure_logging,
     get_settings,
     load_settings,
     resolve_project_path,
 )
 from src.core.exceptions import ConfigurationError
+from src.core.security import DEFAULT_WATCHLIST
+
+SEED_WATCHLIST = (
+    "NVDA",
+    "AVGO",
+    "CRDO",
+    "MRVL",
+    "META",
+    "MSFT",
+    "AMZN",
+    "TSLA",
+    "SPCX",
+    "LITE",
+    "AMD",
+    "ORCL",
+    "PLTR",
+    "ALAB",
+    "MU",
+    "GOOGL",
+)
 
 ENV_VARS = (
     "IBKR_HOST",
@@ -56,7 +77,10 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.ibkr.default_market_data_type == 3
     assert s.ibkr.fallback_market_data_type == 4
     assert s.ibkr.market_data_mode == "DELAYED"
-    assert s.watchlist.hardcoded_tickers == ("NVDA", "AVGO", "CRDO", "PLTR")
+    assert s.ibkr.request_timeout_sec == 20.0
+    assert s.watchlist.hardcoded_tickers == SEED_WATCHLIST
+    assert s.watchlist.default_ticker == "NVDA"
+    assert s.watchlist.max_size == 20
     assert s.options_chain.max_contracts_per_page == 80
     assert s.options_chain.dte_min == 30
     assert s.options_chain.dte_max == 120
@@ -119,6 +143,28 @@ def test_unknown_key_rejected(tmp_path: Path) -> None:
     y.write_text("ibkr:\n  bogus: 1\n")
     with pytest.raises(ConfigurationError):
         load_settings(y, tmp_path / "x.env")
+
+
+def test_request_timeout_sec_yaml_override_and_bounds(tmp_path: Path) -> None:
+    y = tmp_path / "s.yaml"
+    y.write_text("ibkr:\n  request_timeout_sec: 45\n")
+    assert load_settings(y, tmp_path / "x.env").ibkr.request_timeout_sec == 45.0
+    for bad in ("0", "-5", "121"):
+        y.write_text(f"ibkr:\n  request_timeout_sec: {bad}\n")
+        with pytest.raises(ConfigurationError):
+            load_settings(y, tmp_path / "x.env")
+
+
+def test_batch_ticker_timeout_sec_default_override_and_bounds(tmp_path: Path) -> None:
+    y = tmp_path / "s.yaml"
+    y.write_text("")
+    assert load_settings(y, tmp_path / "x.env").watchlist.batch_ticker_timeout_sec == 240.0
+    y.write_text("watchlist:\n  batch_ticker_timeout_sec: 600\n")
+    assert load_settings(y, tmp_path / "x.env").watchlist.batch_ticker_timeout_sec == 600.0
+    for bad in ("0", "29.9", "1801"):
+        y.write_text(f"watchlist:\n  batch_ticker_timeout_sec: {bad}\n")
+        with pytest.raises(ConfigurationError):
+            load_settings(y, tmp_path / "x.env")
 
 
 def test_get_settings_cached() -> None:
@@ -301,3 +347,27 @@ def test_corridor_settings_bounds_and_cap_validator() -> None:
         CorridorSettings(default_window_strikes=16)
     with pytest.raises(ValidationError):
         CorridorSettings(hard_max_contracts=91)
+
+
+def test_watchlist_settings_defaults_max_size_bounds_and_seed_cap(tmp_path: Path) -> None:
+    wl = WatchlistSettings()
+    assert wl.hardcoded_tickers == SEED_WATCHLIST
+    assert wl.hardcoded_tickers == DEFAULT_WATCHLIST
+    assert wl.default_ticker == "NVDA"
+    assert wl.max_size == 20
+    assert load_settings(tmp_path / "nope.yaml", tmp_path / "nope.env").watchlist == wl
+
+    assert WatchlistSettings(hardcoded_tickers=("NVDA",), max_size=1).max_size == 1
+    assert WatchlistSettings(max_size=50).max_size == 50
+    assert WatchlistSettings(hardcoded_tickers=(), max_size=1).hardcoded_tickers == ()
+    with pytest.raises(ValidationError):
+        WatchlistSettings(max_size=0)
+    with pytest.raises(ValidationError):
+        WatchlistSettings(max_size=51)
+    with pytest.raises(ValidationError, match=r"must be <= watchlist\.max_size \(15\)"):
+        WatchlistSettings(max_size=15)
+
+    yaml_path = tmp_path / "settings.yaml"
+    yaml_path.write_text("watchlist:\n  max_size: 10\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError):
+        load_settings(yaml_path, tmp_path / "nope.env")
