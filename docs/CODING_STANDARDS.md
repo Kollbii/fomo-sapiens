@@ -105,6 +105,8 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies `WatchlistStore` lazy seed, add/remove, dedupe/order, `watchlist.max_size` cap (`WatchlistCapError`), `allow_custom_ticker` guard, corrupt-file notice + `watchlist.corrupt.json` backup, empty-list persistence, and atomic writes.
 24. **`tests/integration/test_watchlist_api.py`:**
    - Verifies `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel`, and the `WATCHLIST_FULL` / `STORAGE_UNAVAILABLE` / `BATCH_NOT_FOUND` / `REFRESH_BUSY` / `INVALID_TICKER` error mapping.
+24a. **`tests/unit/test_watchlist_marquee_js.py`:**
+   - Verifies pure marquee/range helpers and Node.js ES-module `watchlist.js` behavior: `>= 5px` drag threshold, `[data-wl-remove]` and non-primary click exclusion, live `.wl-marquee` / `.is-marquee` preview (including mid-drag `updateRows()`/`renderRows()` batch-poll preservation), `Ctrl`/`Cmd` additive check, `Shift+Click` forward/backward range selection, `24px` `requestAnimationFrame` edge auto-scroll, `Escape`/toggle cancel cleanup, and post-drag click/change suppression.
 25. **`tests/integration/test_backtest_api.py`:**
    - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, `POST /api/backtest/paper-trades/sync-ledger`, fill-anchored Ledger replay (with chain snapshots and synthetic `LEDGER_MTM` fallback), structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
 
