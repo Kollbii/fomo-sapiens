@@ -444,7 +444,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115d"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261115e"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -471,6 +471,8 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".alert-banner-close" in r_css.text
             assert ".chain-add-leg-btn" in r_css.text
             assert ".snap-picker__panel" in r_css.text
+            assert ".wl-marquee" in r_css.text
+            assert ".wl-row.is-marquee" in r_css.text
             assert ".panel-card--backtest" in r_css.text
             assert len(sheets) == 12
             assert "/static/css/screener.css" in sheets
@@ -521,7 +523,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115d">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261115e">' in html
             assert 'source === "CACHED_PREVIEW"' not in r_js.text
             assert 'source !== "CACHED_PREVIEW"' not in r_js.text
             assert "GATEWAY TIMEOUT \\u2022 SOCKET RESET" in r_js.text
