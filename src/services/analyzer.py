@@ -15,7 +15,7 @@ import math
 from collections import Counter
 from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 
@@ -54,6 +54,7 @@ from src.core.exceptions import (
     InvalidTickerError,
     RefreshBusyError,
     SnapshotNotFoundError,
+    StorageSchemaError,
 )
 from src.core.security import TickerValidator
 from src.services.corridor import (
@@ -98,6 +99,7 @@ from src.storage.schema import (
 from src.storage.watchlist_store import WatchlistStore, resolve_watchlist_path
 
 logger = logging.getLogger(__name__)
+_CONID_SEED_MAX_AGE = timedelta(days=7)
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +193,11 @@ class AnalyzerService:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
         self.broker_client = broker_client or IBKRBrokerClient(self.settings)
-        self.fetcher = fetcher or PagedOptionChainFetcher(self.broker_client, self.settings)
+        self.fetcher = fetcher or PagedOptionChainFetcher(
+            self.broker_client,
+            self.settings,
+            known_conids_loader=self._load_known_option_conids,
+        )
         self.validator = TickerValidator(
             watchlist=self.settings.watchlist.hardcoded_tickers,
             allow_custom=self.settings.watchlist.allow_custom_ticker,
@@ -276,6 +282,52 @@ class AnalyzerService:
         dt = self.fetcher.clock()
         aware = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
         return aware.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _load_known_option_conids(self, raw_ticker: str) -> dict[tuple[str, float, str], int]:
+        """Seed `(expiry_YYYYMMDD, strike, right) -> option_conid` from fresh latest CSV."""
+        try:
+            symbol = TickerValidator.validate(raw_ticker)
+            df = self.repo.load_latest(symbol)
+        except (InvalidTickerError, SnapshotNotFoundError, StorageSchemaError, OSError):
+            return {}
+        if df.height == 0:
+            return {}
+        raw_ts = df["snapshot_ts_utc"][0]
+        if not isinstance(raw_ts, str) or not raw_ts:
+            return {}
+        try:
+            snap_ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            return {}
+        snap_utc = (
+            snap_ts.replace(tzinfo=UTC) if snap_ts.tzinfo is None else snap_ts.astimezone(UTC)
+        )
+        now = self.fetcher.clock()
+        now_utc = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+        if (now_utc - snap_utc) > _CONID_SEED_MAX_AGE:
+            return {}
+
+        known: dict[tuple[str, float, str], int] = {}
+        for row_sym, raw_exp, raw_strike, raw_right, raw_conid in df.select(
+            ["underlying", "expiry", "strike", "right", "option_conid"]
+        ).iter_rows():
+            if str(row_sym or "").upper() != symbol:
+                continue
+            if raw_conid is None or int(raw_conid) <= 0:
+                continue
+            exp_clean = str(raw_exp or "").strip().replace("-", "")[:8]
+            if len(exp_clean) != 8 or not exp_clean.isdigit():
+                continue
+            right_u = str(raw_right or "").strip().upper()
+            if right_u not in ("C", "P"):
+                continue
+            if raw_strike is None:
+                continue
+            strike_k = round(float(raw_strike), 6)
+            if strike_k <= 0.0:
+                continue
+            known[(exp_clean, strike_k, right_u)] = int(raw_conid)
+        return known
 
     async def acquire_refresh(self, owner: str, timeout_sec: float = 0.0) -> bool:
         """Acquire the IBKR 100-line budget lock; waits up to `timeout_sec` when `> 0`."""

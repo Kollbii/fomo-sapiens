@@ -377,7 +377,8 @@ def test_prefetch_exact_per_expiration_strikes_eliminates_phantom_strikes_and_qu
     async def _rec_sleep(sec: float) -> None:
         sleeps.append(sec)
 
-    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    exact_settings = Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=True))
+    client = IBKRBrokerClient(exact_settings, ib_factory=lambda: fake_ib)
     fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=_rec_sleep)
 
     res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=None))
@@ -431,6 +432,7 @@ def test_exact_strike_prefetch_ttl_cache_and_expiration() -> None:
 
     settings = Settings(
         options_chain=OptionsChainSettings(
+            prefetch_exact_strikes=True,
             contract_details_cache_ttl_sec=300.0,
             contract_details_cooldown_sec=0.05,
         )

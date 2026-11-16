@@ -54,7 +54,7 @@ class IBKRSettings(_StrictModel):
     client_id: int = Field(default=77, ge=0)
     connect_timeout_sec: float = Field(default=3.0, gt=0)
     #: Upper bound for every awaited IBKR request (`run_stage`); upstream loss fails faster.
-    request_timeout_sec: float = Field(default=20.0, gt=0, le=120)
+    request_timeout_sec: float = Field(default=25.0, gt=0, le=120)
     read_only_enforced: bool = True
     market_data_mode: Literal["DELAYED", "LIVE"] = "DELAYED"
     default_market_data_type: int = Field(default=3, ge=1, le=4)
@@ -155,7 +155,11 @@ class WatchlistSettings(_StrictModel):
     # Per-ticker wall-clock cap inside a batch refresh; exceeding it stops the batch (`aborted`).
     batch_ticker_timeout_sec: float = Field(default=240.0, ge=30.0, le=1800.0)
     # Inter-ticker cooldown inside a batch refresh to give IB Gateway pacing slots time to recover.
-    batch_inter_ticker_cooldown_sec: float = Field(default=1.5, ge=0.0, le=30.0)
+    batch_inter_ticker_cooldown_sec: float = Field(default=2.5, ge=0.0, le=30.0)
+    # Max transient Gateway time-out retries across one batch (at most 1 retry per ticker).
+    batch_timeout_retries: int = Field(default=2, ge=0, le=5)
+    # Cooldown after socket recycle before retrying a timed-out ticker in a batch.
+    batch_timeout_retry_cooldown_sec: float = Field(default=10.0, ge=0.0, le=60.0)
 
     @model_validator(mode="after")
     def _check_seed_fits_max_size(self) -> WatchlistSettings:
@@ -182,7 +186,7 @@ class OptionsChainSettings(_StrictModel):
     page_collect_timeout_sec: float = Field(default=2.25, gt=0)
     page_poll_interval_sec: float = Field(default=0.25, gt=0)
     inter_page_cooldown_sec: float = Field(default=0.35, ge=0)
-    prefetch_exact_strikes: bool = True
+    prefetch_exact_strikes: bool = False
     contract_details_timeout_sec: float = Field(default=15.0, gt=0)
     contract_details_cooldown_sec: float = Field(default=0.10, ge=0)
     contract_details_cache_ttl_sec: float = Field(default=900.0, ge=0)

@@ -204,7 +204,7 @@ class _HangingRequest:
 
 
 def test_request_timeout_setting_default_and_bounds() -> None:
-    assert IBKRSettings().request_timeout_sec == 20.0
+    assert IBKRSettings().request_timeout_sec == 25.0
     assert IBKRSettings(request_timeout_sec=120).request_timeout_sec == 120.0
     for bad in (0, -1.0, 120.5):
         with pytest.raises(ValueError):
@@ -234,13 +234,13 @@ def test_run_stage_times_out_recycles_socket_and_tracks_connection_state() -> No
         with pytest.raises(GatewayTimeoutError) as exc_info:
             await client.run_stage("underlying qualification (NVDA)", hang())
         assert str(exc_info.value) == (
-            "IBKR Gateway did not answer during underlying qualification (NVDA) within 20 s"
+            "IBKR Gateway did not answer during underlying qualification (NVDA) within 25 s"
         )
         elapsed = loop.time() - t0
         await asyncio.sleep(0)  # let the abandoned request task observe its cancellation
         return elapsed
 
-    assert run_virtual_loop(_run()) == pytest.approx(20.0)
+    assert run_virtual_loop(_run()) == pytest.approx(25.0)
     assert hang.cancelled == 1
     assert not client.is_connected
     assert not client.was_connected
@@ -301,7 +301,7 @@ def test_disconnect_code_fails_pending_stage_immediately(code: int) -> None:
         await asyncio.sleep(0)
         return elapsed
 
-    assert run_virtual_loop(_run()) == pytest.approx(1.0)  # not the 20 s time-out
+    assert run_virtual_loop(_run()) == pytest.approx(1.0)  # not the 25 s time-out
     assert hang.cancelled == 1
     assert client._stage_aborts == set()
 
@@ -469,13 +469,16 @@ def test_qualify_contracts_chunks_with_pacing_and_aborts_on_loss() -> None:
         sleeps.append(sec)
 
     fake_ib.qualify_handler = _chunk_qualify
-    contracts = [Option("NVDA", "20261218", 100.0 + idx, "C", "SMART") for idx in range(25)]
+    contracts = [
+        Option("NVDA", "20261218", 100.0 + idx, "C", "SMART")
+        for idx in range(QUALIFY_CHUNK_SIZE * 2 + 5)
+    ]
     res = run_coro(client.qualify_contracts(contracts, sleep=_rec_sleep))
     assert batches == [QUALIFY_CHUNK_SIZE, QUALIFY_CHUNK_SIZE, 5]
     assert sleeps == [QUALIFY_CHUNK_PAUSE_SEC, QUALIFY_CHUNK_PAUSE_SEC]
-    assert len(res) == 25
-    assert all(c.conId > 0 for c in res[:23])
-    assert all(c.conId == 0 for c in res[23:])
+    assert len(res) == QUALIFY_CHUNK_SIZE * 2 + 5
+    assert all(c.conId > 0 for c in res[: QUALIFY_CHUNK_SIZE * 2 + 3])
+    assert all(c.conId == 0 for c in res[QUALIFY_CHUNK_SIZE * 2 + 3 :])
 
     # Upstream loss arriving during the inter-chunk pause aborts before the next chunk.
     client2, fake_ib2 = _connected_client()
@@ -495,7 +498,36 @@ def test_qualify_contracts_chunks_with_pacing_and_aborts_on_loss() -> None:
     batch15 = [Option("NVDA", "20261218", 100.0 + idx, "C", "SMART") for idx in range(15)]
     with pytest.raises(GatewayConnectionError, match=r"upstream connection.*IBKR 1100"):
         run_coro(client2.qualify_contracts(batch15, sleep=_lose_link))
+    assert QUALIFY_CHUNK_SIZE == 8
+    assert QUALIFY_CHUNK_PAUSE_SEC == 0.45
     assert sent == [QUALIFY_CHUNK_SIZE]
+
+
+def test_error_200_tracking_reset_and_consume_without_failing_stage() -> None:
+    client, fake_ib = _connected_client()
+    assert client.contract_not_found_count == 0
+    assert client.consume_contract_not_found() == 0
+
+    fake_ib.errorEvent.emit(10, 200, "No security definition has been found for the request", None)
+    fake_ib.errorEvent.emit(11, 200, "No security definition has been found for the request", None)
+    assert client.contract_not_found_count == 2
+    assert client.consume_pacing_warning() is False
+    assert client.link_loss_seq == 0
+    assert client.is_connected
+
+    assert client.consume_contract_not_found() == 2
+    assert client.contract_not_found_count == 0
+    assert client.consume_contract_not_found() == 0
+
+    fake_ib.errorEvent.emit(12, 200, "No security definition has been found for the request", None)
+    assert client.contract_not_found_count == 1
+    client.reset_contract_not_found()
+    assert client.contract_not_found_count == 0
+
+    fake_ib.errorEvent.emit(13, 200, "No security definition has been found for the request", None)
+    assert client.contract_not_found_count == 1
+    client.reset_market_data_type()
+    assert client.contract_not_found_count == 0
 
 
 def test_qualify_contracts_replaces_none_and_non_contract_slots_in_same_length_chunk() -> None:

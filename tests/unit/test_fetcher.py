@@ -852,7 +852,10 @@ def test_upstream_loss_during_exact_prefetch_propagates_instead_of_fallback() ->
         return []
 
     fake_ib.contract_details_handler = _details
-    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    client = IBKRBrokerClient(
+        Settings(options_chain=OptionsChainSettings(prefetch_exact_strikes=True)),
+        ib_factory=lambda: fake_ib,
+    )
     fetcher = PagedOptionChainFetcher(client, clock=lambda: _PROGRESS_NOW, sleep=noop_sleep)
     progress = ChainFetchProgress()
     with pytest.raises(GatewayConnectionError, match=r"exact contract prefetch.*IBKR 2110"):
@@ -945,6 +948,253 @@ def test_qualify_option_contracts_chunks_above_ten_with_pacing() -> None:
         sleep=_rec_sleep,
     )
     res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
-    assert opt_batch_sizes == [QUALIFY_CHUNK_SIZE, 4]
+    assert opt_batch_sizes == [QUALIFY_CHUNK_SIZE, 14 - QUALIFY_CHUNK_SIZE]
     assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
     assert len(res.rows) == 14
+
+
+def test_known_conids_seeded_and_reused_across_dte_shift_and_pass2() -> None:
+    fake_ib = FakeChainIB()
+    clock_state = [datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)]
+    exp_pass1 = "20261218"  # 37 DTE on Nov 11, 36 DTE on Nov 12
+    exp_pass2 = "20261120"  # 9 DTE on Nov 11, 8 DTE on Nov 12
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp_pass2, exp_pass1],
+            strikes=[135.0, 140.0],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+
+    qualified_calls: list[list[tuple[str, float, str]]] = []
+    next_conid = 50_000
+
+    async def _track_qualify(*contracts: Any) -> list[Any]:
+        nonlocal next_conid
+        if contracts and getattr(contracts[0], "secType", "") == "OPT":
+            qualified_calls.append(
+                [
+                    (
+                        str(c.lastTradeDateOrContractMonth),
+                        float(c.strike),
+                        str(c.right),
+                    )
+                    for c in contracts
+                ]
+            )
+            for c in contracts:
+                next_conid += 1
+                c.conId = next_conid
+            return list(contracts)
+        for c in contracts:
+            c.conId = 4815
+        return list(contracts)
+
+    fake_ib.qualifyContractsAsync = _track_qualify  # type: ignore[method-assign]
+
+    seed_calls: list[str] = []
+
+    def _loader(sym: str) -> dict[tuple[str, float, str], int]:
+        seed_calls.append(sym)
+        return {
+            (exp_pass1, 140.0, "C"): 77_001,
+            (exp_pass1, 140.0, "P"): 77_002,
+        }
+
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        clock=lambda: clock_state[0],
+        sleep=noop_sleep,
+        known_conids_loader=_loader,
+    )
+
+    # Pull 1 (Day 1, DTE=37 / 9): 140 C/P from disk seed are skipped; 135 C/P and Pass 2 qualify.
+    res1 = run_coro(
+        fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True)
+    )
+    assert seed_calls == ["NVDA"]
+    assert len(qualified_calls) == 2  # Pass 1 (135 C/P) + Pass 2 (4 contracts)
+    assert sorted(qualified_calls[0]) == [(exp_pass1, 135.0, "C"), (exp_pass1, 135.0, "P")]
+    assert len(qualified_calls[1]) == 4
+    assert {
+        r.option_conid for r in res1.rows if r.expiry == "2026-12-18" and r.strike == 140.0
+    } == {
+        77_001,
+        77_002,
+    }
+
+    # Pull 2 (Day 2, DTE shifted 37->36, 9->8): ALL contracts reuse session cache (0 OPT qualifies).
+    qualified_calls.clear()
+    clock_state[0] = clock_state[0] + timedelta(days=1)
+    res2 = run_coro(
+        fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0, include_short_dte=True)
+    )
+    assert seed_calls == ["NVDA"]  # disk seed called only once per session
+    assert qualified_calls == []
+    assert len(res2.rows) == 8
+    assert sorted({r.dte for r in res2.rows}) == [8, 36]
+
+
+def test_non_standard_trading_class_or_multiplier_ignores_disk_conid_seed() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    exp = (now.date() + timedelta(days=37)).strftime("%Y%m%d")
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA2",
+            multiplier="100",
+            expirations=[exp],
+            strikes=[140.0],
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+    loader_calls: list[str] = []
+    qualified_opts: list[int] = []
+
+    async def _track_qualify(*contracts: Any) -> list[Any]:
+        for idx, c in enumerate(contracts, start=1):
+            if getattr(c, "secType", "") == "OPT":
+                qualified_opts.append(int(getattr(c, "conId", 0) or 0))
+                c.conId = 88_000 + idx
+            else:
+                c.conId = 4815
+        return list(contracts)
+
+    def _non_std_loader(sym: str) -> dict[tuple[str, float, str], int]:
+        loader_calls.append(sym)
+        return {(exp, 140.0, "C"): 99_999}
+
+    fake_ib.qualifyContractsAsync = _track_qualify  # type: ignore[method-assign]
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        clock=lambda: now,
+        sleep=noop_sleep,
+        known_conids_loader=_non_std_loader,
+    )
+
+    # First pull qualifies NVDA2 via IBKR without touching standard disk seed.
+    res1 = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    assert loader_calls == []
+    assert qualified_opts == [0, 0]
+    assert {r.option_conid for r in res1.rows} == {88_001, 88_002}
+
+    # Second pull in same session still reuses in-session qualified NVDA2 conIds!
+    qualified_opts.clear()
+    res2 = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    assert qualified_opts == []
+    assert {r.option_conid for r in res2.rows} == {88_001, 88_002}
+
+
+def test_stale_precached_conid_triggers_error_200_self_heal_and_requalifies() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 11, 15, 30, 0, tzinfo=UTC)
+    exp = (now.date() + timedelta(days=37)).strftime("%Y%m%d")
+    # 3 strikes * 2 rights = 6 contracts -> with max_contracts_per_page=4: Page 1 (4), Page 2 (2).
+    strikes = [135.0, 140.0, 145.0]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=[exp],
+            strikes=strikes,
+        )
+    ]
+
+    stale_conids = {
+        (exp, 135.0, "C"): 91_001,
+        (exp, 135.0, "P"): 91_002,
+        (exp, 140.0, "C"): 91_003,
+        (exp, 140.0, "P"): 91_004,
+        (exp, 145.0, "C"): 91_005,
+        (exp, 145.0, "P"): 91_006,
+    }
+    seed_calls: list[str] = []
+    qualify_batches: list[list[tuple[float, str, int]]] = []
+    orig_req = fake_ib.reqMktData
+
+    async def _qualify(*contracts: Any) -> list[Any]:
+        if contracts and getattr(contracts[0], "secType", "") == "STK":
+            contracts[0].conId = 4815
+            return [contracts[0]]
+        qualify_batches.append(
+            [(float(c.strike), str(c.right), int(getattr(c, "conId", 0) or 0)) for c in contracts]
+        )
+        kept: list[Any] = []
+        for idx, c in enumerate(contracts):
+            if float(c.strike) == 145.0 and str(c.right) == "P":
+                # Simulate 1 stale/delisted contract rejected by IBKR during re-qualification
+                c.conId = 0
+                continue
+            c.conId = 60_000 + idx
+            kept.append(c)
+        return kept
+
+    fake_ib.qualifyContractsAsync = _qualify  # type: ignore[method-assign]
+
+    def _req_mkt_data(contract: Any, genericTickList: str = "", *args: Any, **kwargs: Any) -> Any:  # noqa: N803
+        ticker = orig_req(contract, genericTickList, *args, **kwargs)
+        if (
+            getattr(contract, "secType", "") == "OPT"
+            and int(getattr(contract, "conId", 0)) >= 91_000
+        ):
+            fake_ib.errorEvent.emit(
+                100, 200, "No security definition has been found for the request", contract
+            )
+            # Empty quotes for stale conId (must NOT trigger Type 3 -> 4 fallback before heal!)
+            return SimpleNamespace(
+                contract=contract,
+                bid=-1.0,
+                ask=-1.0,
+                last=-1.0,
+                close=-1.0,
+                volume=0,
+                callOpenInterest=0,
+                putOpenInterest=0,
+                modelGreeks=None,
+            )
+        return ticker
+
+    fake_ib.reqMktData = _req_mkt_data  # type: ignore[method-assign]
+    fake_ib.ticker_factory = lambda c, _t: _stk_ticker(c) if c.secType == "STK" else _opt_ticker(c)
+
+    def _stale_loader(sym: str) -> dict[tuple[str, float, str], int]:
+        seed_calls.append(sym)
+        return stale_conids
+
+    settings = Settings(options_chain=OptionsChainSettings(max_contracts_per_page=4))
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(
+        client,
+        settings,
+        clock=lambda: now,
+        sleep=noop_sleep,
+        known_conids_loader=_stale_loader,
+    )
+
+    res = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    # Initial pass skipped qualify; Page 1 hit Error 200 -> reset all 6 unverified conIds & healed!
+    assert qualify_batches == [
+        [(135.0, "C", 0), (135.0, "P", 0), (140.0, "C", 0), (140.0, "P", 0)],
+        [(145.0, "C", 0), (145.0, "P", 0)],
+    ]
+    assert len(res.rows) == 5  # 6 minus 1 rejected on re-qualify
+    assert all(60_000 <= r.option_conid < 60_010 for r in res.rows)
+    assert res.market_data_type == 3  # stayed Type 3 instead of false Type 3 -> 4 switch
+    assert len(fake_ib.subscribed) == len(fake_ib.cancelled)  # 100% cancel parity incl. failed try
+    assert any("error 200" in n.lower() for n in res.notices)
+    assert any("filtered out 1 unqualified" in n.lower() for n in res.notices)
+
+    # Subsequent pull in the same session ignores stale disk seed and reuses healed conIds cleanly.
+    qualify_batches.clear()
+    res2 = run_coro(fetcher.fetch_option_chain("NVDA", range_pct=0.20, strike_step=5.0))
+    assert seed_calls == ["NVDA"]
+    # Only the rejected (145.0, P) isn't cached, so only that 1 contract tries qualify and drops.
+    assert qualify_batches == [[(145.0, "P", 0)]]
+    assert len(res2.rows) == 5

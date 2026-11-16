@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -12,6 +12,7 @@ import polars as pl
 import pytest
 
 from src.analytics.strategies import StrategyLegInput
+from src.broker.client import IBKRBrokerClient
 from src.broker.contracts import ChainPlan, ExpirationMatch, StrikeSelection, UnderlyingInfo
 from src.broker.fetcher import ExactContractSpec, ExactQuoteResult, FetchResult
 from src.core.config import LedgerSettings, PaperTrackerSettings, Settings
@@ -28,6 +29,7 @@ from src.storage.ledger_repository import LedgerRepository
 from src.storage.ledger_schema import LedgerPositionRow
 from src.storage.schema import OptionContractRow, SpotSource
 from tests.support.aio import noop_sleep, run_coro, run_virtual_loop
+from tests.support.ib_fakes import FakeChainIB
 
 _SNAP_ID = "NVDA_20261111_193000"
 _SNAP_TS = "2026-11-11T19:30:00Z"
@@ -869,3 +871,95 @@ def test_corridor_settings_caps_reflected_in_status_and_selection(tmp_path: Path
     gen = run_coro(svc.open_corridor_stream("NVDA", max_contracts=88))
     run_coro(anext(gen))
     assert captured_selections[-1].max_contracts == 50
+
+
+def test_analyzer_service_seeds_known_conids_from_fresh_latest_csv_only(tmp_path: Path) -> None:
+    settings = Settings(
+        ledger=LedgerSettings(ledger_dir="data/ledger"),
+        tracker=PaperTrackerSettings(tracked_dir="data/tracked"),
+    )
+    repo = CSVRepository(settings.storage, root=tmp_path)
+    fake_ib = FakeChainIB()
+    client = IBKRBrokerClient(settings, ib_factory=lambda: fake_ib)
+    clock_state = [datetime(2026, 11, 18, 19, 30, 0, tzinfo=UTC)]
+
+    svc = AnalyzerService(settings=settings, repo=repo, broker_client=client)
+    svc.fetcher.clock = lambda: clock_state[0]
+    svc.fetcher.discovery.clock = lambda: clock_state[0]
+    svc.fetcher.sleep = noop_sleep
+    svc.fetcher.discovery.sleep = noop_sleep
+
+    assert svc.fetcher._known_conids_loader is not None
+    # Missing CSV -> empty dict cleanly.
+    assert svc._load_known_option_conids("NVDA") == {}
+
+    # Seed latest CSV with snapshot timestamp 2026-11-11T19:30:00Z (exact 7d boundary at Nov 18).
+    svc.repo.save_snapshot("NVDA", [r.model_dump() for r in _sample_rows()], spot_source="MID")
+    assert svc._load_known_option_conids("NVDA") == {
+        ("20261218", 135.0, "P"): 9001,
+        ("20261218", 140.0, "P"): 9002,
+        ("20261218", 145.0, "C"): 9003,
+        ("20261218", 150.0, "C"): 9004,
+    }
+
+    # Older than 7 days -> ignored.
+    clock_state[0] = clock_state[0] + timedelta(seconds=1)
+    assert svc._load_known_option_conids("NVDA") == {}
+
+    # Corrupt latest CSV without valid archive -> ignored without raising.
+    svc.repo.latest_path("AVGO").parent.mkdir(parents=True, exist_ok=True)
+    svc.repo.latest_path("AVGO").write_text("bad,header\n1,2\n", encoding="utf-8")
+    assert svc._load_known_option_conids("AVGO") == {}
+
+    # End-to-end verification inside refresh_chain: seeded conIds skip option qualifyContractsAsync.
+    clock_state[0] = datetime(2026, 11, 13, 19, 30, 0, tzinfo=UTC)  # 2 days old (< 7d)
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=["20261218"],
+            strikes=[135.0, 140.0, 145.0, 150.0],
+        )
+    ]
+    qualified_opts: list[tuple[float, str]] = []
+
+    async def _track_qualify(*contracts: Any) -> list[Any]:
+        for idx, c in enumerate(contracts, start=1):
+            if getattr(c, "secType", "") == "OPT":
+                qualified_opts.append((float(c.strike), str(c.right)))
+                c.conId = 80_000 + idx
+            else:
+                c.conId = 4815747
+        return list(contracts)
+
+    fake_ib.qualifyContractsAsync = _track_qualify  # type: ignore[method-assign]
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=144.9, ask=145.1, last=145.0, close=144.8)
+        if getattr(c, "secType", "") == "STK"
+        else SimpleNamespace(
+            contract=c,
+            bid=4.0,
+            ask=4.2,
+            last=4.1,
+            close=4.0,
+            volume=10,
+            callOpenInterest=50,
+            putOpenInterest=50,
+            modelGreeks=None,
+        )
+    )
+    run_coro(
+        svc.refresh_chain(
+            RefreshRequest(
+                ticker="NVDA",
+                range_pct=0.20,
+                strike_step=5.0,
+                dte_min=30,
+                dte_max=60,
+                include_short_dte=False,
+            )
+        )
+    )
+    # 135P, 140P, 145C, 150C skipped IBKR qualify; only unseeded 135C, 140C, 145P, 150P qualified!
+    assert sorted(qualified_opts) == [(135.0, "C"), (140.0, "C"), (145.0, "P"), (150.0, "P")]

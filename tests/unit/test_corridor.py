@@ -887,7 +887,7 @@ def test_prepare_contracts_qualifies_unqualified_options_in_chunks_of_ten() -> N
     client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
     service = CorridorQuoteService(client, sleep=_rec_sleep)
     res = run_coro(service.fetch_corridor_quotes(selection, snapshot_id="NVDA_20261111_160000"))
-    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 5]
+    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 15 - QUALIFY_CHUNK_SIZE]
     assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
     assert len(res.quotes) == 15
     assert len(fake_ib.subscribed) == 16  # 15 options + 1 spot, well under 90 cap
