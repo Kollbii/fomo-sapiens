@@ -10,7 +10,7 @@ ibkr:
   port: 4001             # Default to 4001 (IBKR Gateway Live Read-Only)
   client_id: 77
   connect_timeout_sec: 3.0
-  request_timeout_sec: 20.0  # Max wait per IBKR request (qualify/secdef/...); 0 < x <= 120
+  request_timeout_sec: 25.0  # Max wait per IBKR request (qualify/secdef/...); 0 < x <= 120
   read_only_enforced: true
   # Market Data Types:
   # 3 = Delayed (15-min delayed from current session - DEFAULT)
@@ -44,7 +44,9 @@ watchlist:
   custom_ticker_regex: "^[A-Z]{1,5}$"
   max_size: 20           # Server-persisted watchlist cap (data/watchlist.json); 1..50, >= len(hardcoded_tickers)
   batch_ticker_timeout_sec: 240.0  # Batch per-ticker cap (s); exceeding it saves finished pages + stops the batch; 30..1800
-  batch_inter_ticker_cooldown_sec: 1.5  # Cooldown (s) between consecutive tickers in a batch refresh; 0..30
+  batch_inter_ticker_cooldown_sec: 2.5  # Cooldown (s) between consecutive tickers in a batch refresh; 0..30
+  batch_timeout_retries: 2  # Max transient Gateway time-out retries across one batch (max 1 per ticker); 0..5
+  batch_timeout_retry_cooldown_sec: 10.0  # Cooldown (s) after socket recycle before retrying a timed-out ticker; 0..60
 
 options_chain:
   dte_min: 30
@@ -72,7 +74,7 @@ options_chain:
   page_collect_timeout_sec: 2.25
   page_poll_interval_sec: 0.25
   inter_page_cooldown_sec: 0.35
-  prefetch_exact_strikes: true
+  prefetch_exact_strikes: false
   contract_details_timeout_sec: 15.0
   contract_details_cooldown_sec: 0.10
   contract_details_cache_ttl_sec: 900.0

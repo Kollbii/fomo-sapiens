@@ -38,6 +38,8 @@ PACING_CODES: frozenset[int] = frozenset({100, 162})
 DISCONNECT_CODES: frozenset[int] = frozenset({502, 504, 1100, 1300, 2110})
 #: Connectivity restored notices (`1101` data lost / `1102` data maintained): never fail a stage.
 RESTORE_CODES: frozenset[int] = frozenset({1101, 1102})
+#: "No security definition has been found": tracked for stale-conId healing, non-fatal.
+CONTRACT_NOT_FOUND_CODE = 200
 
 LIVE_TYPES: frozenset[int] = frozenset({1, 2})
 DELAYED_TYPES: frozenset[int] = frozenset({3, 4})
@@ -54,9 +56,9 @@ MARKET_DATA_TYPE_LABELS: dict[int, str] = {
 }
 
 #: Max contracts sent in one `ib.qualifyContractsAsync` call to avoid Gateway pacing lockups.
-QUALIFY_CHUNK_SIZE = 10
+QUALIFY_CHUNK_SIZE = 8
 #: Pacing pause (seconds) between consecutive `qualify_contracts` micro-batches.
-QUALIFY_CHUNK_PAUSE_SEC = 0.25
+QUALIFY_CHUNK_PAUSE_SEC = 0.45
 
 
 def market_data_type_label(data_type: int) -> str:
@@ -206,6 +208,7 @@ class IBKRBrokerClient:
         self.live_subscription_missing = False
         self._subscription_fallback_notice: str | None = None
         self._pacing_warning = False
+        self._contract_not_found_count = 0
         self._was_connected = False
         self._last_disconnect_notice: str | None = None
         self._last_disconnect_reason: Literal["timeout", "connection_lost"] | None = None
@@ -547,6 +550,7 @@ class IBKRBrokerClient:
         self.live_subscription_missing = False
         self._subscription_fallback_notice = None
         self._observed_connection_type = None
+        self._contract_not_found_count = 0
         self._set_market_data_type(self.primary_type)
         return self.current_type
 
@@ -565,6 +569,20 @@ class IBKRBrokerClient:
         return target
 
     # ---------------------------------------------------------- error events
+    @property
+    def contract_not_found_count(self) -> int:
+        """Current count of IBKR Error 200 notices since the last reset or consume."""
+        return self._contract_not_found_count
+
+    def reset_contract_not_found(self) -> None:
+        """Clear the count of IBKR Error 200 (contract not found) notices."""
+        self._contract_not_found_count = 0
+
+    def consume_contract_not_found(self) -> int:
+        """Return and clear the count of IBKR Error 200 notices arrived since last call."""
+        count, self._contract_not_found_count = self._contract_not_found_count, 0
+        return count
+
     def consume_pacing_warning(self) -> bool:
         """Return True once if a pacing warning arrived since the last call."""
         flagged, self._pacing_warning = self._pacing_warning, False
@@ -616,6 +634,9 @@ class IBKRBrokerClient:
             elif code in PACING_CODES:
                 self._pacing_warning = True
                 logger.warning("IBKR pacing warning %s: %s", code, message)
+            elif code == CONTRACT_NOT_FOUND_CODE:
+                self._contract_not_found_count += 1
+                logger.info("IBKR contract not found %s (reqId=%s): %s", code, req_id, message)
             elif code in DISCONNECT_CODES:
                 sanitized = sanitize_client_notice(f"IBKR {code}: {message}")
                 self._last_disconnect_notice = sanitized or f"IBKR {code}"

@@ -37,7 +37,7 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from src.broker.fetcher import ChainFetchProgress
 from src.core.exceptions import (
@@ -116,6 +116,17 @@ class _BatchItem:
     error: str | None = None
     duration_sec: float | None = None
     notices: list[str] = field(default_factory=list)
+    retried: bool = False
+
+    def reset_for_retry(self) -> None:
+        self.state = "running"
+        self.partial = False
+        self.snapshot_id = None
+        self.contract_count = None
+        self.error_code = None
+        self.error = None
+        self.duration_sec = None
+        self.notices = []
 
     def to_result(self) -> BatchTickerResult:
         return BatchTickerResult(
@@ -145,6 +156,9 @@ class _Batch:
     aborted: bool = False
     lock_released: bool = False
     notices: list[str] = field(default_factory=list)
+    retries_used: int = 0
+    consecutive_timeouts: int = 0
+    last_attempt_timeout_recycled: bool = False
     #: Resolved by `cancel()` / `aclose()` so the orchestrator stops waiting on the child at once.
     cancel_signal: asyncio.Future[None] | None = None
     #: Child task of the ticker currently running (None between tickers).
@@ -182,6 +196,8 @@ class BatchRefreshService:
         shutdown_timeout_sec: float = BATCH_SHUTDOWN_TIMEOUT_SEC,
         cancel_cleanup_sec: float = BATCH_CANCEL_CLEANUP_SEC,
         ticker_timeout_sec: float | None = None,
+        timeout_retries: int | None = None,
+        timeout_retry_cooldown_sec: float | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not shutdown_timeout_sec > 0.0:
@@ -190,6 +206,10 @@ class BatchRefreshService:
             raise ValueError("cancel_cleanup_sec must be > 0")
         if ticker_timeout_sec is not None and not ticker_timeout_sec > 0.0:
             raise ValueError("ticker_timeout_sec must be > 0")
+        if timeout_retries is not None and timeout_retries < 0:
+            raise ValueError("timeout_retries must be >= 0")
+        if timeout_retry_cooldown_sec is not None and timeout_retry_cooldown_sec < 0.0:
+            raise ValueError("timeout_retry_cooldown_sec must be >= 0")
         self.analyzer = analyzer
         self._timer = timer
         self._id_factory = id_factory or (lambda: uuid.uuid4().hex)
@@ -197,6 +217,12 @@ class BatchRefreshService:
         self._cancel_cleanup_sec = float(cancel_cleanup_sec)
         self._ticker_timeout_override = (
             float(ticker_timeout_sec) if ticker_timeout_sec is not None else None
+        )
+        self._timeout_retries_override = (
+            int(timeout_retries) if timeout_retries is not None else None
+        )
+        self._timeout_retry_cooldown_override = (
+            float(timeout_retry_cooldown_sec) if timeout_retry_cooldown_sec is not None else None
         )
         self._sleep = sleep
         self._batch: _Batch | None = None
@@ -214,6 +240,20 @@ class BatchRefreshService:
         if self._ticker_timeout_override is not None:
             return self._ticker_timeout_override
         return float(self.analyzer.settings.watchlist.batch_ticker_timeout_sec)
+
+    @property
+    def timeout_retries(self) -> int:
+        """Max transient timeout retries per batch (`watchlist.batch_timeout_retries`)."""
+        if self._timeout_retries_override is not None:
+            return self._timeout_retries_override
+        return int(self.analyzer.settings.watchlist.batch_timeout_retries)
+
+    @property
+    def timeout_retry_cooldown_sec(self) -> float:
+        """Cooldown after timeout socket recycle (`watchlist.batch_timeout_retry_cooldown_sec`)."""
+        if self._timeout_retry_cooldown_override is not None:
+            return self._timeout_retry_cooldown_override
+        return float(self.analyzer.settings.watchlist.batch_timeout_retry_cooldown_sec)
 
     @property
     def is_running(self) -> bool:
@@ -369,9 +409,8 @@ class BatchRefreshService:
         finally:
             self._finish(batch)
 
-    async def _wait_inter_ticker_cooldown(self, batch: _Batch) -> None:
-        """Pause briefly between consecutive tickers unless cancelled."""
-        cooldown = float(self.analyzer.settings.watchlist.batch_inter_ticker_cooldown_sec)
+    async def _wait_cooldown(self, batch: _Batch, cooldown: float) -> None:
+        """Pause for `cooldown` seconds unless interrupted by `batch.cancel_signal`."""
         if cooldown <= 0.0:
             return
         if batch.cancel_signal is None:
@@ -391,32 +430,128 @@ class BatchRefreshService:
                 with contextlib.suppress(BaseException):
                     await sleep_task
 
+    async def _wait_inter_ticker_cooldown(self, batch: _Batch) -> None:
+        """Pause briefly between consecutive tickers unless cancelled."""
+        cooldown = float(self.analyzer.settings.watchlist.batch_inter_ticker_cooldown_sec)
+        await self._wait_cooldown(batch, cooldown)
+
+    @staticmethod
+    def _is_underlying_qualification_timeout(exc: BaseException | None) -> bool:
+        return exc is not None and "underlying qualification" in str(exc).lower()
+
+    def _can_retry_timeout(
+        self,
+        batch: _Batch,
+        item: _BatchItem,
+        *,
+        position: int,
+        exc: BaseException | None,
+        timed_out: bool,
+        run: _TickerRun,
+        prior_timeout_recycle: bool,
+    ) -> bool:
+        """True only for bounded, transient Gateway time-outs eligible for a single retry."""
+        if not (timed_out or isinstance(exc, GatewayTimeoutError)):
+            return False
+        if batch.cancel_requested or run.saved:
+            return False
+        if item.retried or batch.retries_used >= self.timeout_retries:
+            return False
+        if batch.consecutive_timeouts >= 2:
+            return False
+        return not (
+            self._is_underlying_qualification_timeout(exc)
+            and (position == 1 or prior_timeout_recycle)
+        )
+
+    def _prepare_timeout_retry(
+        self,
+        batch: _Batch,
+        item: _BatchItem,
+        *,
+        exc: BaseException | None,
+        timed_out: bool,
+        limit: float,
+    ) -> float:
+        """Recycle socket if needed, increment retry counters, log and record batch notice."""
+        client = getattr(self.analyzer, "broker_client", None)
+        if timed_out or getattr(client, "connection_state", None) != "timeout_reset":
+            self._recycle_broker_after_timeout(item.ticker)
+        item.retried = True
+        batch.retries_used += 1
+        batch.consecutive_timeouts += 1
+        batch.last_attempt_timeout_recycled = True
+        cooldown = self.timeout_retry_cooldown_sec
+        reason_txt = f"per-ticker {limit:g}s limit" if timed_out else f"{type(exc).__name__}: {exc}"
+        logger.warning(
+            "batch %s: transient Gateway time-out on %s (%s); "
+            "cooling down %.1fs and retrying once (%d/%d batch retries)",
+            batch.batch_id,
+            item.ticker,
+            reason_txt,
+            cooldown,
+            batch.retries_used,
+            self.timeout_retries,
+        )
+        batch.notices.append(
+            f"Transient Gateway time-out on {item.ticker}; "
+            f"cooled down {cooldown:g}s and retrying once…"
+        )
+        return cooldown
+
     async def _run_item(self, batch: _Batch, item: _BatchItem, position: int, total: int) -> None:
         self.analyzer.set_refresh_owner(batch_owner(position, total, item.ticker))
         batch.current_ticker = item.ticker
-        item.state = "running"
         params = batch.params
-        run = _TickerRun()
-        started = self._timer()
-        child = asyncio.get_running_loop().create_task(
-            self.analyzer.refresh_ticker_locked(
-                item.ticker,
-                range_pct=params.range_pct,
-                strike_step=None,  # batches always use Auto strike step
-                dte_min=params.dte_min,
-                dte_max=params.dte_max,
-                include_short_dte=params.include_short_dte,
-                progress=run.progress,
-                on_saved=run.saved.append,
-            ),
-            name=f"batch-ticker-{batch.batch_id}-{item.ticker}",
-        )
-        batch.child = child
-        try:
-            await self._supervise(batch, item, child, run)
-        finally:
-            batch.child = None
-            item.duration_sec = round(max(0.0, self._timer() - started), 3)
+        while True:
+            item.reset_for_retry()
+            run = _TickerRun()
+            started = self._timer()
+            prior_conn_state = getattr(self.analyzer.broker_client, "connection_state", None)
+            prior_timeout_recycle = (
+                batch.last_attempt_timeout_recycled or prior_conn_state == "timeout_reset"
+            )
+            child = asyncio.get_running_loop().create_task(
+                self.analyzer.refresh_ticker_locked(
+                    item.ticker,
+                    range_pct=params.range_pct,
+                    strike_step=None,  # batches always use Auto strike step
+                    dte_min=params.dte_min,
+                    dte_max=params.dte_max,
+                    include_short_dte=params.include_short_dte,
+                    progress=run.progress,
+                    on_saved=run.saved.append,
+                ),
+                name=f"batch-ticker-{batch.batch_id}-{item.ticker}",
+            )
+            batch.child = child
+            try:
+                outcome, retry_cooldown = await self._supervise(
+                    batch,
+                    item,
+                    child,
+                    run,
+                    position=position,
+                    prior_timeout_recycle=prior_timeout_recycle,
+                )
+            finally:
+                batch.child = None
+                item.duration_sec = round(max(0.0, self._timer() - started), 3)
+
+            if outcome in ("done", "failed"):
+                batch.consecutive_timeouts = 0
+                batch.last_attempt_timeout_recycled = False
+                return
+            if outcome == "stopped":
+                return
+            if retry_cooldown > 0.0:
+                await self._wait_cooldown(batch, retry_cooldown)
+            if batch.cancel_requested or batch.aborted:
+                if batch.cancel_requested and not self._archive_interrupted(
+                    batch, item, run, "cancelled"
+                ):
+                    item.state = "cancelled"
+                return
 
     async def _supervise(
         self,
@@ -424,7 +559,10 @@ class BatchRefreshService:
         item: _BatchItem,
         child: asyncio.Task[TickerRefreshOutcome],
         run: _TickerRun,
-    ) -> None:
+        *,
+        position: int,
+        prior_timeout_recycle: bool,
+    ) -> tuple[Literal["done", "failed", "stopped", "retry"], float]:
         """Wait for the child (cancel signal / per-ticker cap), then record its outcome."""
         limit = self.ticker_timeout_sec
         waiters: set[asyncio.Future[Any]] = {child}
@@ -450,23 +588,38 @@ class BatchRefreshService:
             exc = child.exception()
             if exc is None:
                 self._mark_done(item, child.result())
-                return
+                return ("done", 0.0)
         else:
             exc = None
+
+        if self._can_retry_timeout(
+            batch,
+            item,
+            position=position,
+            exc=exc,
+            timed_out=timed_out,
+            run=run,
+            prior_timeout_recycle=prior_timeout_recycle,
+        ):
+            cooldown = self._prepare_timeout_retry(
+                batch, item, exc=exc, timed_out=timed_out, limit=limit
+            )
+            return ("retry", cooldown)
+
         if timed_out:
             self._handle_ticker_timeout(batch, item, run, limit)
-            return
+            return ("stopped", 0.0)
         if exc is None:  # child cancelled (or cleanup still running)
             if batch.cancel_requested:
                 if not self._archive_interrupted(batch, item, run, "cancelled"):
                     item.state = "cancelled"
-                return
+                return ("stopped", 0.0)
             exc = GatewayConnectionError(
                 f"IBKR request for {item.ticker} was cancelled unexpectedly"
             )
         if isinstance(exc, GatewayConnectionError):
             self._handle_gateway_error(batch, item, run, exc)
-            return
+            return ("stopped", 0.0)
         if not isinstance(exc, Exception):  # pragma: no cover - KeyboardInterrupt / SystemExit
             item.state = "cancelled"
             raise exc
@@ -485,7 +638,7 @@ class BatchRefreshService:
                 f"Paper-trade quoting for {item.ticker} failed ({safe.code}); "
                 "the complete chain snapshot was saved."
             )
-            return
+            return ("done", 0.0)
         if isinstance(exc, AnalyzerError):
             logger.warning(
                 "batch %s: %s failed (%s): %s",
@@ -502,6 +655,7 @@ class BatchRefreshService:
                 exc_info=exc,
             )
         self._mark_failed(item, exc)
+        return ("failed", 0.0)
 
     async def _await_cleanup(
         self, batch: _Batch, item: _BatchItem, child: asyncio.Task[TickerRefreshOutcome]

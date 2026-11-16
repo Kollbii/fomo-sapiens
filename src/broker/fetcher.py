@@ -6,7 +6,7 @@ import asyncio
 import logging
 import time
 from collections import Counter
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import Any, Literal
@@ -98,6 +98,8 @@ def _merge_and_dedupe_rows(
 
 
 PageCallback = Callable[[Sequence[Any], Sequence[Any]], None]
+ConIdCacheKey = tuple[str, str, str, str, float, str]
+KnownConidsLoader = Callable[[str], Mapping[tuple[str, float, str], int]]
 
 
 @dataclass(frozen=True)
@@ -287,6 +289,7 @@ class PagedOptionChainFetcher:
         discovery: ContractDiscoveryService | None = None,
         clock: Callable[[], datetime] | None = None,
         sleep: SleepFn = asyncio.sleep,
+        known_conids_loader: KnownConidsLoader | None = None,
     ) -> None:
         self.client = client
         self.settings = settings or client.settings
@@ -295,8 +298,140 @@ class PagedOptionChainFetcher:
         self.discovery = discovery or ContractDiscoveryService(
             client, self.settings, clock=self.clock, sleep=self.sleep
         )
+        self._known_conids_loader = known_conids_loader
+        self._conid_cache: dict[ConIdCacheKey, int] = {}
+        self._seeded_symbols: set[str] = set()
+        self._stale_seed_symbols: set[str] = set()
+        self._precached_contract_ids: set[int] = set()
         self.active_cooldown_sec: float = self.settings.options_chain.inter_page_cooldown_sec
         self._notices: list[str] = []
+
+    def _ensure_symbol_seeded(self, symbol: str) -> None:
+        """Lazy-seed standard option conIds once per symbol from `known_conids_loader`."""
+        sym = symbol.upper()
+        if (
+            self._known_conids_loader is None
+            or sym in self._seeded_symbols
+            or sym in self._stale_seed_symbols
+        ):
+            return
+        self._seeded_symbols.add(sym)
+        try:
+            loaded = self._known_conids_loader(sym)
+        except Exception:
+            logger.warning("known_conids_loader failed for %s; ignoring seed", sym, exc_info=True)
+            return
+        seeded = 0
+        for (raw_exp, raw_strike, raw_right), raw_conid in loaded.items():
+            exp = str(raw_exp or "").strip().replace("-", "")[:8]
+            right_u = str(raw_right or "").strip().upper()
+            try:
+                strike_k = round(float(raw_strike), 6)
+                conid = int(raw_conid)
+            except (TypeError, ValueError):
+                continue
+            if (
+                len(exp) == 8
+                and exp.isdigit()
+                and strike_k > 0.0
+                and right_u in ("C", "P")
+                and conid > 0
+            ):
+                key: ConIdCacheKey = (sym, sym, "100", exp, strike_k, right_u)
+                if key not in self._conid_cache:
+                    self._conid_cache[key] = conid
+                    seeded += 1
+        if seeded > 0:
+            logger.debug("seeded %d known option conId(s) for %s", seeded, sym)
+
+    def _lookup_cached_conid(
+        self,
+        symbol: str,
+        trading_class: str,
+        multiplier: str,
+        ib_expiry: str,
+        strike: float,
+        right: str,
+    ) -> int | None:
+        """Look up a known `conId`, seeding from disk only for standard OPT chains."""
+        sym = symbol.upper()
+        mult = str(multiplier or "100")
+        tc = str(trading_class or "")
+        exp = str(ib_expiry or "").strip()[:8]
+        strike_k = round(float(strike), 6)
+        right_u = str(right or "").upper()
+        is_standard = mult == "100" and (not tc or tc == sym)
+        if is_standard:
+            self._ensure_symbol_seeded(sym)
+        conid = self._conid_cache.get((sym, tc, mult, exp, strike_k, right_u))
+        if conid is None and is_standard:
+            alt_tc = sym if not tc else ""
+            conid = self._conid_cache.get((sym, alt_tc, "100", exp, strike_k, right_u))
+        return conid if conid is not None and conid > 0 else None
+
+    def _store_qualified_conid(self, contract: Any) -> None:
+        """Record a qualified option contract's `conId` in the in-memory session cache."""
+        conid = int(getattr(contract, "conId", 0) or 0)
+        if conid <= 0:
+            return
+        if str(getattr(contract, "secType", "OPT") or "OPT").upper() != "OPT":
+            return
+        sym = str(getattr(contract, "symbol", "") or "").upper()
+        tc = str(getattr(contract, "tradingClass", "") or "")
+        mult = str(getattr(contract, "multiplier", "100") or "100")
+        exp = str(getattr(contract, "lastTradeDateOrContractMonth", "") or "").strip()[:8]
+        right_u = str(getattr(contract, "right", "") or "").upper()
+        raw_strike = getattr(contract, "strike", 0.0) or 0.0
+        try:
+            strike_k = round(float(raw_strike), 6)
+        except (TypeError, ValueError):
+            return
+        if (
+            not sym
+            or len(exp) != 8
+            or not exp.isdigit()
+            or strike_k <= 0.0
+            or right_u not in ("C", "P")
+        ):
+            return
+        self._conid_cache[(sym, tc, mult, exp, strike_k, right_u)] = conid
+
+    def _invalidate_symbol_conid_cache(self, symbol: str) -> None:
+        """Drop all cached `conId`s for `symbol` and mark its disk seed stale for the session."""
+        sym = symbol.upper()
+        self._stale_seed_symbols.add(sym)
+        self._seeded_symbols.add(sym)
+        for key in [k for k in self._conid_cache if k[0] == sym]:
+            del self._conid_cache[key]
+
+    def _build_option_candidate(
+        self,
+        *,
+        symbol: str,
+        trading_class: str,
+        multiplier: str,
+        exchange: str,
+        ib_expiry: str,
+        strike: float,
+        right: str,
+    ) -> Option:
+        cached_conid = self._lookup_cached_conid(
+            symbol, trading_class, multiplier, ib_expiry, strike, right
+        )
+        opt = Option(
+            conId=cached_conid or 0,
+            symbol=symbol,
+            lastTradeDateOrContractMonth=ib_expiry,
+            strike=strike,
+            right=right,
+            exchange=exchange,
+            multiplier=multiplier,
+            currency="USD",
+            tradingClass=trading_class,
+        )
+        if cached_conid is not None:
+            self._precached_contract_ids.add(id(opt))
+        return opt
 
     @property
     def max_contracts_per_page(self) -> int:
@@ -308,6 +443,7 @@ class PagedOptionChainFetcher:
 
     def build_candidate_contracts(self, plan: ChainPlan) -> list[Option]:
         """Build exchange-verified `(expiry, strike, right)` candidate `Option` contracts."""
+        symbol = plan.underlying.symbol.upper()
         candidates: list[Option] = []
         if plan.expiration_specs:
             for spec in plan.expiration_specs:
@@ -319,15 +455,14 @@ class PagedOptionChainFetcher:
                                 candidates.append(prequalified)
                             continue
                         candidates.append(
-                            Option(
-                                symbol=plan.underlying.symbol,
-                                lastTradeDateOrContractMonth=spec.match.ib_expiry,
+                            self._build_option_candidate(
+                                symbol=symbol,
+                                trading_class=spec.trading_class,
+                                multiplier=spec.multiplier,
+                                exchange=plan.exchange,
+                                ib_expiry=spec.match.ib_expiry,
                                 strike=strike,
                                 right=right,
-                                exchange=plan.exchange,
-                                multiplier=spec.multiplier,
-                                currency="USD",
-                                tradingClass=spec.trading_class,
                             )
                         )
             return candidates
@@ -336,15 +471,14 @@ class PagedOptionChainFetcher:
             for strike in plan.strikes.strikes:
                 for right in ("C", "P"):
                     candidates.append(
-                        Option(
-                            symbol=plan.underlying.symbol,
-                            lastTradeDateOrContractMonth=exp.ib_expiry,
+                        self._build_option_candidate(
+                            symbol=symbol,
+                            trading_class=plan.trading_class,
+                            multiplier=plan.multiplier,
+                            exchange=plan.exchange,
+                            ib_expiry=exp.ib_expiry,
                             strike=strike,
                             right=right,
-                            exchange=plan.exchange,
-                            multiplier=plan.multiplier,
-                            currency="USD",
-                            tradingClass=plan.trading_class,
                         )
                     )
         return candidates
@@ -358,7 +492,7 @@ class PagedOptionChainFetcher:
         )
 
     async def qualify_option_contracts(self, candidates: Sequence[Any]) -> list[Any]:
-        """Qualify un-qualified `Option` contracts in bounded micro-batches (`<= 10` per call)."""
+        """Qualify un-qualified `Option` contracts in bounded micro-batches."""
         if not candidates:
             raise OptionChainFetchError("No candidate option contracts to qualify")
 
@@ -382,9 +516,13 @@ class PagedOptionChainFetcher:
             if len(res) == len(unqualified_items):
                 for (orig_idx, _), item in zip(unqualified_items, res, strict=True):
                     if _is_qualified_contract(item):
+                        self._store_qualified_conid(item)
                         qualified_by_idx[orig_idx] = item
             else:
-                extra_qualified.extend(item for item in res if _is_qualified_contract(item))
+                for item in res:
+                    if _is_qualified_contract(item):
+                        self._store_qualified_conid(item)
+                        extra_qualified.append(item)
 
         qualified = [
             qualified_by_idx[idx] for idx in range(len(candidates)) if idx in qualified_by_idx
@@ -488,6 +626,7 @@ class PagedOptionChainFetcher:
         initial_ready: Callable[[Any], bool],
         allow_fallback: bool = True,
         check_live_downgrade: bool = False,
+        stop_on_contract_not_found: bool = False,
     ) -> list[Any]:
         """Collect one page with pacing retry, live->delayed downgrade, and empty-quote fallback."""
         tickers = await self._collect_page_once(
@@ -500,7 +639,14 @@ class PagedOptionChainFetcher:
             sub_notice = self.client.consume_subscription_fallback_notice()
             if sub_notice and sub_notice not in self._notices:
                 self._notices.append(sub_notice)
-            return await self._fetch_page_delayed(page_contracts, allow_fallback=allow_fallback)
+            return await self._fetch_page_delayed(
+                page_contracts,
+                allow_fallback=allow_fallback,
+                stop_on_contract_not_found=stop_on_contract_not_found,
+            )
+
+        if stop_on_contract_not_found and self.client.contract_not_found_count > 0:
+            return tickers
 
         if self.client.consume_pacing_warning():
             self.active_cooldown_sec = max(self.active_cooldown_sec, PACING_COOLDOWN_SEC)
@@ -510,6 +656,8 @@ class PagedOptionChainFetcher:
                 generic_tick_list=generic_tick_list,
                 ready_predicate=initial_ready,
             )
+            if stop_on_contract_not_found and self.client.contract_not_found_count > 0:
+                return tickers
 
         if (
             allow_fallback
@@ -539,6 +687,7 @@ class PagedOptionChainFetcher:
         page_contracts: Sequence[Any],
         *,
         allow_fallback: bool = True,
+        stop_on_contract_not_found: bool = False,
     ) -> list[Any]:
         """Collect one page (`<= 80` contracts) under Delayed market data cascade (`3 -> 4`)."""
         return await self._collect_page_with_fallback(
@@ -547,6 +696,7 @@ class PagedOptionChainFetcher:
             initial_ready=has_real_quote,
             allow_fallback=allow_fallback,
             check_live_downgrade=False,
+            stop_on_contract_not_found=stop_on_contract_not_found,
         )
 
     async def _fetch_page_live_opra(
@@ -554,6 +704,7 @@ class PagedOptionChainFetcher:
         page_contracts: Sequence[Any],
         *,
         allow_fallback: bool = True,
+        stop_on_contract_not_found: bool = False,
     ) -> list[Any]:
         """Collect one page (`<= 80` contracts) in Live mode (`1 -> 2` or `10089/354 -> 3`)."""
         return await self._collect_page_with_fallback(
@@ -562,7 +713,40 @@ class PagedOptionChainFetcher:
             initial_ready=has_live_opra_data,
             allow_fallback=allow_fallback,
             check_live_downgrade=True,
+            stop_on_contract_not_found=stop_on_contract_not_found,
         )
+
+    async def _heal_stale_precached_pages(
+        self, tail_pages: Sequence[Sequence[Any]]
+    ) -> list[list[Any]]:
+        """Clear stale cached `conId`s after Error 200 and re-qualify unverified contracts."""
+        remaining = [c for page in tail_pages for c in page]
+        symbols = sorted(
+            {
+                str(getattr(c, "symbol", "") or "").upper()
+                for c in remaining
+                if id(c) in self._precached_contract_ids and getattr(c, "symbol", None)
+            }
+        )
+        for sym in symbols:
+            self._invalidate_symbol_conid_cache(sym)
+        for c in remaining:
+            if id(c) in self._precached_contract_ids:
+                c.conId = 0
+                self._precached_contract_ids.discard(id(c))
+
+        label = ", ".join(symbols) if symbols else "option chain"
+        notice = (
+            f"Cached option conId(s) for {label} returned IBKR Error 200; "
+            "cleared cached conIds and re-qualifying contracts."
+        )
+        self._notices.append(notice)
+        logger.warning(notice)
+
+        clean_remaining = await self.qualify_option_contracts(remaining)
+        for c in clean_remaining:
+            self._store_qualified_conid(c)
+        return self.partition_pages(clean_remaining)
 
     async def fetch_pages(
         self,
@@ -578,13 +762,38 @@ class PagedOptionChainFetcher:
         pages = self.partition_pages(contracts)
         self.active_cooldown_sec = self.settings.options_chain.inter_page_cooldown_sec
         all_tickers: list[Any] = []
+        self.client.reset_contract_not_found()
 
-        for idx, page in enumerate(pages):
+        idx = 0
+        while idx < len(pages):
+            page = pages[idx]
+            has_precached = any(id(c) in self._precached_contract_ids for c in page)
             use_live = self.client.mode == "LIVE" and not self.client.live_subscription_missing
             if use_live:
-                page_tickers = await self._fetch_page_live_opra(page, allow_fallback=(idx == 0))
+                page_tickers = await self._fetch_page_live_opra(
+                    page,
+                    allow_fallback=(idx == 0),
+                    stop_on_contract_not_found=has_precached,
+                )
             else:
-                page_tickers = await self._fetch_page_delayed(page, allow_fallback=(idx == 0))
+                page_tickers = await self._fetch_page_delayed(
+                    page,
+                    allow_fallback=(idx == 0),
+                    stop_on_contract_not_found=has_precached,
+                )
+
+            err200_count = self.client.consume_contract_not_found()
+            if err200_count > 0 and has_precached:
+                healed_tail = await self._heal_stale_precached_pages(pages[idx:])
+                pages = [*pages[:idx], *healed_tail]
+                if idx >= len(pages):
+                    break
+                self.client.reset_contract_not_found()
+                continue
+
+            for c in page:
+                self._precached_contract_ids.discard(id(c))
+
             all_tickers.extend(page_tickers)
             if on_page is not None:
                 on_page(page, page_tickers)
@@ -594,6 +803,7 @@ class PagedOptionChainFetcher:
 
             if idx + 1 < len(pages) and self.active_cooldown_sec > 0:
                 await self.sleep(self.active_cooldown_sec)
+            idx += 1
 
         return all_tickers, len(pages)
 
@@ -633,21 +843,25 @@ class PagedOptionChainFetcher:
                 f"Invalid short DTE bounds: {eff_short_min} > {eff_short_max} for {ticker}"
             )
 
+        self._precached_contract_ids.clear()
         await self.client.ensure_connected()
         self.client.reset_market_data_type()
-        with self.client.link_watch():
-            return await self._fetch_option_chain_watched(
-                ticker,
-                range_pct=range_pct,
-                strike_step=strike_step,
-                eff_dte_min=eff_dte_min,
-                eff_dte_max=eff_dte_max,
-                include_short_dte=include_short_dte,
-                eff_short_min=eff_short_min,
-                eff_short_max=eff_short_max,
-                prog=prog,
-                t0=t0,
-            )
+        try:
+            with self.client.link_watch():
+                return await self._fetch_option_chain_watched(
+                    ticker,
+                    range_pct=range_pct,
+                    strike_step=strike_step,
+                    eff_dte_min=eff_dte_min,
+                    eff_dte_max=eff_dte_max,
+                    include_short_dte=include_short_dte,
+                    eff_short_min=eff_short_min,
+                    eff_short_max=eff_short_max,
+                    prog=prog,
+                    t0=t0,
+                )
+        finally:
+            self._precached_contract_ids.clear()
 
     def _snapshot_context(self, plan: ChainPlan) -> SnapshotContext:
         """Snapshot-level metadata stamped on every row (timestamp = now)."""

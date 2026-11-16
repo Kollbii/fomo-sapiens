@@ -78,16 +78,18 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.ibkr.default_market_data_type == 3
     assert s.ibkr.fallback_market_data_type == 4
     assert s.ibkr.market_data_mode == "DELAYED"
-    assert s.ibkr.request_timeout_sec == 20.0
+    assert s.ibkr.request_timeout_sec == 25.0
     assert s.watchlist.hardcoded_tickers == SEED_WATCHLIST
     assert s.watchlist.default_ticker == "NVDA"
     assert s.watchlist.max_size == 20
-    assert s.watchlist.batch_inter_ticker_cooldown_sec == 1.5
+    assert s.watchlist.batch_inter_ticker_cooldown_sec == 2.5
+    assert s.watchlist.batch_timeout_retries == 2
+    assert s.watchlist.batch_timeout_retry_cooldown_sec == 10.0
     assert s.options_chain.max_contracts_per_page == 80
     assert s.options_chain.dte_min == 30
     assert s.options_chain.dte_max == 120
     assert s.options_chain.default_strike_step is None
-    assert s.options_chain.prefetch_exact_strikes is True
+    assert s.options_chain.prefetch_exact_strikes is False
     assert s.options_chain.contract_details_timeout_sec == 15.0
     assert s.options_chain.contract_details_cooldown_sec == 0.10
     assert s.options_chain.contract_details_cache_ttl_sec == 900.0
@@ -357,9 +359,31 @@ def test_watchlist_settings_defaults_max_size_bounds_and_seed_cap(tmp_path: Path
     assert wl.hardcoded_tickers == DEFAULT_WATCHLIST
     assert wl.default_ticker == "NVDA"
     assert wl.max_size == 20
-    assert wl.batch_inter_ticker_cooldown_sec == 1.5
+    assert wl.batch_inter_ticker_cooldown_sec == 2.5
+    assert wl.batch_timeout_retries == 2
+    assert wl.batch_timeout_retry_cooldown_sec == 10.0
+    assert OptionsChainSettings().prefetch_exact_strikes is False
     assert OptionsChainSettings().contract_details_timeout_sec == 15.0
     assert load_settings(tmp_path / "nope.yaml", tmp_path / "nope.env").watchlist == wl
+
+    assert WatchlistSettings(batch_timeout_retries=0).batch_timeout_retries == 0
+    assert WatchlistSettings(batch_timeout_retries=5).batch_timeout_retries == 5
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_timeout_retries=-1)
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_timeout_retries=6)
+    assert (
+        WatchlistSettings(batch_timeout_retry_cooldown_sec=0.0).batch_timeout_retry_cooldown_sec
+        == 0.0
+    )
+    assert (
+        WatchlistSettings(batch_timeout_retry_cooldown_sec=60.0).batch_timeout_retry_cooldown_sec
+        == 60.0
+    )
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_timeout_retry_cooldown_sec=-0.1)
+    with pytest.raises(ValidationError):
+        WatchlistSettings(batch_timeout_retry_cooldown_sec=60.1)
 
     assert (
         WatchlistSettings(batch_inter_ticker_cooldown_sec=0.0).batch_inter_ticker_cooldown_sec

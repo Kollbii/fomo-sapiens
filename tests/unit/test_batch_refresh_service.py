@@ -667,7 +667,8 @@ def test_cancel_cleanup_wait_is_bounded(tmp_path: Path, caplog: pytest.LogCaptur
 # ------------------------------------------------------------------ time-outs & Gateway loss
 def test_per_ticker_timeout_saves_partial_and_aborts(tmp_path: Path) -> None:
     svc, batch, fetcher, _, quoted = _make(
-        tmp_path, watchlist=WatchlistSettings(batch_ticker_timeout_sec=30.0)
+        tmp_path,
+        watchlist=WatchlistSettings(batch_ticker_timeout_sec=30.0, batch_timeout_retries=0),
     )
     fetcher.pages["AVGO"] = 3
     fetcher.hang_after["AVGO"] = 2  # Gateway lost its upstream after page 2: never answers
@@ -728,7 +729,11 @@ def test_per_ticker_timeout_saves_partial_and_aborts(tmp_path: Path) -> None:
 def test_gateway_error_saves_partial_and_aborts(
     tmp_path: Path, exc: GatewayConnectionError, reason: str, code: str, notice: str
 ) -> None:
-    svc, batch, fetcher, _, quoted = _make(tmp_path, failures={"AVGO": exc})
+    svc, batch, fetcher, _, quoted = _make(
+        tmp_path,
+        failures={"AVGO": exc},
+        watchlist=WatchlistSettings(batch_timeout_retries=0),
+    )
     fetcher.pages["AVGO"] = 2
     releases = _count_releases(svc)
 
@@ -1331,9 +1336,9 @@ def test_batch_inter_ticker_cooldown_pauses_and_cancels_cleanly(tmp_path: Path) 
 
     final, elapsed = run_virtual_loop(_run_full())
     assert final.state == "completed"
-    # 3 tickers * 0.5s + 2 inter-ticker gaps * 1.5s default = 4.5s (no gap before 1st / after 3rd).
-    assert sleeps == [1.5, 1.5]
-    assert elapsed >= 4.5
+    # 3 tickers * 0.5s + 2 inter-ticker gaps * 2.5s default = 6.5s (no gap before 1st / after 3rd).
+    assert sleeps == [2.5, 2.5]
+    assert elapsed >= 6.5
     assert not svc.refresh_lock.locked()
 
     # Cancelling during the cooldown wakes at once without waiting out 1.5s.
@@ -1461,3 +1466,321 @@ def test_get_status_sanitizes_custom_broker_connection_notice(tmp_path: Path) ->
         "\x00",
     ):
         assert forbidden not in status.connection_notice
+
+
+def test_transient_gateway_timeout_retries_after_cooldown_and_finishes_batch(
+    tmp_path: Path,
+) -> None:
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        await asyncio.sleep(sec)
+
+    recycled: list[str] = []
+
+    class _TrackingBroker(_Broker):
+        def __init__(self) -> None:
+            super().__init__()
+            self.connection_state = "connected"
+
+        def reset_after_timeout(self, *, stage: str) -> None:
+            recycled.append(stage)
+            self.is_connected = False
+            self.connection_state = "timeout_reset"
+
+        async def ensure_connected(self) -> None:
+            self.is_connected = True
+            self.connection_state = "connected"
+
+    broker = _TrackingBroker()
+    svc, _, fetcher, _, quoted = _make(
+        tmp_path,
+        pause_sec=0.2,
+        watchlist=WatchlistSettings(
+            batch_inter_ticker_cooldown_sec=0.0,
+            batch_timeout_retries=2,
+            batch_timeout_retry_cooldown_sec=10.0,
+        ),
+        sleep=_rec_sleep,
+        broker_client=broker,
+    )
+    batch = BatchRefreshService(svc, sleep=_rec_sleep)
+    fetcher.pages["AVGO"] = 2
+    attempts: dict[str, int] = {}
+    orig_fetch = fetcher.fetch_option_chain
+
+    async def _flaky_fetch(ticker: str, **kwargs: Any) -> FetchResult:
+        attempts[ticker] = attempts.get(ticker, 0) + 1
+        if ticker == "AVGO" and attempts[ticker] == 1:
+            # Simulate stage timeout recycling the socket after 1 finished page
+            fetcher.failures["AVGO"] = GatewayTimeoutError(
+                "IBKR Gateway did not answer during contract qualification (8 contracts) "
+                "within 25 s"
+            )
+            broker.reset_after_timeout(stage="contract qualification (8 contracts)")
+        else:
+            fetcher.failures.pop(ticker, None)
+            await broker.ensure_connected()
+        return await orig_fetch(ticker, **kwargs)
+
+    fetcher.fetch_option_chain = _flaky_fetch  # type: ignore[method-assign]
+
+    async def _scenario() -> BatchRefreshStatus:
+        await batch.start(_req(["NVDA", "AVGO", "CRDO"]))
+        return await _wait_finished(batch)
+
+    final = run_virtual_loop(_scenario())
+    assert final.state == "completed"
+    assert final.done_count == 3
+    assert [i.state for i in final.items] == ["done", "done", "done"]
+    assert all(not i.partial for i in final.items)
+    assert attempts == {"NVDA": 1, "AVGO": 2, "CRDO": 1}
+    assert sleeps == [10.0]
+    assert recycled == ["contract qualification (8 contracts)"]
+    assert len(svc.repo.list_snapshots("AVGO")) == 1  # no premature partial snapshot on attempt #1
+    assert any("Transient Gateway time-out on AVGO" in n for n in final.notices)
+    assert quoted == ["NVDA", "AVGO", "CRDO"]
+    assert not svc.refresh_lock.locked()
+
+
+def test_per_ticker_timeout_cap_retries_once_and_recovers(tmp_path: Path) -> None:
+    sleeps: list[float] = []
+
+    async def _rec_sleep(sec: float) -> None:
+        sleeps.append(sec)
+        await asyncio.sleep(sec)
+
+    recycled: list[str] = []
+
+    class _TrackingBroker(_Broker):
+        connection_state = "connected"
+
+        def reset_after_timeout(self, *, stage: str) -> None:
+            recycled.append(stage)
+            self.is_connected = False
+            self.connection_state = "timeout_reset"
+
+    svc, _, fetcher, _, _ = _make(
+        tmp_path,
+        pause_sec=0.5,
+        watchlist=WatchlistSettings(
+            batch_ticker_timeout_sec=30.0,
+            batch_inter_ticker_cooldown_sec=0.0,
+            batch_timeout_retries=2,
+            batch_timeout_retry_cooldown_sec=5.0,
+        ),
+        broker_client=_TrackingBroker(),
+    )
+    batch = BatchRefreshService(svc, sleep=_rec_sleep)
+    fetcher.pages["AVGO"] = 2
+    fetcher.hang_after["AVGO"] = 1
+    orig_fetch = fetcher.fetch_option_chain
+    attempts = [0]
+
+    async def _recover_second(ticker: str, **kwargs: Any) -> FetchResult:
+        if ticker == "AVGO":
+            attempts[0] += 1
+            if attempts[0] == 2:
+                fetcher.hang_after.pop("AVGO", None)
+        return await orig_fetch(ticker, **kwargs)
+
+    fetcher.fetch_option_chain = _recover_second  # type: ignore[method-assign]
+
+    async def _scenario() -> BatchRefreshStatus:
+        await batch.start(_req(["NVDA", "AVGO"]))
+        return await _wait_finished(batch)
+
+    final = run_virtual_loop(_scenario())
+    assert final.state == "completed"
+    assert [i.state for i in final.items] == ["done", "done"]
+    assert recycled == ["per-ticker limit (AVGO)"]
+    assert sleeps == [5.0]
+    assert len(svc.repo.list_snapshots("AVGO")) == 1
+    assert not svc.refresh_lock.locked()
+
+
+def test_second_timeout_on_same_ticker_or_budget_exhausted_aborts_and_saves_partial(
+    tmp_path: Path,
+) -> None:
+    # 1. Second timeout on AVGO fails, archives Attempt 2's partial, and aborts.
+    svc, _, fetcher, _, _ = _make(
+        tmp_path / "second_fail",
+        pause_sec=0.1,
+        watchlist=WatchlistSettings(
+            batch_inter_ticker_cooldown_sec=0.0,
+            batch_timeout_retries=2,
+            batch_timeout_retry_cooldown_sec=2.0,
+        ),
+    )
+    batch = BatchRefreshService(svc, sleep=noop_sleep)
+    fetcher.pages["AVGO"] = 2
+    fetcher.failures["AVGO"] = GatewayTimeoutError(
+        "IBKR Gateway did not answer during secdef lookup (AVGO) within 25 s"
+    )
+
+    async def _scenario1() -> BatchRefreshStatus:
+        await batch.start(_req(["NVDA", "AVGO", "CRDO"]))
+        return await _wait_finished(batch)
+
+    final1 = run_virtual_loop(_scenario1())
+    nvda, avgo, crdo = final1.items
+    assert final1.state == "aborted"
+    assert nvda.state == "done"
+    assert avgo.state == "failed" and avgo.partial is True and avgo.contract_count == 2
+    assert crdo.state == "not_started"
+    assert [t for t, _ in fetcher.calls] == ["NVDA", "AVGO", "AVGO"]
+    assert len(svc.repo.list_snapshots("AVGO")) == 1  # only Attempt 2's partial saved
+    assert not svc.refresh_lock.locked()
+
+    # 2. Batch retry budget exhausted (batch_timeout_retries=1): AVGO recovers, CRDO aborts.
+    svc2, _, fetcher2, _, _ = _make(
+        tmp_path / "budget_cap",
+        pause_sec=0.1,
+        watchlist=WatchlistSettings(
+            batch_inter_ticker_cooldown_sec=0.0,
+            batch_timeout_retries=1,
+            batch_timeout_retry_cooldown_sec=0.0,
+        ),
+    )
+    batch2 = BatchRefreshService(svc2, sleep=noop_sleep)
+    orig_fetch2 = fetcher2.fetch_option_chain
+    attempts2: dict[str, int] = {}
+
+    async def _flaky2(ticker: str, **kwargs: Any) -> FetchResult:
+        attempts2[ticker] = attempts2.get(ticker, 0) + 1
+        if ticker == "AVGO" and attempts2[ticker] == 1:
+            fetcher2.failures["AVGO"] = GatewayTimeoutError(
+                "IBKR Gateway did not answer during contract qualification (8 contracts) "
+                "within 25 s"
+            )
+        elif ticker == "CRDO":
+            fetcher2.failures["CRDO"] = GatewayTimeoutError(
+                "IBKR Gateway did not answer during contract qualification (8 contracts) "
+                "within 25 s"
+            )
+        else:
+            fetcher2.failures.pop(ticker, None)
+        return await orig_fetch2(ticker, **kwargs)
+
+    fetcher2.fetch_option_chain = _flaky2  # type: ignore[method-assign]
+
+    async def _scenario2() -> BatchRefreshStatus:
+        await batch2.start(_req(["AVGO", "CRDO", "PLTR"]))
+        return await _wait_finished(batch2)
+
+    final2 = run_virtual_loop(_scenario2())
+    assert final2.state == "aborted"
+    assert [i.state for i in final2.items] == ["done", "failed", "not_started"]
+    assert attempts2 == {"AVGO": 2, "CRDO": 1}
+    assert not svc2.refresh_lock.locked()
+
+
+def test_non_retryable_errors_do_not_retry(tmp_path: Path) -> None:
+    # 1. Position 1 underlying qualification timeout never retries (Gateway isn't answering at all).
+    svc1, batch1, fetcher1, _, _ = _make(
+        tmp_path / "pos1_uq",
+        pause_sec=0.0,
+        failures={
+            "NVDA": GatewayTimeoutError(
+                "IBKR Gateway did not answer during underlying qualification (NVDA) within 25 s"
+            )
+        },
+        watchlist=WatchlistSettings(batch_timeout_retries=2, batch_timeout_retry_cooldown_sec=0.0),
+    )
+    fetcher1.pages["NVDA"] = 0
+
+    async def _s1() -> BatchRefreshStatus:
+        await batch1.start(_req(["NVDA", "AVGO"]))
+        return await _wait_finished(batch1)
+
+    f1 = run_virtual_loop(_s1())
+    assert f1.state == "aborted"
+    assert [t for t, _ in fetcher1.calls] == ["NVDA"]
+    assert [i.state for i in f1.items] == ["failed", "not_started"]
+    assert not svc1.refresh_lock.locked()
+
+    # 2. Underlying qualification timeout immediately after a prior timeout recycle does not retry.
+    class _TimeoutResetBroker(_Broker):
+        connection_state = "timeout_reset"
+
+    svc2, batch2, fetcher2, _, _ = _make(
+        tmp_path / "after_recycle_uq",
+        pause_sec=0.0,
+        failures={
+            "AVGO": GatewayTimeoutError(
+                "IBKR Gateway did not answer during underlying qualification (AVGO) within 25 s"
+            )
+        },
+        watchlist=WatchlistSettings(batch_timeout_retries=2, batch_timeout_retry_cooldown_sec=0.0),
+        broker_client=_TimeoutResetBroker(),
+    )
+    fetcher2.pages["AVGO"] = 0
+
+    async def _s2() -> BatchRefreshStatus:
+        await batch2.start(_req(["NVDA", "AVGO"]))
+        return await _wait_finished(batch2)
+
+    f2 = run_virtual_loop(_s2())
+    assert f2.state == "aborted"
+    assert [t for t, _ in fetcher2.calls] == ["NVDA", "AVGO"]
+    assert not svc2.refresh_lock.locked()
+
+    # 3. Non-timeout GatewayConnectionError never retries.
+    svc3, batch3, fetcher3, _, _ = _make(
+        tmp_path / "conn_lost",
+        pause_sec=0.0,
+        failures={"NVDA": GatewayConnectionError("Gateway unreachable")},
+        watchlist=WatchlistSettings(batch_timeout_retries=2, batch_timeout_retry_cooldown_sec=0.0),
+    )
+    fetcher3.pages["NVDA"] = 0
+
+    async def _s3() -> BatchRefreshStatus:
+        await batch3.start(_req(["NVDA", "AVGO"]))
+        return await _wait_finished(batch3)
+
+    f3 = run_virtual_loop(_s3())
+    assert f3.state == "aborted"
+    assert [t for t, _ in fetcher3.calls] == ["NVDA"]
+    assert not svc3.refresh_lock.locked()
+
+
+def test_cancel_during_retry_cooldown_stops_immediately_without_lock_leak(tmp_path: Path) -> None:
+    svc, _, fetcher, _, _ = _make(
+        tmp_path,
+        pause_sec=0.2,
+        watchlist=WatchlistSettings(
+            batch_inter_ticker_cooldown_sec=0.0,
+            batch_timeout_retries=2,
+            batch_timeout_retry_cooldown_sec=10.0,
+        ),
+    )
+    batch = BatchRefreshService(svc, sleep=asyncio.sleep)
+    fetcher.pages["NVDA"] = 2
+    fetcher.failures["NVDA"] = GatewayTimeoutError(
+        "IBKR Gateway did not answer during secdef lookup (NVDA) within 25 s"
+    )
+
+    async def _scenario() -> tuple[BatchRefreshStatus, float]:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        started = await batch.start(_req(["NVDA", "AVGO"]))
+        await asyncio.sleep(0.7)  # NVDA Attempt 1 failed at 0.4s; now inside 10.0s retry cooldown
+        batch.cancel(started.batch_id)
+        final = await _wait_finished(batch, step=0.05)
+        return final, loop.time() - t0
+
+    final, elapsed = run_virtual_loop(_scenario())
+    assert final.state == "cancelled"
+    assert elapsed < 2.0  # woke immediately; did NOT wait out 10.0s cooldown
+    assert [t for t, _ in fetcher.calls] == ["NVDA"]  # Attempt 2 never launched
+    nvda, avgo = final.items
+    assert nvda.state == "cancelled" and nvda.partial is True and nvda.contract_count == 2
+    assert avgo.state == "cancelled"
+    assert not svc.refresh_lock.locked()
+    assert svc.refresh_owner is None
+
+    with pytest.raises(ValueError, match="timeout_retries"):
+        BatchRefreshService(svc, timeout_retries=-1)
+    with pytest.raises(ValueError, match="timeout_retry_cooldown_sec"):
+        BatchRefreshService(svc, timeout_retry_cooldown_sec=-0.1)

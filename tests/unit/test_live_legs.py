@@ -759,7 +759,7 @@ def test_live_legs_qualifies_missing_conids_in_chunks_of_ten() -> None:
     options = tuple(_opt("NVDA", 90.0 + idx, conid=0) for idx in range(14))
     spec = LiveLegsSpec(0, options, (_spot("NVDA"),))
     frame = run_coro(_first(svc.stream_live_legs(_Source(spec), session_id="s-chunk")))
-    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 4]
+    assert batch_sizes == [QUALIFY_CHUNK_SIZE, 14 - QUALIFY_CHUNK_SIZE]
     assert QUALIFY_CHUNK_PAUSE_SEC in sleeps
     assert len(frame.quotes) == 14
     _assert_all_released(svc, ib)
