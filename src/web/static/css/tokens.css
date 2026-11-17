@@ -38,8 +38,10 @@ html[data-theme="print"] {
   --accent-atm-bg: rgba(17, 17, 17, 0.06);
   --corridor-itm-call-bg: rgba(15, 110, 79, 0.045);
   --corridor-itm-put-bg: rgba(168, 32, 32, 0.045);
-  --corridor-leg-buy-bg: rgba(15, 110, 79, 0.15);
-  --corridor-leg-sell-bg: rgba(168, 32, 32, 0.15);
+  --corridor-leg-buy: #B45309;
+  --corridor-leg-sell: #EA580C;
+  --corridor-leg-buy-bg: rgba(180, 83, 9, 0.14);
+  --corridor-leg-sell-bg: rgba(234, 88, 12, 0.15);
   --wl-marquee-bg: rgba(29, 78, 216, 0.14);
   --wl-marquee-border: var(--accent-focus);
   --plotly-bg: #FFFFFF;
@@ -73,8 +75,10 @@ html[data-theme="terminal"] {
   --accent-atm-bg: rgba(245, 158, 11, 0.10);
   --corridor-itm-call-bg: rgba(16, 185, 129, 0.065);
   --corridor-itm-put-bg: rgba(239, 68, 68, 0.065);
-  --corridor-leg-buy-bg: rgba(16, 185, 129, 0.18);
-  --corridor-leg-sell-bg: rgba(239, 68, 68, 0.18);
+  --corridor-leg-buy: #F59E0B;
+  --corridor-leg-sell: #FB923C;
+  --corridor-leg-buy-bg: rgba(245, 158, 11, 0.18);
+  --corridor-leg-sell-bg: rgba(251, 146, 60, 0.20);
   --wl-marquee-bg: rgba(56, 189, 248, 0.16);
   --wl-marquee-border: var(--accent-focus);
   --plotly-bg: #11161F;

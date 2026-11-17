@@ -1490,3 +1490,685 @@ def test_open_position_view_populates_conid_and_opened_at() -> None:
     pltr_stk = by_key["STK:PLTR"]
     assert pltr_stk.conid == 880002
     assert pltr_stk.opened_at is None
+
+
+def test_closed_positions_not_resurrected_by_stale_flex_while_newer_gateway_kept() -> None:
+    execs = _exec_df(
+        [
+            # NVDA OPT closed to zero at _ts(2)
+            {
+                "exec_id": "cl-nvda-opt-1",
+                "underlying": "NVDA",
+                "conid": 710001,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.00,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-nvda-opt-2",
+                "underlying": "NVDA",
+                "conid": 710001,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 1.00,
+                "open_close": "C",
+                "executed_at": _ts(2),
+            },
+            # NVDA STK closed to zero at _ts(2)
+            {
+                "exec_id": "cl-nvda-stk-1",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 4815747,
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 120.0,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-nvda-stk-2",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 4815747,
+                "side": "SLD",
+                "quantity": 100.0,
+                "price": 130.0,
+                "open_close": "C",
+                "executed_at": _ts(2),
+            },
+            # CRDO OPT & STK closed to zero at _ts(2) (stale GATEWAY_LIVE <= _ts(2))
+            {
+                "exec_id": "cl-crdo-opt-1",
+                "underlying": "CRDO",
+                "conid": 710002,
+                "expiry": "20261218",
+                "strike": 45.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 2.00,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-crdo-opt-2",
+                "underlying": "CRDO",
+                "conid": 710002,
+                "expiry": "20261218",
+                "strike": 45.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.00,
+                "open_close": "C",
+                "executed_at": _ts(2),
+            },
+            {
+                "exec_id": "cl-crdo-stk-1",
+                "underlying": "CRDO",
+                "asset_class": "STK",
+                "conid": 710003,
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 40.0,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-crdo-stk-2",
+                "underlying": "CRDO",
+                "asset_class": "STK",
+                "conid": 710003,
+                "side": "SLD",
+                "quantity": 50.0,
+                "price": 44.0,
+                "open_close": "C",
+                "executed_at": _ts(2),
+            },
+            # AVGO OPT & STK closed at _ts(3), then reopened live via newer GATEWAY_LIVE (_ts(1))
+            {
+                "exec_id": "cl-avgo-opt-1",
+                "underlying": "AVGO",
+                "conid": 710004,
+                "expiry": "20261218",
+                "strike": 170.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 4.00,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-avgo-opt-2",
+                "underlying": "AVGO",
+                "conid": 710004,
+                "expiry": "20261218",
+                "strike": 170.0,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 1.50,
+                "open_close": "C",
+                "executed_at": _ts(3),
+            },
+            {
+                "exec_id": "cl-avgo-stk-1",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "conid": 710005,
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 150.0,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "cl-avgo-stk-2",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "conid": 710005,
+                "side": "SLD",
+                "quantity": 50.0,
+                "price": 160.0,
+                "open_close": "C",
+                "executed_at": _ts(3),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            # Stale FLEX_* rows (even with recent updated_at) must NOT resurrect closed contracts
+            {
+                "conid": 710001,
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "position": -1.0,
+                "avg_cost": 3.00,
+                "mark_price": 2.00,
+                "source": "FLEX_ACTIVITY_365",
+                "updated_at": _ts(0),
+            },
+            {
+                "conid": 4815747,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 100.0,
+                "avg_cost": 120.0,
+                "mark_price": 135.0,
+                "source": "FLEX_ACTIVITY_365",
+                "updated_at": _ts(0),
+            },
+            # Stale GATEWAY_LIVE rows with updated_at <= latest_exec_at must NOT resurrect
+            {
+                "conid": 710002,
+                "underlying": "CRDO",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 45.0,
+                "right": "C",
+                "position": 1.0,
+                "avg_cost": 2.00,
+                "mark_price": 2.50,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(2),
+            },
+            {
+                "conid": 710003,
+                "underlying": "CRDO",
+                "asset_class": "STK",
+                "position": 50.0,
+                "avg_cost": 40.0,
+                "mark_price": 45.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(2),
+            },
+            # Newer GATEWAY_LIVE rows (updated_at > latest_exec_at) ARE kept as live/reopened
+            {
+                "conid": 710004,
+                "underlying": "AVGO",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 170.0,
+                "right": "P",
+                "position": -2.0,
+                "avg_cost": 3.50,
+                "mark_price": 3.00,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 710005,
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "position": 80.0,
+                "avg_cost": 162.0,
+                "mark_price": 165.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+        ]
+    )
+
+    rep_with_stk = build_ledger_report(
+        execs, pos, window="ALL", view="open_mtm", include_stock_gain=True, as_of=AS_OF
+    )
+    by_key = {p.position_key: p for p in rep_with_stk.open_positions}
+    assert set(by_key) == {"OPT:AVGO:20261218:170:P", "STK:AVGO"}
+
+    avgo_opt = by_key["OPT:AVGO:20261218:170:P"]
+    assert avgo_opt.quantity == pytest.approx(-2.0)
+    assert avgo_opt.cost_basis_ex_fee == pytest.approx(-700.0)
+    assert avgo_opt.unrealized_pnl_ex_fee == pytest.approx(100.0)
+
+    avgo_stk = by_key["STK:AVGO"]
+    assert avgo_stk.quantity == pytest.approx(80.0)
+    assert avgo_stk.cost_basis_ex_fee == pytest.approx(12960.0)
+    assert avgo_stk.unrealized_pnl_ex_fee == pytest.approx(240.0)
+
+    rep_opt_only = build_ledger_report(
+        execs, pos, window="ALL", view="open_mtm", include_stock_gain=False, as_of=AS_OF
+    )
+    assert [p.position_key for p in rep_opt_only.open_positions] == ["OPT:AVGO:20261218:170:P"]
+
+
+def test_gateway_snapshot_suppresses_absent_older_lots_and_reconciles_resized_positions() -> None:
+    execs = _exec_df(
+        [
+            # Absent older OPT & STK lots (opened _ts(8) < gw_*_snapshot_ts _ts(1)) -> suppressed
+            {
+                "exec_id": "gw-abs-opt",
+                "underlying": "MSFT",
+                "conid": 720001,
+                "expiry": "20261218",
+                "strike": 420.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 5.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(8),
+            },
+            {
+                "exec_id": "gw-abs-stk",
+                "underlying": "MSFT",
+                "asset_class": "STK",
+                "conid": 720002,
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 400.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(8),
+            },
+            # Absent newer OPT & STK lots (opened AFTER gw_*_snapshot_ts at _ts(1)) -> kept
+            {
+                "exec_id": "gw-new-opt",
+                "underlying": "PLTR",
+                "conid": 720003,
+                "expiry": "20261218",
+                "strike": 55.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 2.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(0, hours_offset=-1.0),
+            },
+            {
+                "exec_id": "gw-new-stk",
+                "underlying": "PLTR",
+                "asset_class": "STK",
+                "conid": 720004,
+                "side": "BOT",
+                "quantity": 25.0,
+                "price": 50.0,
+                "commission": 0.50,
+                "open_close": "O",
+                "executed_at": _ts(0, hours_offset=-1.0),
+            },
+            # Scaled-down same-direction OPT (-2 -> -1) & STK (+100 -> +40)
+            {
+                "exec_id": "gw-sd-opt",
+                "underlying": "NVDA",
+                "conid": 720005,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 2.0,
+                "price": 5.00,
+                "commission": 1.30,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "gw-sd-stk",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 720006,
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 120.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            # Expanded same-direction OPT (-1 -> -3) & STK (+50 -> +120)
+            {
+                "exec_id": "gw-exp-opt",
+                "underlying": "AVGO",
+                "conid": 720007,
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 4.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "gw-exp-stk",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "conid": 720008,
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 160.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            # Flipped-direction OPT (-1 -> +2) & STK (+20 -> -30)
+            {
+                "exec_id": "gw-flip-opt",
+                "underlying": "AMD",
+                "conid": 720009,
+                "expiry": "20261218",
+                "strike": 150.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "gw-flip-stk",
+                "underlying": "AMD",
+                "asset_class": "STK",
+                "conid": 720010,
+                "side": "BOT",
+                "quantity": 20.0,
+                "price": 140.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            {
+                "conid": 720005,
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "position": -1.0,
+                "avg_cost": 5.00,
+                "mark_price": 4.00,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 720006,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 40.0,
+                "avg_cost": 120.0,
+                "mark_price": 130.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 720007,
+                "underlying": "AVGO",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "C",
+                "position": -3.0,
+                "avg_cost": 4.50,
+                "mark_price": 4.00,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 720008,
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "position": 120.0,
+                "avg_cost": 165.0,
+                "mark_price": 170.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 720009,
+                "underlying": "AMD",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 150.0,
+                "right": "P",
+                "position": 2.0,
+                "avg_cost": 2.50,
+                "mark_price": 3.50,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+            {
+                "conid": 720010,
+                "underlying": "AMD",
+                "asset_class": "STK",
+                "position": -30.0,
+                "avg_cost": 145.0,
+                "mark_price": 140.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            },
+        ]
+    )
+
+    rep = build_ledger_report(
+        execs, pos, window="ALL", view="open_mtm", include_stock_gain=True, as_of=AS_OF
+    )
+    by_key = {p.position_key: p for p in rep.open_positions}
+
+    assert "OPT:MSFT:20261218:420:C" not in by_key
+    assert "STK:MSFT" not in by_key
+    assert "OPT:PLTR:20261218:55:P" in by_key
+    assert "STK:PLTR" in by_key
+
+    # Scaled-down same-direction resize
+    nvda_opt = by_key["OPT:NVDA:20261218:140:C"]
+    assert nvda_opt.quantity == pytest.approx(-1.0)
+    assert nvda_opt.avg_cost_price == pytest.approx(5.00)
+    assert nvda_opt.cost_basis_ex_fee == pytest.approx(-500.0)
+    assert nvda_opt.fees == pytest.approx(0.65)
+    assert nvda_opt.unrealized_pnl_ex_fee == pytest.approx(100.0)
+
+    nvda_stk = by_key["STK:NVDA"]
+    assert nvda_stk.quantity == pytest.approx(40.0)
+    assert nvda_stk.avg_cost_price == pytest.approx(120.0)
+    assert nvda_stk.cost_basis_ex_fee == pytest.approx(4800.0)
+    assert nvda_stk.fees == pytest.approx(0.40)
+    assert nvda_stk.unrealized_pnl_ex_fee == pytest.approx(400.0)
+
+    # Expanded same-direction resize
+    avgo_opt = by_key["OPT:AVGO:20261218:180:C"]
+    assert avgo_opt.quantity == pytest.approx(-3.0)
+    assert avgo_opt.avg_cost_price == pytest.approx(4.50)
+    assert avgo_opt.cost_basis_ex_fee == pytest.approx(-1350.0)
+    assert avgo_opt.unrealized_pnl_ex_fee == pytest.approx(150.0)
+
+    avgo_stk = by_key["STK:AVGO"]
+    assert avgo_stk.quantity == pytest.approx(120.0)
+    assert avgo_stk.avg_cost_price == pytest.approx(165.0)
+    assert avgo_stk.cost_basis_ex_fee == pytest.approx(19800.0)
+    assert avgo_stk.unrealized_pnl_ex_fee == pytest.approx(600.0)
+
+    # Flipped-direction resize (also unlinks campaign and reclassifies strategy)
+    amd_opt = by_key["OPT:AMD:20261218:150:P"]
+    assert amd_opt.quantity == pytest.approx(2.0)
+    assert amd_opt.avg_cost_price == pytest.approx(2.50)
+    assert amd_opt.cost_basis_ex_fee == pytest.approx(500.0)
+    assert amd_opt.unrealized_pnl_ex_fee == pytest.approx(200.0)
+    assert amd_opt.strategy_type == "LONG_PUT"
+    assert amd_opt.campaign_id is None
+
+    amd_stk = by_key["STK:AMD"]
+    assert amd_stk.quantity == pytest.approx(-30.0)
+    assert amd_stk.avg_cost_price == pytest.approx(145.0)
+    assert amd_stk.cost_basis_ex_fee == pytest.approx(-4350.0)
+    assert amd_stk.unrealized_pnl_ex_fee == pytest.approx(150.0)
+
+
+def test_stale_gateway_snapshot_does_not_revert_later_partial_close() -> None:
+    execs = _exec_df(
+        [
+            # T1: open -2 OPT and +100 STK for NVDA, plus -2 OPT and +100 STK for AVGO
+            {
+                "exec_id": "t1-nvda-opt-open",
+                "underlying": "NVDA",
+                "conid": 730001,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 2.0,
+                "price": 5.00,
+                "commission": 1.30,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "t1-nvda-stk-open",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 730002,
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 120.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "t1-avgo-opt-open",
+                "underlying": "AVGO",
+                "conid": 730003,
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 2.0,
+                "price": 4.00,
+                "commission": 1.30,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "t1-avgo-stk-open",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "conid": 730004,
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 160.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+            # T3 > T2: partial closes without a new Gateway snapshot after T2
+            {
+                "exec_id": "t3-nvda-opt-trim",
+                "underlying": "NVDA",
+                "conid": 730001,
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 4.50,
+                "commission": 0.65,
+                "open_close": "C",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "t3-nvda-stk-trim",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "conid": 730002,
+                "side": "SLD",
+                "quantity": 50.0,
+                "price": 128.0,
+                "commission": 0.50,
+                "open_close": "C",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "t3-avgo-opt-trim",
+                "underlying": "AVGO",
+                "conid": 730003,
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 3.00,
+                "commission": 0.65,
+                "open_close": "C",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "t3-avgo-stk-trim",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "conid": 730004,
+                "side": "SLD",
+                "quantity": 50.0,
+                "price": 165.0,
+                "commission": 0.50,
+                "open_close": "C",
+                "executed_at": _ts(1),
+            },
+        ]
+    )
+    # T2 snapshot (_ts(3)): has NVDA pre-trim quantities and omits AVGO
+    pos = _pos_df(
+        [
+            {
+                "conid": 730001,
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "C",
+                "position": -2.0,
+                "avg_cost": 5.00,
+                "mark_price": 4.00,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(3),
+            },
+            {
+                "conid": 730002,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 100.0,
+                "avg_cost": 120.0,
+                "mark_price": 130.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(3),
+            },
+        ]
+    )
+
+    rep = build_ledger_report(
+        execs, pos, window="ALL", view="open_mtm", include_stock_gain=True, as_of=AS_OF
+    )
+    by_key = {p.position_key: p for p in rep.open_positions}
+
+    nvda_opt = by_key["OPT:NVDA:20261218:140:C"]
+    assert nvda_opt.quantity == pytest.approx(-1.0)
+    assert nvda_opt.cost_basis_ex_fee == pytest.approx(-500.0)
+    assert nvda_opt.fees == pytest.approx(0.65)
+    assert nvda_opt.unrealized_pnl_ex_fee == pytest.approx(100.0)
+
+    nvda_stk = by_key["STK:NVDA"]
+    assert nvda_stk.quantity == pytest.approx(50.0)
+    assert nvda_stk.cost_basis_ex_fee == pytest.approx(6000.0)
+    assert nvda_stk.fees == pytest.approx(0.50)
+    assert nvda_stk.unrealized_pnl_ex_fee == pytest.approx(500.0)
+
+    # Contracts active at T3 > T2 also remain visible even if absent from T2 Gateway snapshot
+    assert by_key["OPT:AVGO:20261218:180:C"].quantity == pytest.approx(-1.0)
+    assert by_key["STK:AVGO"].quantity == pytest.approx(50.0)

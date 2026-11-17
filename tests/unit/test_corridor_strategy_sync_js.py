@@ -315,6 +315,8 @@ globalThis.window = {
           "--plotly-ink": "#111111",
           "--accent-call": "#0F6E4F",
           "--accent-put": "#A82020",
+          "--corridor-leg-buy": "#B45309",
+          "--corridor-leg-sell": "#EA580C",
           "--accent-warn": "#B45309",
           "--text-secondary": "#555555",
         };
@@ -795,10 +797,10 @@ def test_ladder_side_badges_tooltips_and_chart_markers() -> None:
         corridor.syncCorridorWithStrategy();
         const html = dom.corridorLadderTbody.innerHTML;
 
-        // Verify strike 95 has SELL P badge (2x SELL P) on row and cell-leg-sell on Put side only
-        assert.ok(html.includes("2\\u00D7 SELL P"));
-        assert.ok(html.includes("BUY C"));
-        assert.ok(html.includes("SELL P"));
+        // Verify strike 95 has SELL P badge (▼ 2x SELL P) on row and cell-leg-sell on Put side only
+        assert.ok(html.includes("\\u25BC 2\\u00D7 SELL P"));
+        assert.ok(html.includes("\\u25B2 BUY C"));
+        assert.ok(html.includes("\\u25BC SELL P"));
         assert.ok(!html.includes(">LEG<"));
 
         // Split HTML into <tr> blocks to verify per-side highlighting!
@@ -845,8 +847,13 @@ def test_ladder_side_badges_tooltips_and_chart_markers() -> None:
         const otherTrace = lastPlot.traces.find((t) => t.name === "Strategy Legs (Other Exp)");
         assert.ok(stratTrace.marker.symbol.includes("triangle-up"));
         assert.ok(stratTrace.marker.symbol.includes("triangle-down"));
+        assert.ok(stratTrace.marker.color.includes("#B45309"));
+        assert.ok(stratTrace.marker.color.includes("#EA580C"));
+        assert.ok(!stratTrace.marker.color.includes("#0F6E4F"));
+        assert.ok(!stratTrace.marker.color.includes("#A82020"));
         assert.deepEqual(otherTrace.x, [110]);
         assert.equal(otherTrace.marker.symbol[0], "diamond-open");
+        assert.equal(otherTrace.marker.color[0], "#B45309");
         assert.ok(Number.isFinite(otherTrace.y[0]));
         const legAnnots = (lastPlot.layout.annotations || []).filter(
           (a) =>
@@ -855,9 +862,18 @@ def test_ladder_side_badges_tooltips_and_chart_markers() -> None:
             !String(a.text).includes("CW "),
         );
         assert.equal(legAnnots.length, 4);
-        assert.ok(legAnnots.some((a) => String(a.text).includes("2\\u00D7 SELL P $95")));
-        assert.ok(legAnnots.some((a) => String(a.text).includes("BUY C + SELL P $100")));
-        assert.ok(legAnnots.some((a) => String(a.text).includes("BUY C $110 (61d)")));
+        assert.ok(legAnnots.some((a) => String(a.text).includes("\\u25BC 2\\u00D7 SELL P $95")));
+        assert.ok(
+          legAnnots.some((a) =>
+            String(a.text).includes("\\u25B2 BUY C + \\u25BC SELL P $100"),
+          ),
+        );
+        assert.ok(legAnnots.some((a) => String(a.text).includes("\\u25B2 BUY C $110 (61d)")));
+        const legShapes = (lastPlot.layout.shapes || []).filter(
+          (s) => s.line && (s.line.color === "#B45309" || s.line.color === "#EA580C"),
+        );
+        assert.ok(legShapes.length >= 2);
+        assert.ok(legShapes.every((s) => s.line.dash === "dot"));
         const yVals = new Set(legAnnots.map((a) => a.y));
         assert.ok(yVals.has(0.62));
         assert.ok(yVals.has(0.32));
@@ -894,6 +910,150 @@ def test_ladder_side_badges_tooltips_and_chart_markers() -> None:
         assert.ok(xssAnnot);
         assert.ok(!String(xssAnnot.text).includes("<img"));
         assert.ok(String(xssAnnot.text).includes("&lt;img/src=x&gt;"));
+
+        // Verify DTE switch + STREAM frame with Tier-2 secondary quotes never shows duplicate walls
+        dom.corridorExpirySelect.value = "2027-01-15";
+        state.strategyLegs = [
+          { side: "SELL", right: "P", expiry: "2026-12-18", strike: 95, qty: 2 },
+          { side: "SELL", right: "C", expiry: "2026-12-18", strike: 105, qty: 1 },
+        ];
+        corridor.syncCorridorWithStrategy();
+        const preview2027 = state.corridorFrame;
+        assert.equal(preview2027.target_expiry, "2027-01-15");
+        const offLegsInPreview = preview2027.quotes.filter(
+          (q) => q.expiry === "2026-12-18" && q.is_strategy_leg,
+        );
+        assert.equal(offLegsInPreview.length, 2);
+        assert.ok(offLegsInPreview.every((q) => !q.is_put_wall && !q.is_call_wall));
+        const previewHtml = dom.corridorLadderTbody.innerHTML;
+        assert.equal((previewHtml.match(/wall-badge-put/g) || []).length, 1);
+        assert.equal((previewHtml.match(/wall-badge-call/g) || []).length, 1);
+
+        // Simulate backend STREAM frame with off-expiry Tier-2 quotes (defensive wall flags)
+        corridor.applyCorridorFrame(
+          {
+            ticker: "NVDA",
+            snapshot_id: "snap-001",
+            target_expiry: "2027-01-15",
+            target_dte: 61,
+            window_strikes: 10,
+            max_contracts: 88,
+            subscribed_count: 8,
+            subscription_cap: 90,
+            underlying_price: 100,
+            market_data_type: 3,
+            primary_put_wall: 90,
+            primary_call_wall: 110,
+            wall_basis: "VOLUME",
+            updated_ts_utc: "2026-11-17T20:00:00Z",
+            sequence: 1,
+            mode: "STREAM",
+            changed_keys: [],
+            notices: [],
+            quotes: [
+              // Target expiry 2027-01-15 (PW 90, CW 110)
+              {
+                expiry: "2027-01-15",
+                dte: 61,
+                strike: 90,
+                right: "P",
+                is_put_wall: true,
+                is_call_wall: false,
+                is_strategy_leg: false,
+                bid: 2.1,
+                ask: 2.3,
+                mid: 2.2,
+              },
+              {
+                expiry: "2027-01-15",
+                dte: 61,
+                strike: 100,
+                right: "C",
+                is_put_wall: false,
+                is_call_wall: false,
+                is_strategy_leg: false,
+                bid: 5.0,
+                ask: 5.2,
+                mid: 5.1,
+              },
+              {
+                expiry: "2027-01-15",
+                dte: 61,
+                strike: 110,
+                right: "C",
+                is_put_wall: false,
+                is_call_wall: true,
+                is_strategy_leg: false,
+                bid: 2.0,
+                ask: 2.2,
+                mid: 2.1,
+              },
+              // Off-expiry Strategy Legs on 2026-12-18 (even if stale wall flags were set)
+              {
+                expiry: "2026-12-18",
+                dte: 33,
+                strike: 95,
+                right: "P",
+                is_put_wall: true,
+                is_call_wall: false,
+                is_strategy_leg: true,
+                bid: 1.5,
+                ask: 1.7,
+                mid: 1.6,
+              },
+              {
+                expiry: "2026-12-18",
+                dte: 33,
+                strike: 105,
+                right: "C",
+                is_put_wall: false,
+                is_call_wall: true,
+                is_strategy_leg: true,
+                bid: 1.4,
+                ask: 1.6,
+                mid: 1.5,
+              },
+              // Tier-2 non-leg secondary expiry quotes on 2026-12-18
+              {
+                expiry: "2026-12-18",
+                dte: 33,
+                strike: 85,
+                right: "P",
+                is_put_wall: true,
+                is_call_wall: false,
+                is_strategy_leg: false,
+                bid: 0.4,
+                ask: 0.5,
+                mid: 0.45,
+              },
+              {
+                expiry: "2026-12-18",
+                dte: 33,
+                strike: 115,
+                right: "C",
+                is_put_wall: false,
+                is_call_wall: true,
+                is_strategy_leg: false,
+                bid: 0.3,
+                ask: 0.4,
+                mid: 0.35,
+              },
+            ],
+          },
+          { mergeIntoChain: false },
+        );
+        const streamHtml = dom.corridorLadderTbody.innerHTML;
+        assert.equal((streamHtml.match(/wall-badge-put/g) || []).length, 1);
+        assert.equal((streamHtml.match(/wall-badge-call/g) || []).length, 1);
+        assert.equal((streamHtml.match(/corridor-row-put-wall/g) || []).length, 1);
+        assert.equal((streamHtml.match(/corridor-row-call-wall/g) || []).length, 1);
+        assert.ok(!streamHtml.includes(">$85<"));
+        assert.ok(!streamHtml.includes(">$115<"));
+        const streamRows = streamHtml.split("<tr ").slice(1);
+        const offRow95 = streamRows.find((r) => r.includes(">$95<"));
+        assert.ok(offRow95);
+        assert.ok(!offRow95.includes("corridor-row-put-wall"));
+        assert.ok(!offRow95.includes("PUT WALL"));
 
         console.log(JSON.stringify({ ok: true }));
         """

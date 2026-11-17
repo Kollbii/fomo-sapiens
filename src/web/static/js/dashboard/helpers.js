@@ -184,6 +184,8 @@ export function themeVars() {
     muted: cssVar("--text-muted", isTerminal ? "#6C7687" : "#727272"),
     call: cssVar("--accent-call", isTerminal ? "#10B981" : "#0F6E4F"),
     put: cssVar("--accent-put", isTerminal ? "#EF4444" : "#A82020"),
+    legBuy: cssVar("--corridor-leg-buy", isTerminal ? "#F59E0B" : "#B45309"),
+    legSell: cssVar("--corridor-leg-sell", isTerminal ? "#FB923C" : "#EA580C"),
     anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#C2410C"),
     warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#B45309"),
     fontMono: cssVar("--font-mono", "monospace"),

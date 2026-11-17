@@ -251,14 +251,61 @@ def _extract_positions(positions_df: pl.DataFrame) -> list[NormalizedPosition]:
     return rows
 
 
+_OptPosKey = tuple[str, str, str, float, Literal["C", "P"]]
+_StkPosKey = tuple[str, str, None, None, None]
+
+
 def _opt_pos_key(
     underlying: str, expiry: str, strike: float, right: Literal["C", "P"]
-) -> tuple[str, str, str, float, Literal["C", "P"]]:
+) -> _OptPosKey:
     return (underlying, "OPT", expiry, round(strike, 6), right)
 
 
-def _stk_pos_key(underlying: str) -> tuple[str, str, None, None, None]:
+def _stk_pos_key(underlying: str) -> _StkPosKey:
     return (underlying, "STK", None, None, None)
+
+
+def _reconcile_gateway_position(
+    *,
+    pos_row: NormalizedPosition | None,
+    latest_lot_at: str,
+    net_qty: float,
+    cost_basis: float,
+    avg_cost_price: float,
+    fees: float,
+    multiplier: int,
+) -> tuple[float, float, float, float]:
+    """Reconcile FIFO lot quantity/cost basis against a newer `GATEWAY_LIVE` snapshot."""
+    if (
+        pos_row is None
+        or pos_row.source != "GATEWAY_LIVE"
+        or pos_row.updated_at < latest_lot_at
+        or abs(pos_row.position - net_qty) <= _EPS
+    ):
+        return net_qty, cost_basis, avg_cost_price, fees
+    if pos_row.position * net_qty > 0 and abs(pos_row.position) <= abs(net_qty):
+        scale = pos_row.position / net_qty
+        reconciled_cost = cost_basis * scale
+        reconciled_fees = fees * scale
+        reconciled_qty = pos_row.position
+        reconciled_avg = (
+            abs(reconciled_cost) / (abs(reconciled_qty) * multiplier) if multiplier > 0 else 0.0
+        )
+        return reconciled_qty, reconciled_cost, reconciled_avg, reconciled_fees
+    reconciled_qty = pos_row.position
+    reconciled_avg = pos_row.avg_cost if pos_row.avg_cost > 0 else avg_cost_price
+    reconciled_cost = reconciled_qty * reconciled_avg * multiplier
+    return reconciled_qty, reconciled_cost, reconciled_avg, fees
+
+
+def _should_skip_unmatched_position(
+    pos_row: NormalizedPosition,
+    latest_exec_ts: str | None,
+) -> bool:
+    """Skip unmatched position rows already seen in executions unless a newer Gateway row exists."""
+    if latest_exec_ts is None:
+        return False
+    return not (pos_row.source == "GATEWAY_LIVE" and pos_row.updated_at > latest_exec_ts)
 
 
 def _resolve_mark(
@@ -284,15 +331,34 @@ def _build_open_positions(
     campaign_open_contracts_map: dict[str, float],
     include_stock_gain: bool,
     live_marks: dict[int, float] | None,
+    latest_opt_exec_at: dict[_OptPosKey, str] | None = None,
+    latest_stk_exec_at: dict[_StkPosKey, str] | None = None,
 ) -> list[LedgerOpenPositionView]:
-    pos_opt_map: dict[tuple[str, str, str, float, Literal["C", "P"]], NormalizedPosition] = {}
-    pos_stk_map: dict[tuple[str, str, None, None, None], NormalizedPosition] = {}
+    pos_opt_map: dict[_OptPosKey, NormalizedPosition] = {}
+    pos_stk_map: dict[_StkPosKey, NormalizedPosition] = {}
     for pos in positions_list:
         if pos.asset_class == "OPT":
             assert pos.expiry is not None and pos.strike is not None and pos.right is not None
             pos_opt_map[_opt_pos_key(pos.underlying, pos.expiry, pos.strike, pos.right)] = pos
         else:
             pos_stk_map[_stk_pos_key(pos.underlying)] = pos
+
+    gw_opt_snapshot_ts = max(
+        (
+            p.updated_at
+            for p in positions_list
+            if p.source == "GATEWAY_LIVE" and p.asset_class == "OPT" and p.updated_at
+        ),
+        default="",
+    )
+    gw_stk_snapshot_ts = max(
+        (
+            p.updated_at
+            for p in positions_list
+            if p.source == "GATEWAY_LIVE" and p.asset_class == "STK" and p.updated_at
+        ),
+        default="",
+    )
 
     # Identify active covered-call campaign per underlying for linking covered stock shares.
     active_cc_by_underlying: dict[str, str] = {}
@@ -305,13 +371,11 @@ def _build_open_positions(
             active_cc_by_underlying[camp.underlying] = camp.campaign_id
 
     open_views: list[LedgerOpenPositionView] = []
-    matched_opt_keys: set[tuple[str, str, str, float, Literal["C", "P"]]] = set()
-    matched_stk_keys: set[tuple[str, str, None, None, None]] = set()
+    matched_opt_keys: set[_OptPosKey] = set()
+    matched_stk_keys: set[_StkPosKey] = set()
 
     # 1. Option open FIFO lots grouped by contract.
-    opt_groups: dict[tuple[str, str, str, float, Literal["C", "P"]], list[OptLot]] = defaultdict(
-        list
-    )
+    opt_groups: dict[_OptPosKey, list[OptLot]] = defaultdict(list)
     for lot in open_opt_lots_all:
         opt_groups[_opt_pos_key(lot.underlying, lot.expiry, lot.strike, lot.right)].append(lot)
 
@@ -323,6 +387,13 @@ def _build_open_positions(
             continue
         matched_opt_keys.add(key)
         pos_row = pos_opt_map.get(key)
+        latest_lot_opened_at = max(lot.opened_at for lot in lots)
+        latest_opt_activity_at = max(
+            latest_lot_opened_at,
+            latest_opt_exec_at.get(key, "") if latest_opt_exec_at else "",
+        )
+        if pos_row is None and gw_opt_snapshot_ts and latest_opt_activity_at < gw_opt_snapshot_ts:
+            continue
         first = lots[0]
         mult = first.multiplier
         conid = (pos_row.conid if pos_row is not None else None) or next(
@@ -336,14 +407,29 @@ def _build_open_positions(
         )
         avg_cost_price = abs(cost_basis) / (abs(net_qty) * mult) if mult > 0 else 0.0
         fees = sum(lot.open_fee_remaining for lot in lots)
+        raw_net_qty = net_qty
+        net_qty, cost_basis, avg_cost_price, fees = _reconcile_gateway_position(
+            pos_row=pos_row,
+            latest_lot_at=latest_opt_activity_at,
+            net_qty=net_qty,
+            cost_basis=cost_basis,
+            avg_cost_price=avg_cost_price,
+            fees=fees,
+            multiplier=mult,
+        )
 
+        direction_preserved = net_qty * raw_net_qty > 0
         camp_ids = {lot.campaign_id for lot in lots if lot.campaign_id}
         campaign_id = (
-            next(iter(camp_ids))
-            if len(camp_ids) == 1
-            else (next(iter(sorted(camp_ids))) if camp_ids else None)
+            (
+                next(iter(camp_ids))
+                if len(camp_ids) == 1
+                else (next(iter(sorted(camp_ids))) if camp_ids else None)
+            )
+            if direction_preserved
+            else None
         )
-        if campaign_id is not None and campaign_id in campaigns_by_id:
+        if direction_preserved and campaign_id is not None and campaign_id in campaigns_by_id:
             strategy_type = campaigns_by_id[campaign_id].strategy_type
         else:
             stk_anchor = pos_stk_map.get(_stk_pos_key(first.underlying))
@@ -400,6 +486,10 @@ def _build_open_positions(
     # 2. Unmatched open OPT rows from `positions_df` (opened before execution history).
     for key, pos_row in sorted(pos_opt_map.items()):
         if key in matched_opt_keys:
+            continue
+        if _should_skip_unmatched_position(
+            pos_row, latest_opt_exec_at.get(key) if latest_opt_exec_at else None
+        ):
             continue
         assert (
             pos_row.expiry is not None and pos_row.strike is not None and pos_row.right is not None
@@ -458,7 +548,7 @@ def _build_open_positions(
 
     # 3. Covered / open stock positions when `include_stock_gain=True`.
     if include_stock_gain:
-        stk_groups: dict[tuple[str, str, None, None, None], list[StkLot]] = defaultdict(list)
+        stk_groups: dict[_StkPosKey, list[StkLot]] = defaultdict(list)
         for stk_lot in open_stk_lots_all:
             stk_groups[_stk_pos_key(stk_lot.underlying)].append(stk_lot)
 
@@ -471,6 +561,17 @@ def _build_open_positions(
             matched_stk_keys.add(stk_key)
             first_stk = stk_lots[0]
             pos_row = pos_stk_map.get(stk_key)
+            latest_stk_lot_at = max(sl.executed_at for sl in stk_lots)
+            latest_stk_activity_at = max(
+                latest_stk_lot_at,
+                latest_stk_exec_at.get(stk_key, "") if latest_stk_exec_at else "",
+            )
+            if (
+                pos_row is None
+                and gw_stk_snapshot_ts
+                and latest_stk_activity_at < gw_stk_snapshot_ts
+            ):
+                continue
             conid = (pos_row.conid if pos_row is not None else None) or next(
                 (sl.conid for sl in stk_lots if sl.conid is not None), None
             )
@@ -481,6 +582,15 @@ def _build_open_positions(
             )
             avg_cost_price = abs(cost_basis) / abs(net_shares)
             fees = sum(sl.open_fee_remaining for sl in stk_lots)
+            net_shares, cost_basis, avg_cost_price, fees = _reconcile_gateway_position(
+                pos_row=pos_row,
+                latest_lot_at=latest_stk_activity_at,
+                net_qty=net_shares,
+                cost_basis=cost_basis,
+                avg_cost_price=avg_cost_price,
+                fees=fees,
+                multiplier=1,
+            )
             cc_cid = active_cc_by_underlying.get(first_stk.underlying)
             stk_strategy: LedgerStrategyType = (
                 "COVERED_CALL"
@@ -517,6 +627,10 @@ def _build_open_positions(
 
         for stk_key, pos_row in sorted(pos_stk_map.items()):
             if stk_key in matched_stk_keys:
+                continue
+            if _should_skip_unmatched_position(
+                pos_row, latest_stk_exec_at.get(stk_key) if latest_stk_exec_at else None
+            ):
                 continue
             cc_cid = active_cc_by_underlying.get(pos_row.underlying)
             pos_stk_strategy: LedgerStrategyType = (
@@ -613,6 +727,21 @@ def build_ledger_report(
         else [pos for pos in all_positions if pos.underlying == ticker_norm]
     )
 
+    latest_opt_exec_at: dict[_OptPosKey, str] = {}
+    latest_stk_exec_at: dict[_StkPosKey, str] = {}
+    for ex in filtered_execs:
+        if ex.asset_class == "OPT":
+            if ex.expiry is not None and ex.strike is not None and ex.right is not None:
+                opt_key = _opt_pos_key(ex.underlying, ex.expiry, ex.strike, ex.right)
+                prev_opt_ts = latest_opt_exec_at.get(opt_key)
+                if prev_opt_ts is None or ex.executed_at > prev_opt_ts:
+                    latest_opt_exec_at[opt_key] = ex.executed_at
+        else:
+            stk_key = _stk_pos_key(ex.underlying)
+            prev_stk_ts = latest_stk_exec_at.get(stk_key)
+            if prev_stk_ts is None or ex.executed_at > prev_stk_ts:
+                latest_stk_exec_at[stk_key] = ex.executed_at
+
     execs_by_u: dict[str, list[NormalizedExecution]] = defaultdict(list)
     for ex in filtered_execs:
         execs_by_u[ex.underlying].append(ex)
@@ -684,6 +813,8 @@ def build_ledger_report(
             campaign_open_contracts_map=campaign_open_contracts_map,
             include_stock_gain=include_stock_gain,
             live_marks=live_marks,
+            latest_opt_exec_at=latest_opt_exec_at,
+            latest_stk_exec_at=latest_stk_exec_at,
         )
         mtm_acc: dict[str, list[float]] = defaultdict(list)
         for op in open_positions_built:

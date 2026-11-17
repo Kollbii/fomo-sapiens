@@ -216,6 +216,10 @@ def test_fetch_gateway_ledger_filters_opt_stk_and_strips_account() -> None:
 
     assert len(positions) == 2
     assert {p.asset_class for p in positions} == {"OPT", "STK"}
+    opt_pos = next(p for p in positions if p.asset_class == "OPT")
+    stk_pos = next(p for p in positions if p.asset_class == "STK")
+    assert opt_pos.avg_cost == pytest.approx(5.40)
+    assert stk_pos.avg_cost == pytest.approx(180.0)
     assert "U1234567" not in repr(execs)
     assert "U1234567" not in repr(positions)
 
@@ -227,6 +231,122 @@ def test_fetch_gateway_ledger_filters_opt_stk_and_strips_account() -> None:
     assert [f.secType for f in fake_ib.exec_filters] == ["OPT"]
     assert [e.asset_class for e in execs_opt_only] == ["OPT"]
     assert [p.asset_class for p in pos_opt_only] == ["OPT"]
+
+
+def test_fetch_gateway_ledger_recovers_cached_commission_on_repeat_sync() -> None:
+    fake_ib = _FakeLedgerIB()
+    ts = datetime(2026, 11, 12, 15, 30, 0, tzinfo=UTC)
+
+    opt_c = Contract(
+        secType="OPT",
+        conId=700001,
+        symbol="NVDA",
+        localSymbol="NVDA  261218C00140000",
+        lastTradeDateOrContractMonth="20261218",
+        strike=140.0,
+        right="C",
+        multiplier="100",
+        currency="USD",
+    )
+    stk_c = Contract(secType="STK", conId=4350, symbol="AVGO", currency="USD")
+
+    # Simulate ib_async Wrapper.fills caching populated CommissionReports from an earlier call,
+    # while repeat reqExecutionsAsync returns new Fill objects with empty CommissionReport().
+    cached_opt_fill = Fill(
+        contract=opt_c,
+        execution=Execution(
+            execId="repeat-opt-1",
+            acctNumber="U1234567",
+            side="BOT",
+            shares=2.0,
+            price=4.75,
+            orderId=601,
+        ),
+        commissionReport=CommissionReport(
+            execId="repeat-opt-1",
+            commission=1.35,
+            currency="USD",
+            realizedPNL=125.0,
+        ),
+        time=ts,
+    )
+    cached_stk_fill = Fill(
+        contract=stk_c,
+        execution=Execution(
+            execId="repeat-stk-1",
+            acctNumber="U1234567",
+            side="SLD",
+            shares=10.0,
+            price=182.0,
+            orderId=602,
+        ),
+        commissionReport=CommissionReport(
+            execId="repeat-stk-1",
+            commission=1.05,
+            currency="USD",
+            realizedPNL=-15.5,
+        ),
+        time=ts,
+    )
+    fake_ib.wrapper = SimpleNamespace(
+        clientId=0,
+        fills={"repeat-opt-1": cached_opt_fill, "repeat-stk-1": cached_stk_fill},
+    )
+    fake_ib.fills_opt = [
+        Fill(
+            contract=opt_c,
+            execution=cached_opt_fill.execution,
+            commissionReport=CommissionReport(),
+            time=ts,
+        ),
+        # Non-blank CommissionReport on the returned Fill must not be overridden by cache.
+        Fill(
+            contract=opt_c,
+            execution=Execution(
+                execId="repeat-opt-1-fresh",
+                acctNumber="U1234567",
+                side="SLD",
+                shares=1.0,
+                price=5.0,
+                orderId=603,
+            ),
+            commissionReport=CommissionReport(
+                execId="repeat-opt-1-fresh",
+                commission=0.95,
+                currency="USD",
+                realizedPNL=10.0,
+            ),
+            time=ts,
+        ),
+    ]
+    fake_ib.fills_stk = [
+        Fill(
+            contract=stk_c,
+            execution=cached_stk_fill.execution,
+            commissionReport=CommissionReport(),
+            time=ts,
+        )
+    ]
+
+    broker = IBKRBrokerClient(_settings(enabled=True), ib_factory=lambda: fake_ib)
+    execs, _ = run_coro(fetch_gateway_ledger(broker, include_stock=True, clock=lambda: ts))
+    by_id = {row.exec_id: row for row in execs}
+
+    assert by_id["repeat-opt-1"].commission == pytest.approx(1.35)
+    assert by_id["repeat-opt-1"].realized_pnl_ib == pytest.approx(125.0)
+    assert by_id["repeat-opt-1"].currency == "USD"
+    assert by_id["repeat-stk-1"].commission == pytest.approx(1.05)
+    assert by_id["repeat-stk-1"].realized_pnl_ib == pytest.approx(-15.5)
+    assert by_id["repeat-opt-1-fresh"].commission == pytest.approx(0.95)
+    assert by_id["repeat-opt-1-fresh"].realized_pnl_ib == pytest.approx(10.0)
+
+    # Defensive check: non-Mapping wrapper.fills does not break execution parsing.
+    fake_ib.wrapper = SimpleNamespace(clientId=0, fills="not-a-mapping")
+    execs_unwrapped, _ = run_coro(
+        fetch_gateway_ledger(broker, include_stock=False, clock=lambda: ts)
+    )
+    unwrapped_by_id = {row.exec_id: row for row in execs_unwrapped}
+    assert unwrapped_by_id["repeat-opt-1"].commission == pytest.approx(0.0)
 
 
 def _make_pos(conid: int | None, idx: int = 1) -> LedgerPositionRow:

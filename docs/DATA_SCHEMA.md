@@ -179,12 +179,14 @@ Atomically replaced via `LedgerRepository.replace_positions()`, sorted by `(unde
 | 7 | `right` | `pl.Utf8` | Yes | `"C"` or `"P"` for `OPT`; `None` for `STK`. |
 | 8 | `multiplier` | `pl.Int64` | No | Positive contract multiplier (`100` `OPT` / `1` `STK`). |
 | 9 | `position` | `pl.Float64` | No | Signed open quantity (`> 0` long, `< 0` short); when omitted in Flex `OpenPosition`, recovered as `round(market_value / (mark_price * multiplier), 6)` with `side="Short"` negation (zero/dust `<= 1e-6` skipped). |
-| 10 | `avg_cost` | `pl.Float64` | No | Average position cost basis (default `0.0`; falls back from `costBasisPrice` to `abs(costBasisMoney / (position * multiplier))`). |
+| 10 | `avg_cost` | `pl.Float64` | No | Per-share average position cost basis (default `0.0`; Flex falls back from `costBasisPrice` to `abs(costBasisMoney / (position * multiplier))`, and Gateway `OPT` `Position.avgCost` is normalized via `abs(avgCost) / multiplier` for `multiplier > 0`). |
 | 11 | `mark_price` | `pl.Float64` | Yes | Statement mark price (`>= 0.0` or `None`). |
 | 12 | `market_value` | `pl.Float64` | Yes | Reported mark market value. |
 | 13 | `unrealized_pnl` | `pl.Float64` | Yes | Statement unrealized P&L. |
 | 14 | `source` | `pl.Utf8` | No | Same source enum as `executions.csv`. |
 | 15 | `updated_at` | `pl.Utf8` | No | Normalized UTC ISO-8601 timestamp `YYYY-MM-DDTHH:MM:SSZ`. |
+
+- **Live Gateway Reconciliation (`_merge_positions` in `src/services/ledger.py`):** When Gateway sync completes (`gateway_synced=True`), `gw_positions` is authoritative and replaces `open_positions.csv` (clearing it to `[]` when Gateway reports zero open positions). With `GATEWAY_LEDGER_INCLUDE_STOCK=false`, `STK` rows are preserved from `flex_positions` (when present) or prior persisted `open_positions.csv` rows (`existing_positions`). For `GATEWAY_LIVE` rows with `mark_price=None`, fallback `mark_price` carries over from Flex (preferred) or `existing_positions`, while `market_value` and `unrealized_pnl` are preserved only when quantities match within `1e-6` (`None` otherwise). When `gateway_synced=False`, `flex_positions` (if non-`None`) replaces `open_positions.csv` directly.
 
 ### 5.3 Sync Metadata (`data/ledger/sync_state.json`) & Deduplication Rules
 - `sync_state.json` (`LedgerSyncState`) records `last_sync_at`, `last_sync_mode`, `source_counts`, `total_executions`, `open_positions_count`, and `recommended_incremental_mode` (`"full"` | `"monthly"`). Credentials and IBKR account identifiers are never written.
