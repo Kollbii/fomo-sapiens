@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -46,7 +46,26 @@ def _normalize_gateway_side(raw: Any, quantity: float) -> LedgerSide:
     return "BOT" if quantity >= 0.0 else "SLD"
 
 
-def _fill_to_execution_row(fill: Any, *, include_stock: bool) -> LedgerExecutionRow | None:
+def _is_blank_commission_report(report: Any) -> bool:
+    """Return True when a Gateway `CommissionReport` is missing or unpopulated."""
+    if report is None:
+        return True
+    comm_exec_id = str(getattr(report, "execId", "") or "").strip()
+    raw_comm = sanitize_signed_float(getattr(report, "commission", None))
+    raw_realized = sanitize_signed_float(getattr(report, "realizedPNL", None))
+    return (
+        not comm_exec_id
+        and (raw_comm is None or raw_comm == 0.0)
+        and (raw_realized is None or raw_realized == 0.0)
+    )
+
+
+def _fill_to_execution_row(
+    fill: Any,
+    *,
+    include_stock: bool,
+    cached_commission_report: Any = None,
+) -> LedgerExecutionRow | None:
     """Convert an `ib_async.Fill` to `LedgerExecutionRow`, discarding non-OPT/STK & accounts."""
     contract = getattr(fill, "contract", None)
     execution = getattr(fill, "execution", None)
@@ -96,6 +115,10 @@ def _fill_to_execution_row(fill: Any, *, include_stock: bool) -> LedgerExecution
     proceeds = compute_signed_proceeds(side, quantity, price, multiplier)
 
     comm_report = getattr(fill, "commissionReport", None)
+    if _is_blank_commission_report(comm_report) and not _is_blank_commission_report(
+        cached_commission_report
+    ):
+        comm_report = cached_commission_report
     raw_comm = sanitize_signed_float(getattr(comm_report, "commission", None))
     commission = abs(raw_comm) if raw_comm is not None else 0.0
     realized = sanitize_signed_float(getattr(comm_report, "realizedPNL", None))
@@ -202,7 +225,8 @@ def _position_to_row(pos: Any, *, include_stock: bool, updated_at: str) -> Ledge
         multiplier = 1
         symbol = raw_symbol or underlying
 
-    avg_cost = sanitize_signed_float(getattr(pos, "avgCost", None)) or 0.0
+    raw_avg_cost = abs(sanitize_signed_float(getattr(pos, "avgCost", None)) or 0.0)
+    avg_cost = raw_avg_cost / multiplier if (sec_type == "OPT" and multiplier > 0) else raw_avg_cost
     return LedgerPositionRow(
         conid=sanitize_optional_conid(getattr(contract, "conId", None)),
         symbol=symbol,
@@ -256,9 +280,29 @@ async def fetch_gateway_ledger(
         await broker.run_stage("reqPositions", broker.ib.reqPositionsAsync()) or []
     )
 
+    raw_wrapper_fills = getattr(getattr(broker.ib, "wrapper", None), "fills", None)
+    wrapper_fills: Mapping[Any, Any] = (
+        raw_wrapper_fills if isinstance(raw_wrapper_fills, Mapping) else {}
+    )
+
     executions_by_id: dict[str, LedgerExecutionRow] = {}
     for fill in [*opt_fills, *stk_fills]:
-        row = _fill_to_execution_row(fill, include_stock=include_stock)
+        execution = getattr(fill, "execution", None)
+        raw_exec_id = getattr(execution, "execId", None) if execution is not None else None
+        exec_id_key = str(raw_exec_id or "").strip()
+        cached_fill: Any = None
+        if exec_id_key:
+            cached_fill = wrapper_fills.get(raw_exec_id)
+            if cached_fill is None and raw_exec_id != exec_id_key:
+                cached_fill = wrapper_fills.get(exec_id_key)
+        cached_comm_report = (
+            getattr(cached_fill, "commissionReport", None) if cached_fill is not None else None
+        )
+        row = _fill_to_execution_row(
+            fill,
+            include_stock=include_stock,
+            cached_commission_report=cached_comm_report,
+        )
         if row is not None:
             executions_by_id[row.exec_id] = row
 

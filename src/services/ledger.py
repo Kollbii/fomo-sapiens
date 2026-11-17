@@ -93,35 +93,41 @@ def _merge_positions(
     gw_positions: Sequence[LedgerPositionRow],
     *,
     gateway_synced: bool,
-    existing_has_flex: bool,
+    existing_positions: Sequence[LedgerPositionRow] | None = None,
+    include_stock: bool = True,
 ) -> list[LedgerPositionRow] | None:
-    """Merge Flex and live Gateway open positions without wiping Flex on empty Gateway."""
-    if not gateway_synced or not gw_positions:
-        if flex_positions is not None:
-            return list(flex_positions)
-        if gateway_synced and not existing_has_flex:
-            return []
-        return None
+    """Reconcile live Gateway open positions with Flex/persisted fallback marks."""
+    if not gateway_synced:
+        return list(flex_positions) if flex_positions is not None else None
+
+    fallback_by_key: dict[tuple[str, str, str, float, str], LedgerPositionRow] = {}
+    if existing_positions:
+        for pos in existing_positions:
+            fallback_by_key[_position_merge_key(pos)] = pos
+    if flex_positions:
+        for pos in flex_positions:
+            fallback_by_key[_position_merge_key(pos)] = pos
 
     merged: dict[tuple[str, str, str, float, str], LedgerPositionRow] = {}
-    if flex_positions:
-        for f_pos in flex_positions:
-            merged[_position_merge_key(f_pos)] = f_pos
+    if not include_stock:
+        stk_source = flex_positions if flex_positions is not None else (existing_positions or ())
+        for pos in stk_source:
+            if pos.asset_class == "STK":
+                merged[_position_merge_key(pos)] = pos
 
     for g_pos in gw_positions:
         key = _position_merge_key(g_pos)
-        existing = merged.get(key)
-        if existing is not None:
-            updates: dict[str, float | None] = {}
-            if g_pos.mark_price is None and existing.mark_price is not None:
-                updates["mark_price"] = existing.mark_price
-            if g_pos.market_value is None and existing.market_value is not None:
-                updates["market_value"] = existing.market_value
-            if g_pos.unrealized_pnl is None and existing.unrealized_pnl is not None:
-                updates["unrealized_pnl"] = existing.unrealized_pnl
-            merged[key] = g_pos.model_copy(update=updates) if updates else g_pos
-        else:
-            merged[key] = g_pos
+        existing = fallback_by_key.get(key)
+        if existing is not None and g_pos.mark_price is None and existing.mark_price is not None:
+            same_qty = abs(g_pos.position - existing.position) < 1e-6
+            g_pos = g_pos.model_copy(
+                update={
+                    "mark_price": existing.mark_price,
+                    "market_value": existing.market_value if same_qty else None,
+                    "unrealized_pnl": existing.unrealized_pnl if same_qty else None,
+                }
+            )
+        merged[key] = g_pos
 
     return list(merged.values())
 
@@ -404,16 +410,15 @@ class LedgerService:
         inserted, updated = self.repo.upsert_executions(combined_execs)
 
         existing_pos_df = self.repo.load_positions()
-        existing_has_flex = (
-            existing_pos_df.height > 0
-            and existing_pos_df.filter(existing_pos_df["source"].str.starts_with("FLEX_")).height
-            > 0
-        )
+        existing_positions = [
+            LedgerPositionRow.model_validate(r) for r in existing_pos_df.to_dicts()
+        ]
         final_positions = _merge_positions(
             flex_positions,
             gw_positions,
             gateway_synced=gateway_synced,
-            existing_has_flex=existing_has_flex,
+            existing_positions=existing_positions,
+            include_stock=cfg.gateway_include_stock,
         )
         if final_positions is not None:
             open_count = self.repo.replace_positions(final_positions)

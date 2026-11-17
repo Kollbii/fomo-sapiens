@@ -176,6 +176,7 @@ def _settings(
     monthly_id: str | None = "MON30",
     trade_conf_id: str | None = None,
     gateway_sync_enabled: bool = False,
+    gateway_include_stock: bool = True,
 ) -> Settings:
     return Settings(
         ibkr=IBKRSettings(
@@ -189,6 +190,7 @@ def _settings(
             flex_monthly_query_id=monthly_id,
             flex_trade_conf_query_id=trade_conf_id,
             gateway_sync_enabled=gateway_sync_enabled,
+            gateway_include_stock=gateway_include_stock,
         ),
     )
 
@@ -711,3 +713,147 @@ def test_analyzer_service_auto_syncs_paper_trades_on_import_sync_and_startup(
     reloaded, reloaded_active = ext_analyzer.paper_trades.list_trades(status="ACTIVE")
     assert reloaded_active == 1
     assert len(reloaded) == 1
+
+
+def test_sync_gateway_reconciles_closed_and_resized_flex_positions(tmp_path: Path) -> None:
+    repo = LedgerRepository("data/ledger", root=tmp_path)
+    two_positions_xml = (
+        "<OpenPositions>"
+        '<OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY" '
+        'symbol="NVDA  261218C00140000" underlyingSymbol="NVDA" conid="700001" '
+        'multiplier="100" strike="140" expiry="20261218" putCall="C" '
+        'position="-2" costBasisPrice="5.40" markPrice="4.90" '
+        'positionValue="-980.0" fifoPnlUnrealized="100.0" reportDate="20261112" />'
+        '<OpenPosition accountId="U1234567" assetCategory="OPT" levelOfDetail="SUMMARY" '
+        'symbol="AVGO  261218P00170000" underlyingSymbol="AVGO" conid="710001" '
+        'multiplier="100" strike="170" expiry="20261218" putCall="P" '
+        'position="-1" costBasisPrice="3.20" markPrice="2.80" '
+        'positionValue="-280.0" fifoPnlUnrealized="40.0" reportDate="20261112" />'
+        "</OpenPositions>"
+    )
+    flex_client, _ = _make_flex_client(
+        {"ACT365": _xml_statement(exec_id="exec-flex-2pos", open_positions_xml=two_positions_xml)}
+    )
+
+    nvda_contract = Contract(
+        conId=700001,
+        symbol="NVDA",
+        secType="OPT",
+        lastTradeDateOrContractMonth="20261218",
+        strike=140.0,
+        right="C",
+        multiplier="100",
+        currency="USD",
+    )
+    fake_ib = _FakeServiceIB(offline=False)
+    fake_ib.positions_result = [
+        Position(account="U1234567", contract=nvda_contract, position=-1.0, avgCost=540.0),
+    ]
+    cfg = _settings(monthly_id=None, gateway_sync_enabled=True)
+    broker = IBKRBrokerClient(cfg, ib_factory=lambda: fake_ib)
+    svc = LedgerService(settings=cfg, repo=repo, broker_client=broker, flex_client=flex_client)
+
+    # 1. Resized NVDA (-2 -> -1) keeps Flex mark_price=4.90 but clears stale market_value & PnL;
+    #    closed AVGO is removed because Gateway is authoritative for live open positions.
+    res1 = run_coro(svc.sync_ledger(mode="full"))
+    assert res1.gateway_synced is True
+    assert res1.open_positions_count == 1
+    rows1 = repo.load_positions().to_dicts()
+    assert len(rows1) == 1
+    assert rows1[0]["underlying"] == "NVDA"
+    assert rows1[0]["position"] == pytest.approx(-1.0)
+    assert rows1[0]["avg_cost"] == pytest.approx(5.40)
+    assert rows1[0]["mark_price"] == pytest.approx(4.90)
+    assert rows1[0]["market_value"] is None
+    assert rows1[0]["unrealized_pnl"] is None
+
+    # 2. Empty Gateway positions clears open_positions.csv even when Flex had EOD open rows.
+    fake_ib.positions_result = []
+    res2 = run_coro(svc.sync_ledger(mode="full"))
+    assert res2.gateway_synced is True
+    assert res2.open_positions_count == 0
+    assert repo.load_positions().height == 0
+
+
+def test_sync_gateway_only_carries_existing_marks_and_preserves_stk_when_excluded(
+    tmp_path: Path,
+) -> None:
+    repo = LedgerRepository("data/ledger", root=tmp_path)
+    repo.replace_positions(
+        [
+            LedgerPositionRow(
+                conid=700001,
+                symbol="NVDA  261218C00140000",
+                underlying="NVDA",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=140.0,
+                right="C",
+                multiplier=100,
+                position=-2.0,
+                avg_cost=5.40,
+                mark_price=4.90,
+                market_value=-980.0,
+                unrealized_pnl=100.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T14:00:00Z",
+            ),
+            LedgerPositionRow(
+                conid=265598,
+                symbol="AAPL",
+                underlying="AAPL",
+                asset_class="STK",
+                multiplier=1,
+                position=100.0,
+                avg_cost=210.0,
+                mark_price=220.0,
+                market_value=22000.0,
+                unrealized_pnl=1000.0,
+                source="FLEX_ACTIVITY_365",
+                updated_at="2026-11-12T14:00:00Z",
+            ),
+        ]
+    )
+
+    nvda_contract = Contract(
+        conId=700001,
+        symbol="NVDA",
+        secType="OPT",
+        lastTradeDateOrContractMonth="20261218",
+        strike=140.0,
+        right="C",
+        multiplier="100",
+        currency="USD",
+    )
+    aapl_stk = Contract(conId=265598, symbol="AAPL", secType="STK", currency="USD")
+    fake_ib = _FakeServiceIB(offline=False)
+    fake_ib.positions_result = [
+        Position(account="U1234567", contract=nvda_contract, position=-2.0, avgCost=540.0),
+        Position(account="U1234567", contract=aapl_stk, position=100.0, avgCost=210.0),
+    ]
+
+    cfg = _settings(
+        flex_token=None,
+        activity_id=None,
+        monthly_id=None,
+        gateway_sync_enabled=True,
+        gateway_include_stock=False,
+    )
+    broker = IBKRBrokerClient(cfg, ib_factory=lambda: fake_ib)
+    svc = LedgerService(settings=cfg, repo=repo, broker_client=broker)
+
+    res = run_coro(svc.sync_ledger(mode="auto"))
+    assert res.mode_used == "gateway"
+    assert res.gateway_synced is True
+    assert res.open_positions_count == 2
+
+    by_und = {row["underlying"]: row for row in repo.load_positions().to_dicts()}
+    assert by_und["NVDA"]["source"] == "GATEWAY_LIVE"
+    assert by_und["NVDA"]["avg_cost"] == pytest.approx(5.40)
+    assert by_und["NVDA"]["mark_price"] == pytest.approx(4.90)
+    assert by_und["NVDA"]["market_value"] == pytest.approx(-980.0)
+    assert by_und["NVDA"]["unrealized_pnl"] == pytest.approx(100.0)
+
+    assert by_und["AAPL"]["source"] == "FLEX_ACTIVITY_365"
+    assert by_und["AAPL"]["position"] == pytest.approx(100.0)
+    assert by_und["AAPL"]["mark_price"] == pytest.approx(220.0)
