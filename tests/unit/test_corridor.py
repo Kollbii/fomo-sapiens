@@ -234,6 +234,37 @@ def test_select_wall_corridor_caps_at_90_and_prioritizes_walls_and_legs() -> Non
     assert sec_by_strike[88.0] == {"C", "P"}
     assert sec_by_strike[112.0] == {"C", "P"}
 
+    # Wall flags must be scoped strictly to `target_expiry` ("2026-12-19").
+    assert [s.strike for s in sel.specs if s.is_put_wall] == [88.0]
+    assert [s.strike for s in sel.specs if s.is_call_wall] == [112.0]
+    assert all(s.expiry == sel.target_expiry for s in sel.specs if s.is_put_wall or s.is_call_wall)
+    assert all(
+        not s.is_put_wall and not s.is_call_wall for s in sel.specs if s.expiry != sel.target_expiry
+    )
+
+    # Off-expiry Strategy Lab legs sitting on another DTE's wall do NOT get wall flags.
+    sel_off_wall_leg = _select(
+        df,
+        target_expiry="2026-12-19",
+        window_strikes=5,
+        max_contracts=56,
+        priority_legs=[
+            CorridorLegRef(expiry="2027-01-16", strike=88.0, right="P"),
+            CorridorLegRef(expiry="2027-01-16", strike=112.0, right="C"),
+        ],
+    )
+    off_leg_specs = [
+        s for s in sel_off_wall_leg.specs if s.expiry == "2027-01-16" and s.is_strategy_leg
+    ]
+    assert len(off_leg_specs) == 2
+    assert all(not s.is_put_wall and not s.is_call_wall for s in off_leg_specs)
+    assert [(s.expiry, s.strike, s.right) for s in sel_off_wall_leg.specs if s.is_put_wall] == [
+        ("2026-12-19", 88.0, "P")
+    ]
+    assert [(s.expiry, s.strike, s.right) for s in sel_off_wall_leg.specs if s.is_call_wall] == [
+        ("2026-12-19", 112.0, "C")
+    ]
+
     # Exceeding CORRIDOR_MAX_CONTRACTS (e.g. 91) or <= 0 raises PacingViolationError.
     with pytest.raises(PacingViolationError):
         _select(df, target_expiry="2026-12-19", window_strikes=10, max_contracts=91)

@@ -164,6 +164,7 @@ def _collect_expiry_candidates(
     priority_keys: set[tuple[str, float, str]],
     seen_keys: set[tuple[str, float, str]],
     ranked_candidates: list[tuple[tuple[int, int, float, float, int], CorridorContractSpec]],
+    mark_walls: bool = True,
 ) -> None:
     avail_strikes = sorted({float(s) for s in df_exp["strike"].to_list() if float(s) > 0.0})
     if not avail_strikes:
@@ -215,8 +216,18 @@ def _collect_expiry_candidates(
             continue
 
         seen_keys.add(key)
-        is_pw = put_wall is not None and abs(strike_val - put_wall) < 1e-4 and right_u == "P"
-        is_cw = call_wall is not None and abs(strike_val - call_wall) < 1e-4 and right_u == "C"
+        is_pw = (
+            mark_walls
+            and put_wall is not None
+            and abs(strike_val - put_wall) < 1e-4
+            and right_u == "P"
+        )
+        is_cw = (
+            mark_walls
+            and call_wall is not None
+            and abs(strike_val - call_wall) < 1e-4
+            and right_u == "C"
+        )
         is_leg = key in priority_keys
         spec = _row_to_spec(
             row,
@@ -333,9 +344,17 @@ def select_wall_corridor(
             else None
         )
         zone = _classify_zone(s_idx, pw_window, cw_window, is_leg=True)
-        leg_pw, leg_cw = wall_anchors.resolve(key[0])
-        is_pw = leg_pw is not None and abs(float(raw_match["strike"]) - leg_pw) < 1e-4
-        is_cw = leg_cw is not None and abs(float(raw_match["strike"]) - leg_cw) < 1e-4
+        is_target_exp = key[0] == resolved_expiry
+        is_pw = (
+            is_target_exp
+            and put_wall is not None
+            and abs(float(raw_match["strike"]) - put_wall) < 1e-4
+        )
+        is_cw = (
+            is_target_exp
+            and call_wall is not None
+            and abs(float(raw_match["strike"]) - call_wall) < 1e-4
+        )
         spec = _row_to_spec(
             raw_match,
             symbol=symbol,
@@ -384,6 +403,7 @@ def select_wall_corridor(
                 priority_keys=priority_keys,
                 seen_keys=seen_keys,
                 ranked_candidates=ranked_candidates,
+                mark_walls=False,
             )
 
     ranked_candidates.sort(key=lambda pair: pair[0])

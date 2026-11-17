@@ -348,7 +348,6 @@ export function buildLocalCorridorPreview(data) {
         ? ((ask - bid) / mid) * 100.0
         : null;
 
-    var rowWalls = isExpMatch ? wInfo : corridorWallsForExpiry(data, row.expiry);
     candidates.push({
       sortRank: [tier, dist, Math.abs(Number(row.strike) - spot), Number(row.strike)],
       quote: {
@@ -359,12 +358,14 @@ export function buildLocalCorridorPreview(data) {
         right: String(row.right),
         zone: zone,
         is_put_wall:
-          rowWalls.putWall !== null &&
-          Math.abs(Number(row.strike) - rowWalls.putWall) < 1e-4 &&
+          isExpMatch &&
+          wInfo.putWall !== null &&
+          Math.abs(Number(row.strike) - wInfo.putWall) < 1e-4 &&
           row.right === "P",
         is_call_wall:
-          rowWalls.callWall !== null &&
-          Math.abs(Number(row.strike) - rowWalls.callWall) < 1e-4 &&
+          isExpMatch &&
+          wInfo.callWall !== null &&
+          Math.abs(Number(row.strike) - wInfo.callWall) < 1e-4 &&
           row.right === "C",
         is_strategy_leg: isLeg,
         bid: bid,
@@ -487,15 +488,17 @@ function renderCorridorKpis(frame) {
     return;
   }
 
+  var kpiExp = String(frame.target_expiry || "") || findDominantExpiry(frame.quotes);
   var pwQ = null;
   var cwQ = null;
   var spreadSum = 0;
   var spreadCnt = 0;
   for (var i = 0; i < frame.quotes.length; i++) {
     var q = frame.quotes[i];
-    if (q.is_put_wall && !pwQ) pwQ = q;
-    if (q.is_call_wall && !cwQ) cwQ = q;
-    if (q.spread_pct !== null && q.spread_pct !== undefined) {
+    var isTargetExp = !kpiExp || String(q.expiry) === kpiExp;
+    if (isTargetExp && q.is_put_wall && !pwQ) pwQ = q;
+    if (isTargetExp && q.is_call_wall && !cwQ) cwQ = q;
+    if (isTargetExp && q.spread_pct !== null && q.spread_pct !== undefined) {
       spreadSum += Number(q.spread_pct);
       spreadCnt += 1;
     }
@@ -650,10 +653,11 @@ function buildSideBadgeEntries(legs, rightLabel, hasFallback) {
   return sideOrder.map(function (side) {
     var totalQty = bySide[side];
     var sideCls = side === "SELL" ? "wall-badge-leg-sell" : "wall-badge-leg-buy";
+    var arrow = side === "SELL" ? "\u25BC " : "\u25B2 ";
     var prefix = totalQty > 1 ? totalQty + "\u00D7 " : "";
     return {
       cls: "wall-badge wall-badge-strategy " + sideCls,
-      text: prefix + side + " " + rightLabel,
+      text: arrow + prefix + side + " " + rightLabel,
     };
   });
 }
@@ -810,25 +814,6 @@ export function renderCorridorTable(frame) {
     var c = row.call;
     var p = row.put;
 
-    var cFixedKey = corridorFixedKey(row.expiry, row.strike, "C");
-    var pFixedKey = corridorFixedKey(row.expiry, row.strike, "P");
-    var callFlash = resolveCorridorSideFlash(c, cFixedKey, frame, changedSet, nextPrevMids);
-    var putFlash = resolveCorridorSideFlash(p, pFixedKey, frame, changedSet, nextPrevMids);
-
-    var isPutWall = Boolean(
-      (p && p.is_put_wall) ||
-        (row.expiry === primaryExpiry &&
-          frame.primary_put_wall !== null &&
-          frame.primary_put_wall !== undefined &&
-          Math.abs(row.strike - Number(frame.primary_put_wall)) < 1e-4)
-    );
-    var isCallWall = Boolean(
-      (c && c.is_call_wall) ||
-        (row.expiry === primaryExpiry &&
-          frame.primary_call_wall !== null &&
-          frame.primary_call_wall !== undefined &&
-          Math.abs(row.strike - Number(frame.primary_call_wall)) < 1e-4)
-    );
     var callLegs = legLookup[corridorKey(row.expiry, row.strike, "C")] || [];
     var putLegs = legLookup[corridorKey(row.expiry, row.strike, "P")] || [];
     var hasCallFallback =
@@ -837,6 +822,30 @@ export function renderCorridorTable(frame) {
       !putLegs.length && Boolean(p && (p.is_strategy_leg || p.priority_tier === "PRIORITY_STRATEGY"));
     var isLeg = Boolean(
       callLegs.length || putLegs.length || hasCallFallback || hasPutFallback
+    );
+    var isPrimaryExp = row.expiry === primaryExpiry;
+    if (!isPrimaryExp && !isLeg) {
+      continue;
+    }
+
+    var cFixedKey = corridorFixedKey(row.expiry, row.strike, "C");
+    var pFixedKey = corridorFixedKey(row.expiry, row.strike, "P");
+    var callFlash = resolveCorridorSideFlash(c, cFixedKey, frame, changedSet, nextPrevMids);
+    var putFlash = resolveCorridorSideFlash(p, pFixedKey, frame, changedSet, nextPrevMids);
+
+    var isPutWall = Boolean(
+      isPrimaryExp &&
+        ((p && p.is_put_wall) ||
+          (frame.primary_put_wall !== null &&
+            frame.primary_put_wall !== undefined &&
+            Math.abs(row.strike - Number(frame.primary_put_wall)) < 1e-4))
+    );
+    var isCallWall = Boolean(
+      isPrimaryExp &&
+        ((c && c.is_call_wall) ||
+          (frame.primary_call_wall !== null &&
+            frame.primary_call_wall !== undefined &&
+            Math.abs(row.strike - Number(frame.primary_call_wall)) < 1e-4))
     );
     var isAtm = row.key === atmRowKey;
 
@@ -1064,7 +1073,8 @@ function resolveCorridorChartLegs(frame, chartExp) {
 }
 
 function formatCorridorLegMarkerHover(leg) {
-  var sidePrefix = leg.side ? leg.side + " " : "LEG ";
+  var sideArrow = leg.side === "SELL" ? "\u25BC " : leg.side === "BUY" ? "\u25B2 " : "";
+  var sidePrefix = leg.side ? sideArrow + leg.side + " " : "LEG ";
   var qtySuffix = leg.qty > 1 ? " x" + leg.qty : "";
   var dteTxt = leg.dte !== null && leg.dte !== undefined ? " (" + leg.dte + "d)" : "";
   var lines = [
@@ -1203,9 +1213,9 @@ export function renderCorridorChart(frame, t) {
     var legY = anchorMidForLeg(leg);
     var legColor =
       leg.side === "SELL"
-        ? chartTheme.put
+        ? chartTheme.legSell || chartTheme.anomaly
         : leg.side === "BUY"
-          ? chartTheme.call
+          ? chartTheme.legBuy || chartTheme.warn
           : chartTheme.warn;
     if (leg.isOffExpiry) {
       offExpX.push(leg.strike);
@@ -1369,8 +1379,9 @@ export function renderCorridorChart(frame, t) {
     var legDesc = partOrder
       .map(function (pk) {
         var entry = partsByKey[pk];
+        var arrow = entry.side === "SELL" ? "\u25BC " : entry.side === "BUY" ? "\u25B2 " : "";
         var prefix = entry.qty > 1 ? entry.qty + "\u00D7 " : "";
-        return prefix + (entry.side ? entry.side + " " : "LEG ") + entry.right;
+        return arrow + prefix + (entry.side ? entry.side + " " : "LEG ") + entry.right;
       })
       .join(" + ");
     var dteList = Object.keys(dteTags);
@@ -1382,13 +1393,13 @@ export function renderCorridorChart(frame, t) {
     );
     var markerColor =
       hasBuy && !hasSell && !hasUnknown
-        ? chartTheme.call
+        ? chartTheme.legBuy || chartTheme.warn
         : hasSell && !hasBuy && !hasUnknown
-          ? chartTheme.put
+          ? chartTheme.legSell || chartTheme.anomaly
           : chartTheme.warn;
     var yPos = Number((0.62 - (gi % 5) * 0.1).toFixed(2));
     markers.push(
-      makeVerticalMarker(grp.strike, markerLabel, markerColor, yPos, "dashdot", chartTheme)
+      makeVerticalMarker(grp.strike, markerLabel, markerColor, yPos, "dot", chartTheme)
     );
   }
 
