@@ -423,6 +423,10 @@ function syncControls() {
     dom.refreshBtn.disabled = busy || Boolean(state.loading);
     dom.refreshBtn.title = busy ? "Disabled while a watchlist batch load is running" : "";
   }
+  if (dom.stickyRefreshBtn) {
+    dom.stickyRefreshBtn.disabled = busy || Boolean(state.loading);
+    dom.stickyRefreshBtn.title = busy ? "Disabled while a watchlist batch load is running" : "";
+  }
   if (dom.watchlistNotice) {
     dom.watchlistNotice.hidden = !state.watchlistNotice;
     dom.watchlistNotice.textContent = state.watchlistNotice || "";

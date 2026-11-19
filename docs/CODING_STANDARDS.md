@@ -110,6 +110,8 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies pure marquee/range helpers and Node.js ES-module `watchlist.js` behavior: `>= 5px` drag threshold, `[data-wl-remove]` and non-primary click exclusion, live `.wl-marquee` / `.is-marquee` preview (including mid-drag `updateRows()`/`renderRows()` batch-poll preservation), `Ctrl`/`Cmd` additive check, `Shift+Click` forward/backward range selection, `24px` `requestAnimationFrame` edge auto-scroll, `Escape`/toggle cancel cleanup, and post-drag click/change suppression.
 25. **`tests/integration/test_backtest_api.py` & `tests/unit/test_backtest_ui_js.py`:**
    - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, `POST /api/backtest/paper-trades/sync-ledger`, fill-anchored Ledger replay (with chain snapshots and synthetic `LEDGER_MTM` fallback), structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks, alongside Node.js ES-module unit checks for the Backtest splitter and inline Paper Trades drawer (`test_backtest_ui_js.py`).
+26. **`tests/unit/test_workspace_ui_js.py`:**
+   - Verifies Workspace Mode Tabs (`desk`, `portfolio`, `backtest`, `all`, `ibkr_workspace_mode_v1` persistence, cross-workspace `ensurePanelVisible`, `ibkr:panel-visibility` event firing), Row 3 Pull-Scope popover toggle/Escape/outside-click + summary formatting, and Sticky Mini Context Bar telemetry/scroll visibility via Node.js ES-module execution.
 
 ---
 

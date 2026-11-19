@@ -181,20 +181,25 @@ class FakeNode {
   }
   dispatchEvent(ev) {
     const eventObj = ev || { type: "" };
-    if (!eventObj.target) eventObj.target = this;
-    eventObj.defaultPrevented = Boolean(eventObj.defaultPrevented);
+    const isPlain = typeof Event === "undefined" || !(eventObj instanceof Event);
+    if (isPlain) {
+      if (!eventObj.target) eventObj.target = this;
+      eventObj.defaultPrevented = Boolean(eventObj.defaultPrevented);
+      eventObj.preventDefault = () => {
+        eventObj.defaultPrevented = true;
+      };
+    }
     let stopped = false;
-    eventObj.preventDefault = () => {
-      eventObj.defaultPrevented = true;
-    };
-    eventObj.stopPropagation = () => {
-      stopped = true;
-    };
+    if (isPlain) {
+      eventObj.stopPropagation = () => {
+        stopped = true;
+      };
+    }
     let cur = this;
     while (cur && !stopped) {
       const handlers = (cur.listeners[eventObj.type] || []).slice();
       for (const fn of handlers) {
-        eventObj.currentTarget = cur;
+        if (isPlain) eventObj.currentTarget = cur;
         fn.call(cur, eventObj);
       }
       cur = cur.parentNode;

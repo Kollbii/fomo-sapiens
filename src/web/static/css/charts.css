@@ -112,6 +112,17 @@
   grid-column: span 12;
 }
 
+html[data-workspace-mode="desk"] #best-option-card {
+  order: -1;
+}
+
+html[data-workspace-mode="portfolio"] .kpi-strip,
+html[data-workspace-mode="portfolio"] .chain-panel,
+html[data-workspace-mode="backtest"] .kpi-strip,
+html[data-workspace-mode="backtest"] .chain-panel {
+  display: none;
+}
+
 .panel-card.is-snapping-drag {
   max-width: none;
   z-index: 20;

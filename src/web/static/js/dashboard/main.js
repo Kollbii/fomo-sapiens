@@ -7,6 +7,7 @@ import {
   applyMdTypeBadge,
   applyTickerPullPrefsToControls,
   configuredDefaultMdType,
+  syncPullScopeSummary,
   syncStrategyAutoPopulateUI,
   updateThemeToggleLabel,
 } from "./helpers.js";
@@ -15,7 +16,9 @@ import {
 } from "./charts.js";
 import {
   applyPanelVisibility,
+  applyWorkspaceMode,
   readPanelVisibility,
+  readWorkspaceMode,
 } from "./panels.js";
 import {
   readTableSortPref,
@@ -52,10 +55,13 @@ function init() {
   restoreLedgerPreferences();
   syncStrategyAutoPopulateUI();
   applyTickerPullPrefsToControls(state.ticker);
+  syncPullScopeSummary();
   state.tableSort = readTableSortPref();
   syncTableHeaderSortUI();
   applyMdTypeBadge(configuredDefaultMdType());
+  state.workspaceMode = readWorkspaceMode();
   applyPanelVisibility(readPanelVisibility(), { skipRender: true });
+  applyWorkspaceMode(state.workspaceMode, { persist: false, skipRender: true });
   bindEvents();
   initChartResizeHandling();
   fetchStatus();

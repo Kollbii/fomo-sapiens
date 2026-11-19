@@ -10,8 +10,7 @@ import {
   themeVars,
 } from "./helpers.js";
 import {
-  applyPanelVisibility,
-  isPanelVisible,
+  ensurePanelVisible,
 } from "./panels.js";
 import {
   apiJson,
@@ -372,11 +371,7 @@ function findMatchedLedgerPaperTrade(trades, campaignId, positionKey, ticker) {
 async function activateAndReplayPaperTrade(matched) {
   if (!matched) return;
   setPaperTradesExpanded(false);
-  if (!isPanelVisible("backtest")) {
-    var nextVis = Object.assign({}, state.panelVisibility);
-    nextVis.backtest = true;
-    applyPanelVisibility(nextVis, { persist: true });
-  }
+  ensurePanelVisible("backtest");
   var filterVal = dom.backtestPaperFilter ? dom.backtestPaperFilter.value : "ACTIVE";
   var inVisibleList = (state.backtestPaperTrades || []).some(function (t) {
     return t.id === matched.id;

@@ -314,6 +314,7 @@ export function applyTickerPullPrefsToControls(ticker) {
       dom.includeShortDteToggle.checked = defaultIncludeShortDte();
     }
   }
+  syncPullScopeSummary();
   return applied;
 }
 
@@ -635,6 +636,24 @@ export function buildActivePullScopeText() {
   return "Step " + stepTxt + " | " + rangeTxt + " | " + dteWin.label + shortSuffix;
 }
 
+export function syncPullScopeSummary() {
+  if (!dom.pullScopeSummary) return;
+  var stepTxt =
+    dom.stepSelect && dom.stepSelect.value === "auto"
+      ? "Auto"
+      : dom.stepSelect
+        ? formatStepShort(Number(dom.stepSelect.value))
+        : "Auto";
+  var rangeTxt = dom.rangeSelect ? formatRangeShort(Number(dom.rangeSelect.value || 0.2)) : "\u00B120%";
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
+  var shortSuffix =
+    !dteWin.isShortIncluded && dom.includeShortDteToggle && dom.includeShortDteToggle.checked
+      ? " (+0\u201329d)"
+      : "";
+  dom.pullScopeSummary.textContent =
+    stepTxt + " \u2022 " + rangeTxt + " \u2022 " + dteWin.label + shortSuffix;
+}
+
 export function formatExpiryIso(rawExpiry) {
   var s = String(rawExpiry || "").trim();
   if (/^\d{8}$/.test(s)) {
@@ -813,6 +832,7 @@ export function resetControlCapabilities() {
   if (dom.stepSelect && !dom.stepSelect.value) {
     dom.stepSelect.value = "auto";
   }
+  syncPullScopeSummary();
 }
 
 export function syncControlCapabilities(caps) {
@@ -822,6 +842,7 @@ export function syncControlCapabilities(caps) {
   }
   applySelectCapabilityList(dom.rangeSelect, caps.available_range_pcts, formatRangeShort);
   applySelectCapabilityList(dom.stepSelect, caps.available_strike_steps, formatStepShort);
+  syncPullScopeSummary();
 }
 
 function syncSelectToNumeric(selectEl, targetVal, labelFn) {
@@ -868,6 +889,7 @@ export function syncControlsFromMeta(meta, options) {
   } else {
     applyTickerPullPrefsToControls(tickerKey);
   }
+  syncPullScopeSummary();
   // Keep #strike-step-select on Auto unless the user explicitly selected a manual numeric step.
 }
 
@@ -1078,16 +1100,20 @@ export function buildLogoBadge(sym) {
 }
 
 export function syncActiveTickerLogo(ticker) {
-  var el = dom.watchlistActiveLogo;
-  if (!el) return;
   var sym = String(ticker || "").trim().toUpperCase();
-  if (el.getAttribute("data-logo-ticker") === sym) return;
-  populateLogoBadge(el, sym);
+  [dom.watchlistActiveLogo, dom.stickyLogo].forEach(function (el) {
+    if (!el) return;
+    if (el.getAttribute("data-logo-ticker") === sym) return;
+    populateLogoBadge(el, sym);
+  });
 }
 
 export function setActiveTickerUI(ticker) {
   if (dom.watchlistActive) {
     dom.watchlistActive.textContent = ticker;
+  }
+  if (dom.stickyTicker) {
+    dom.stickyTicker.textContent = ticker;
   }
   syncActiveTickerLogo(ticker);
   if (dom.watchlistRows) {

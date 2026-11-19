@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="{{ default_theme | default('print') }}">
+<html lang="en" data-theme="{{ default_theme | default('print') }}" data-workspace-mode="desk">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -10,6 +10,15 @@
         var saved = window.localStorage.getItem("ibkr_options_theme");
         if (saved === "print" || saved === "terminal") {
           document.documentElement.setAttribute("data-theme", saved);
+        }
+        var savedMode = window.localStorage.getItem("ibkr_workspace_mode_v1");
+        if (
+          savedMode === "desk" ||
+          savedMode === "portfolio" ||
+          savedMode === "backtest" ||
+          savedMode === "all"
+        ) {
+          document.documentElement.setAttribute("data-workspace-mode", savedMode);
         }
       } catch (_err) {
         /* ignore storage restrictions */
@@ -24,7 +33,7 @@
   />
   {#- Cascade order matters: tokens first, responsive breakpoints last. #}
   {%- for sheet in ["tokens", "layout", "controls", "charts", "corridor", "strategy_lab", "ledger", "snapshot_picker", "backtest", "screener", "chain_table", "responsive"] %}
-  <link rel="stylesheet" href="/static/css/{{ sheet }}.css?v=20261119c" />
+  <link rel="stylesheet" href="/static/css/{{ sheet }}.css?v=20261119d" />
   {%- endfor %}
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" defer></script>
   {% block head_extra %}{% endblock %}

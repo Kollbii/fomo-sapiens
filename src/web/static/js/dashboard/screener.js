@@ -17,7 +17,7 @@ import {
   renderStrategyLegsTable,
   setActiveStrategyPresetUI,
 } from "./strategy_lab.js";
-import { applyPanelVisibility } from "./panels.js";
+import { applyPanelVisibility, ensurePanelVisible, isPanelVisible } from "./panels.js";
 import { stopCorridorStream, syncCorridorWithStrategy } from "./corridor.js";
 
 // ------------------------------------------------------------------ Constants
@@ -471,8 +471,7 @@ function h(tag, cls, text) {
 }
 
 function cardVisible() {
-  var vis = state.panelVisibility;
-  return vis && typeof vis[PANEL_ID] === "boolean" ? vis[PANEL_ID] : true;
+  return isPanelVisible(PANEL_ID);
 }
 
 function liveWanted() {
@@ -1495,10 +1494,7 @@ async function openInStrategyLab(rowId) {
     await loadChain(base.ticker, base.snapshot_id || "");
   }
   if (!state.chainData) return;
-  if (!state.panelVisibility.strategy) {
-    var nextVis = Object.assign({}, state.panelVisibility, { strategy: true });
-    applyPanelVisibility(nextVis, { persist: true });
-  }
+  ensurePanelVisible("strategy");
   await waitForStrategyIdle(8000);
   if (dom.strategyQtyInput) dom.strategyQtyInput.value = "1";
   if (dom.strategyDaysSlider) dom.strategyDaysSlider.value = "0";

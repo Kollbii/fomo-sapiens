@@ -12,6 +12,7 @@ import {
   currentTheme,
   isStrategyAutoPopulateEnabled,
   syncAutoFollowOptionLabels,
+  syncPullScopeSummary,
   themeVars,
   updateThemeToggleLabel,
   writePref,
@@ -82,6 +83,9 @@ import {
   bindBacktestEvents,
   rerenderBacktestChartOnTheme,
 } from "./backtest.js";
+import {
+  wireWorkspaceControls,
+} from "./workspace.js";
 
 // ------------------------------------------------------------------ Event Bindings
 export function bindEvents() {
@@ -108,6 +112,7 @@ export function bindEvents() {
   bindBacktestEvents();
 
   wireWatchlist();
+  wireWorkspaceControls();
 
   if (dom.snapshotSelect) {
     dom.snapshotSelect.addEventListener("change", function () {
@@ -134,6 +139,7 @@ export function bindEvents() {
     if (ctrl) {
       ctrl.addEventListener("change", function () {
         writeTickerPullPrefs(state.ticker);
+        syncPullScopeSummary();
       });
     }
   });
@@ -141,6 +147,7 @@ export function bindEvents() {
   if (dom.dteMaxSelect) {
     dom.dteMaxSelect.addEventListener("change", function () {
       writeTickerPullPrefs(state.ticker);
+      syncPullScopeSummary();
       var activeSnap = dom.snapshotSelect ? dom.snapshotSelect.value : state.snapshotId || "";
       loadChain(state.ticker, activeSnap);
     });
