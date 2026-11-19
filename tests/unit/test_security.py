@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import inspect
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +14,7 @@ from src.core.security import (
     ReadOnlyIBGuard,
     TickerValidator,
 )
+from tests.support.aio import run_coro
 
 WATCHLIST = [
     "NVDA",
@@ -107,7 +107,7 @@ def test_errors_share_base() -> None:
 def _call(fn: Any) -> None:
     result = fn()
     if inspect.isawaitable(result):
-        asyncio.run(_await(result))
+        run_coro(_await(result))
 
 
 async def _await(awaitable: Any) -> None:

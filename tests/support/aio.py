@@ -44,6 +44,9 @@ class VirtualEventLoop:
     def get_debug(self) -> bool:
         return False
 
+    def get_task_factory(self) -> None:
+        return None
+
     def is_running(self) -> bool:
         running: Any = asyncio.events._get_running_loop()
         return running is self
