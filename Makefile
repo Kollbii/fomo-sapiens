@@ -1,4 +1,4 @@
-.PHONY: help setup run docker-up docker-down test coverage lint typecheck security-guard js-check agents-sync agents-check check
+re.PHONY: help setup run docker-up docker-down test coverage lint typecheck security-guard js-check agents-sync agents-check check
 
 VENV_DIR ?= .venv
 ifeq ($(OS),Windows_NT)

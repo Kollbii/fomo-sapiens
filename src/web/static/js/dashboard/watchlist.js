@@ -6,10 +6,12 @@ import {
   state,
 } from "./state.js";
 import {
+  buildLogoBadge,
   buildRefreshDtePayload,
   extractApiErrorMessage,
   readPref,
   showBanner,
+  syncActiveTickerLogo,
   writePref,
 } from "./helpers.js";
 import {
@@ -310,7 +312,11 @@ function buildRow(sym) {
   symBtn.className = "wl-row__sym";
   symBtn.setAttribute("data-wl-view", sym);
   symBtn.title = "View saved " + sym + " snapshot (no IBKR call)";
-  symBtn.textContent = sym;
+  symBtn.appendChild(buildLogoBadge(sym));
+  var symText = document.createElement("span");
+  symText.className = "wl-row__sym-text";
+  symText.textContent = sym;
+  symBtn.appendChild(symText);
 
   var status = document.createElement("span");
   status.className = "wl-row__status";
@@ -1514,6 +1520,7 @@ export function wireWatchlist() {
 
 export async function initWatchlist() {
   state.watchlistUnchecked = readSelection();
+  syncActiveTickerLogo(state.ticker);
   renderRows();
   await refreshWatchlist();
   await attachCurrentBatch();

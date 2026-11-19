@@ -234,5 +234,14 @@ Path is `{storage.data_dir}/watchlist.json` (`resolve_watchlist_path()`, returns
 
 ---
 
+## 6.2 Watchlist Logo Disk Cache (`data/cache/logos/`, `LogoStore` in `src/storage/logo_store.py`)
+Path is `{storage.data_dir}/cache/logos/` (`resolve_logo_cache_dir()`). Never scanned by `CSVRepository.rebuild_index()`.
+
+- **File naming:** `{TICKER}.svg`, `{TICKER}.png`, or `{TICKER}.webp` (uppercase validated ticker, lookup priority `.svg` -> `.png` -> `.webp`), plus optional negative-cache marker `{TICKER}.miss`. Any existing image file always takes precedence over a `.miss` marker (manual offline drop-in overrides prior `.miss` entries immediately).
+- **Offline / custom drop-in:** Placing `{TICKER}.svg`, `{TICKER}.png`, or `{TICKER}.webp` inside `data/cache/logos/` makes `GET /api/logo/{ticker}` serve that asset immediately without hitting the internet until it ages past `ttl_seconds`.
+- **Bounds & TTLs:** `MAX_LOGO_BYTES = 262144` (`256 KiB`), `DEFAULT_LOGO_TTL_SEC = 2592000` (`30` days), `DEFAULT_MISS_TTL_SEC = 604800` (`7` days). Image validation checks PNG/WebP magic signatures or bounded SVG validation (`validate_logo_payload()`: rejects `<script`, `on*=`, `javascript:`, `<foreignObject`). Writes are atomic (`.tmp` + `fsync` + `os.replace()`), removing sibling extensions or `.miss` markers on write.
+
+---
+
 ## 7. Implementation Notes
 Repository/schema implementation details live in `docs/reference/IMPLEMENTATION_NOTES.md` §2.

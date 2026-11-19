@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from typing import Any, Literal
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Path, Query, Request, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import ValidationError
 
 from src.core.exceptions import (
@@ -239,6 +239,24 @@ async def api_watchlist_remove(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> WatchlistResponse:
     return await svc.watchlist.remove_ticker(ticker)
+
+
+@router.get("/logo/{ticker}")
+async def api_ticker_logo(
+    ticker: str,
+    refresh: bool = Query(default=False),
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> Response:
+    logo = await svc.logos.get_logo(ticker, refresh=refresh)
+    if logo is None:
+        raise HTTPException(status_code=404, detail="Logo not found")
+    headers = {
+        "Cache-Control": "public, max-age=604800",
+        "X-Content-Type-Options": "nosniff",
+    }
+    if logo.media_type == "image/svg+xml":
+        headers["Content-Security-Policy"] = "sandbox"
+    return Response(content=logo.data, media_type=logo.media_type, headers=headers)
 
 
 @router.post("/strategy/suggest", response_model=StrategySuggestResponse)

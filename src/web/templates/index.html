@@ -46,6 +46,7 @@
         aria-expanded="false"
         aria-controls="watchlist-panel"
       >
+        <span id="watchlist-active-logo" class="wl-logo wl-logo--toggle" aria-hidden="true"></span>
         <span id="watchlist-active" class="wl-picker__active">{{ default_ticker }}</span>
         <span class="wl-picker__caret" aria-hidden="true">&#9662;</span>
         <span class="wl-picker__label">Watchlist (<span id="watchlist-count">{{ watchlist | length }}</span>)</span>
@@ -58,6 +59,13 @@
           <button type="button" id="watchlist-select-all" class="btn wl-btn-small">All</button>
           <button type="button" id="watchlist-select-none" class="btn wl-btn-small">None</button>
           <button type="button" id="watchlist-select-stale" class="btn wl-btn-small">Stale only</button>
+          <a
+            href="https://elbstream.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="wl-picker__credit"
+            title="Company logos provided by Elbstream Logo API and cached locally in data/cache/logos/"
+          >Logos: Elbstream</a>
           <button type="button" id="watchlist-load-selected" class="btn btn-primary wl-btn-small wl-picker__load" disabled>
             LOAD SELECTED (<span id="watchlist-selected-count">0</span>)
           </button>
@@ -1454,5 +1462,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261117b"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261117c"></script>
 {% endblock %}

@@ -44,6 +44,10 @@ html[data-theme="print"] {
   --corridor-leg-sell-bg: rgba(234, 88, 12, 0.15);
   --wl-marquee-bg: rgba(29, 78, 216, 0.14);
   --wl-marquee-border: var(--accent-focus);
+  --wl-logo-bg: #FFFFFF;
+  --wl-logo-fallback-ink: #FFFFFF;
+  --wl-active-bg: rgba(26, 26, 26, 0.06);
+  --wl-active-border: var(--accent-primary);
   --plotly-bg: #FFFFFF;
   --plotly-grid: #E8E4DA;
   --plotly-ink: #111111;
@@ -81,6 +85,10 @@ html[data-theme="terminal"] {
   --corridor-leg-sell-bg: rgba(251, 146, 60, 0.20);
   --wl-marquee-bg: rgba(56, 189, 248, 0.16);
   --wl-marquee-border: var(--accent-focus);
+  --wl-logo-bg: #EEF2F7;
+  --wl-logo-fallback-ink: #FFFFFF;
+  --wl-active-bg: rgba(245, 158, 11, 0.11);
+  --wl-active-border: var(--accent-primary);
   --plotly-bg: #11161F;
   --plotly-grid: #1E2636;
   --plotly-ink: #EAECEF;

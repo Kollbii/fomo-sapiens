@@ -1005,10 +1005,91 @@ export function showBanner(kind, message, meta) {
   }, 750);
 }
 
+var LOGO_FALLBACK_PALETTE = [
+  "#1D4ED8",
+  "#0F6E4F",
+  "#B45309",
+  "#6D28D9",
+  "#0E7490",
+  "#9A3412",
+  "#374151",
+  "#991B1B",
+];
+var failedLogos = {};
+
+export function logoMonogramColor(sym) {
+  var s = String(sym || "").toUpperCase();
+  var hash = 0;
+  for (var i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return LOGO_FALLBACK_PALETTE[hash % LOGO_FALLBACK_PALETTE.length];
+}
+
+export function populateLogoBadge(wrap, sym) {
+  if (!wrap) return wrap;
+  var ticker = String(sym || "").trim().toUpperCase();
+  wrap.innerHTML = "";
+  wrap.classList.remove("has-img");
+  wrap.setAttribute("data-logo-ticker", ticker);
+
+  var fb = document.createElement("span");
+  fb.className = "wl-logo__fallback";
+  fb.textContent = ticker.slice(0, 2);
+  fb.style.backgroundColor = logoMonogramColor(ticker);
+  wrap.appendChild(fb);
+
+  if (!ticker || failedLogos[ticker]) {
+    return wrap;
+  }
+
+  var img = document.createElement("img");
+  img.className = "wl-logo__img";
+  img.alt = "";
+  img.width = 18;
+  img.height = 18;
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.draggable = false;
+  img.setAttribute("draggable", "false");
+  img.onload = function () {
+    wrap.classList.add("has-img");
+  };
+  img.onerror = function () {
+    failedLogos[ticker] = true;
+    wrap.classList.remove("has-img");
+    if (img.parentNode === wrap) {
+      wrap.removeChild(img);
+    }
+  };
+  img.src = "/api/logo/" + encodeURIComponent(ticker);
+  if (img.complete && Number(img.naturalWidth) > 0) {
+    wrap.classList.add("has-img");
+  }
+  wrap.appendChild(img);
+  return wrap;
+}
+
+export function buildLogoBadge(sym) {
+  var wrap = document.createElement("span");
+  wrap.className = "wl-logo";
+  wrap.setAttribute("aria-hidden", "true");
+  return populateLogoBadge(wrap, sym);
+}
+
+export function syncActiveTickerLogo(ticker) {
+  var el = dom.watchlistActiveLogo;
+  if (!el) return;
+  var sym = String(ticker || "").trim().toUpperCase();
+  if (el.getAttribute("data-logo-ticker") === sym) return;
+  populateLogoBadge(el, sym);
+}
+
 export function setActiveTickerUI(ticker) {
   if (dom.watchlistActive) {
     dom.watchlistActive.textContent = ticker;
   }
+  syncActiveTickerLogo(ticker);
   if (dom.watchlistRows) {
     var rows = dom.watchlistRows.querySelectorAll("[data-wl-row]");
     for (var i = 0; i < rows.length; i++) {

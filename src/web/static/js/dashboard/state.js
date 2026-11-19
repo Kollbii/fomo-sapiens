@@ -128,6 +128,7 @@ export var dom = {
   editorialBannerCopy: document.getElementById("editorial-banner-copy"),
   watchlistPicker: document.getElementById("watchlist-picker"),
   watchlistToggle: document.getElementById("watchlist-toggle"),
+  watchlistActiveLogo: document.getElementById("watchlist-active-logo"),
   watchlistActive: document.getElementById("watchlist-active"),
   watchlistCount: document.getElementById("watchlist-count"),
   watchlistPanel: document.getElementById("watchlist-panel"),
