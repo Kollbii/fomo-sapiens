@@ -21,10 +21,10 @@
 | Primitive | Canonical Classes | Avoid / Notes |
 | :--- | :--- | :--- |
 | Panel Card & Header | `.panel-card` > `header.panel-header` > `.panel-title-stack` + `.panel-controls` | Never use dead `.panel-head`, `.panel-head-left`, or `.panel-actions`. |
-| Buttons | `.btn` (default `12px`), `.btn-primary`, `.btn-sm` (`11px`, `28px`), `.btn-xs` (`11px`, `26px`) | `.wl-btn-small` applies strictly inside `.wl-picker__footer` / `.wl-progress`. |
+| Buttons | `.btn` (default `11px`), `.btn-primary`, `.btn-sm` (`11px`, `28px`), `.btn-xs` (`11px`, `26px`) | `.wl-btn-small` applies strictly inside `.wl-picker__footer` / `.wl-progress`. |
 | Status Badges | `.badge`, `.badge--online`, `.badge--offline`, `.badge--info`, `.badge--live`, `.badge--amber`, `.badge--warn`, `.badge--delayed`, `.badge--muted` | Reserve `--accent-warn` strictly for warnings, delayed state, and open flags—never primary CTAs. |
 | Panel Toggles | `.panel-toggle-pill` (with `.active` + `aria-pressed`) | Exclusive panel visibility switcher style. |
-| Segmented Controls | `.ledger-seg-group` / `.ledger-seg-btn`, `.backtest-seg-group` / `.backtest-seg-btn`, `.dte-bucket-tabs` / `.dte-tab-btn` | Keep `11px` `--font-sans` labels and `--accent-focus` `:focus-visible` outlines. |
+| Segmented Controls | `.ledger-seg-group` / `.ledger-seg-btn`, `.backtest-seg-group` / `.backtest-seg-btn`, `.dte-bucket-tabs` / `.dte-tab-btn` | Keep `11px` `--font-mono` labels and `--accent-focus` `:focus-visible` outlines. |
 
 ---
 
@@ -70,11 +70,11 @@ Translucent `--accent-*-bg` variants back highlighted rows and badges. `--shadow
 
 ---
 
-## 3. Typography
-Google Fonts `Newsreader`, `JetBrains Mono`, `Inter` with system fallbacks:
+## 3. Typography (Pure Two-Voice Editorial Terminal)
+Google Fonts `Newsreader` + `JetBrains Mono` (plus `Inter` reserved strictly for 2-letter monogram avatars) with system fallbacks:
 - **`--font-editorial`** (`Newsreader`, Georgia): masthead, editorial banner copy, section and panel titles, wall callouts.
-- **`--font-sans`** (`Inter`): **mandatory** for UI field/KPI labels (`11px`), buttons, toggle pills, segmented tab labels, checkboxes, tooltips, notices, warnings, assumptions, rationales, and empty-state prose (`12px–13px`).
-- **`--font-mono`** (`JetBrains Mono`): **mandatory** for every price, strike, DTE, percentage, Greek, volume, OI, timestamp, ticker symbol, data table, numeric/ticker input, and compact status badge, always with `font-variant-numeric: tabular-nums` (`.tabular`, `.mono`, `td.num`). Keep UI badges `>= 10px` (only circular/square `.wl-logo__fallback` monograms may be `< 10px`).
+- **`--font-mono`** (`JetBrains Mono`): **unified single voice** across all interactive chrome (`.btn`, toolbar labels, toggle pills, segmented tabs, checkboxes), notices/rationales/warnings/assumptions/empty states (`12px`), AND every price, strike, DTE, percentage, Greek, volume, OI, timestamp, ticker symbol, data table, numeric/ticker input, and status badge, with `font-variant-numeric: tabular-nums` (`.tabular`, `.mono`, `td.num`). Keep UI badges `>= 10px`.
+- **`--font-sans`** (`Inter`): reserved strictly for compact circular/square `.wl-logo__fallback` avatar monograms (enforced by `tests/unit/test_ui_integrity.py`). Never introduce `--font-sans` into toolbars, buttons, or panels alongside `--font-mono`.
 
 ---
 

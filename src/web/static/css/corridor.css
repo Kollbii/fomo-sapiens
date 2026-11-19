@@ -24,7 +24,7 @@
   background: var(--bg-surface);
   cursor: pointer;
   user-select: none;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -160,7 +160,7 @@
   padding: 3px 6px;
   background-color: var(--bg-surface);
   border-bottom: 1px solid var(--border-subtle);
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -230,7 +230,7 @@
   text-align: center;
   color: var(--text-muted);
   padding: 18px 8px;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 12px;
   font-style: italic;
 }
@@ -289,7 +289,7 @@
   border: 1px solid var(--border-subtle);
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;

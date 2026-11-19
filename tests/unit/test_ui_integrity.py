@@ -170,3 +170,21 @@ def test_minimum_readable_font_size_floor_in_css() -> None:
                     continue
                 violations.append(f"{path.name}:{idx}: {line.strip()}")
     assert violations == [], f"Sub-10px CSS font-size outside monogram badges: {violations}"
+
+
+def test_two_voice_typography_reserves_font_sans_for_logo_monograms() -> None:
+    """Two-Voice typography: chrome/data use --font-mono; --font-sans only on logo monograms."""
+    violations: list[str] = []
+    for path in sorted(CSS_DIR.glob("*.css")):
+        cleaned = _strip_css_comments(path.read_text(encoding="utf-8"))
+        lines = cleaned.splitlines()
+        for idx, line in enumerate(lines, 1):
+            if "var(--font-sans)" not in line:
+                continue
+            context = "\n".join(lines[max(0, idx - 14) : idx])
+            if ".wl-logo__fallback" in context or ".wl-logo" in context:
+                continue
+            violations.append(f"{path.name}:{idx}: {line.strip()}")
+    assert violations == [], (
+        f"Unexpected var(--font-sans) usage violating Two-Voice typography: {violations}"
+    )

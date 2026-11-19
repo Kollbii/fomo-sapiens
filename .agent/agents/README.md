@@ -43,7 +43,7 @@ Gemini reasoning effort is applied through `.gemini/settings.json` → `agents.o
 | `ui-frontend-eng` | balanced-coding | rw + bash | `src/main.py`, `src/web/` (thin routes, `errors.py`, SSE, templates, `css/*.css`, `js/dashboard/*.js`) |
 | `doc-sync-auditor` | precise-writer | edit + bash | after any code change: `AGENTS.md`, `docs/*.md`, `CHANGELOG.md`, `README.md`, `.agent/agents/*.md` |
 | `safety-reviewer` | deep-reasoning | **read-only** + bash | review gate for diffs in `src/core/`, `src/services/`, `src/broker/`, `src/storage/`, `src/web/{api,backtest_api,errors}.py`, `scripts/security_guard.py` |
-| `ux-ui-reviewer` | balanced-coding | **read-only** + bash | review gate for diffs in `src/web/templates/`, `src/web/static/css/`, `src/web/static/js/` (canonical components, tokens, WCAG AA contrast & focus, typography split, usability) |
+| `ux-ui-reviewer` | balanced-coding | **read-only** + bash | review gate for diffs in `src/web/templates/`, `src/web/static/css/`, `src/web/static/js/` (canonical components, tokens, WCAG AA contrast & focus, Pure Two-Voice typography, usability) |
 | `qa-git-runner` | fast-executor | read + bash | `make check`, commit, tag, push (on request) |
 
 Cross-layer features (e.g. GEX: analytics + service + API + chart) are split by layer: `quant-analytics-eng` first (defines the Pydantic report), `broker-storage-eng` wires it into `src/services/`, then `ui-frontend-eng` (route + chart), each with its own HANDOFF.

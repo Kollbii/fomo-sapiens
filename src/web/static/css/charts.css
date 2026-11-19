@@ -35,7 +35,7 @@
 }
 
 .kpi-label {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.05em;

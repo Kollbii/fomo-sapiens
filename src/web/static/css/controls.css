@@ -172,7 +172,7 @@
 .wl-picker__notice {
   margin: 0;
   padding: 6px 12px;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
   color: var(--accent-warn);
@@ -183,7 +183,7 @@
 .wl-picker__empty {
   margin: 0;
   padding: 10px 12px;
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.45;
   color: var(--text-muted);
@@ -316,7 +316,7 @@
 }
 
 .wl-picker__credit {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   color: var(--text-muted);
   text-decoration: none;
@@ -409,7 +409,7 @@
 }
 
 .wl-add__input {
-  width: 120px;
+  width: 136px;
   text-transform: uppercase;
 }
 
@@ -481,7 +481,7 @@
   border-radius: var(--radius-xs);
   background: var(--bg-surface);
   color: var(--text-muted);
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.03em;
@@ -544,7 +544,7 @@ html[data-theme="print"] .panel-toggle-pill[aria-pressed="true"] {
   border-radius: var(--radius-xs);
   background: transparent;
   color: var(--text-secondary);
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -584,7 +584,7 @@ html[data-theme="print"] .panel-toggle-pill[aria-pressed="true"] {
 }
 
 .field-label {
-  font-family: var(--font-sans);
+  font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -633,8 +633,8 @@ html[data-theme="print"] .panel-toggle-pill[aria-pressed="true"] {
   padding: 9px 12px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
-  font-family: var(--font-sans);
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 12px;
   transition: box-shadow 0.2s ease, border-color 0.2s ease;
 }
 
