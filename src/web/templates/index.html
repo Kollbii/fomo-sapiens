@@ -1090,10 +1090,26 @@
       <section id="backtest-paper-strip" class="backtest-paper-strip" aria-label="Tracked Paper Trades">
         <div class="backtest-paper-head">
           <div class="backtest-paper-title">
-            <span>Paper Trades</span>
+            <button
+              type="button"
+              id="backtest-paper-toggle"
+              class="btn btn-sm backtest-paper-toggle-btn"
+              aria-expanded="false"
+              aria-controls="backtest-paper-drawer"
+            >
+              <span class="backtest-paper-caret" aria-hidden="true">&#9656;</span>
+              <span>Paper Trades</span>
+              <span id="backtest-paper-toggle-label" class="backtest-paper-toggle-label">Show</span>
+            </button>
             <span id="backtest-paper-summary" class="badge badge--muted">0 active</span>
+            <span id="backtest-paper-ticker-count" class="backtest-paper-ticker-count" hidden></span>
           </div>
           <div class="backtest-paper-actions">
+            <button type="button" id="backtest-paper-sync-ledger-btn" class="btn btn-sm" title="Sync open option positions from Trade Ledger">Sync from Ledger</button>
+          </div>
+        </div>
+        <div id="backtest-paper-drawer" class="backtest-paper-drawer" hidden>
+          <div class="backtest-paper-toolbar">
             <select id="backtest-paper-filter" class="select-control" aria-label="Filter Paper Trades">
               <option value="ALL">All Statuses</option>
               <option value="ACTIVE" selected>Active Only</option>
@@ -1101,14 +1117,17 @@
               <option value="STOPPED">Stopped</option>
               <option value="CLOSED">Closed (Ledger)</option>
             </select>
-            <button type="button" id="backtest-paper-sync-ledger-btn" class="btn btn-sm" title="Sync open option positions from Trade Ledger">Sync from Ledger</button>
+            <select id="backtest-paper-ticker-filter" class="select-control" aria-label="Filter Paper Trades by Ticker">
+              <option value="ALL" selected>All Tickers</option>
+              <option value="CURRENT">Active Ticker</option>
+            </select>
             <button type="button" id="backtest-paper-refresh-btn" class="btn btn-sm">Reload</button>
           </div>
+          <p class="backtest-paper-hint">
+            Open Trade Ledger option positions sync automatically as Paper Trades; manual <strong>REFRESH FROM IBKR</strong> automatically quotes open paper trade legs (including &lt; 30 DTE down to expiry) into your local archive.
+          </p>
+          <div id="backtest-paper-list" class="backtest-paper-list"></div>
         </div>
-        <p class="backtest-paper-hint">
-          Open Trade Ledger option positions sync automatically as Paper Trades; manual <strong>REFRESH FROM IBKR</strong> automatically quotes open paper trade legs (including &lt; 30 DTE down to expiry) into your local archive.
-        </p>
-        <div id="backtest-paper-list" class="backtest-paper-list"></div>
       </section>
 
       <div id="backtest-warnings" class="backtest-warnings" role="status" aria-live="polite"></div>
@@ -1129,8 +1148,8 @@
         </div>
       </div>
 
-      <div class="backtest-tables-grid">
-        <section class="backtest-pane" aria-label="Simulated Trade Log">
+      <div id="backtest-tables-grid" class="backtest-tables-grid">
+        <section class="backtest-pane backtest-pane--trades" aria-label="Simulated Trade Log">
           <div class="backtest-pane-head">
             <strong>Trade &amp; Legs History</strong>
             <span id="backtest-trades-meta">0 trades &bull; click a row to inspect daily steps</span>
@@ -1160,7 +1179,22 @@
           </div>
         </section>
 
-        <section class="backtest-pane" aria-label="Daily Mark-to-Market Step History">
+        <div
+          id="backtest-tables-splitter"
+          class="backtest-tables-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Trade &amp; Legs History and Daily Mark-to-Market Step History panels"
+          aria-valuemin="40"
+          aria-valuemax="78"
+          aria-valuenow="62"
+          tabindex="0"
+          title="Drag to resize panels (double-click to reset to 62/38 split)"
+        >
+          <span class="backtest-tables-splitter__grip" aria-hidden="true"></span>
+        </div>
+
+        <section class="backtest-pane backtest-pane--steps" aria-label="Daily Mark-to-Market Step History">
           <div class="backtest-pane-head">
             <strong id="backtest-steps-title">Daily Mark-to-Market Step History</strong>
             <span id="backtest-steps-meta">Select a trade row</span>
@@ -1462,5 +1496,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261117c"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261119a"></script>
 {% endblock %}

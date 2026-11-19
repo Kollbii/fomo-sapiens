@@ -587,7 +587,15 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert "Daily Mark-to-Market Step History" in html
                 assert 'value="CLOSED"' in html
                 assert 'id="backtest-paper-sync-ledger-btn"' in html
-                assert "?v=20261117c" in html
+                assert 'id="backtest-paper-toggle"' in html
+                assert 'id="backtest-paper-drawer"' in html
+                assert 'id="backtest-paper-ticker-filter"' in html
+                assert 'id="backtest-paper-ticker-count"' in html
+                assert 'id="backtest-tables-grid"' in html
+                assert 'id="backtest-tables-splitter"' in html
+                assert 'aria-expanded="false"' in html
+                assert 'class="backtest-paper-drawer" hidden' in html
+                assert "?v=20261119a" in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200
@@ -595,6 +603,10 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert ".backtest-pill--missing" in r_css.text
                 assert ".backtest-source-badge--ledger" in r_css.text
                 assert ".backtest-status--CLOSED" in r_css.text
+                assert ".backtest-tables-splitter" in r_css.text
+                assert "--bt-trades-col: 62%" in r_css.text
+                assert ".backtest-paper-drawer" in r_css.text
+                assert ".backtest-paper-table" in r_css.text
 
                 r_ledger_css = await client.get("/static/css/ledger.css")
                 assert r_ledger_css.status_code == 200
@@ -610,6 +622,7 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 r_js_tables = await client.get("/static/js/dashboard/backtest_tables.js")
                 assert r_js_tables.status_code == 200
                 assert "toggleBacktestTradeExpand" in r_js_tables.text
+                assert "initBacktestTablesSplitter" in r_js_tables.text
                 assert "MISSING QUOTE" in r_js_tables.text
                 assert "&bull;" not in r_js_tables.text
                 assert "&mdash;" not in r_js_tables.text
@@ -618,6 +631,8 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert r_js_paper.status_code == 200
                 assert "syncPaperTradesFromLedger" in r_js_paper.text
                 assert "formatLegsCompact" in r_js_paper.text
+                assert "setPaperTradesExpanded" in r_js_paper.text
+                assert "filterPaperTradesByTicker" in r_js_paper.text
                 assert "&bull;" not in r_js_paper.text
                 assert "&mdash;" not in r_js_paper.text
 

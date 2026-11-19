@@ -1,6 +1,7 @@
 /* IBKR Options Analyzer dashboard — Backtest KPI strip, Trade & Legs History, & Daily Step MTM tables. */
 
 import {
+  BACKTEST_SPLIT_KEY,
   dom,
   state,
 } from "./state.js";
@@ -717,4 +718,178 @@ export function renderBacktestResult(body) {
       })
       .join("");
   }
+}
+
+export var DEFAULT_BACKTEST_SPLIT_PCT = 62;
+export var MIN_BACKTEST_SPLIT_PCT = 40;
+export var MAX_BACKTEST_SPLIT_PCT = 78;
+
+export function clampBacktestSplitPct(pct) {
+  var num = Number(pct);
+  if (!Number.isFinite(num)) return DEFAULT_BACKTEST_SPLIT_PCT;
+  var clamped = Math.max(MIN_BACKTEST_SPLIT_PCT, Math.min(MAX_BACKTEST_SPLIT_PCT, num));
+  return Math.round(clamped * 10) / 10;
+}
+
+export function computeBacktestSplitPct(clientX, gridRect) {
+  if (!gridRect || !(gridRect.width > 0) || !Number.isFinite(Number(clientX))) {
+    return DEFAULT_BACKTEST_SPLIT_PCT;
+  }
+  var raw = ((Number(clientX) - Number(gridRect.left || 0)) / Number(gridRect.width)) * 100;
+  return clampBacktestSplitPct(raw);
+}
+
+export function readBacktestSplitPref() {
+  try {
+    var raw = window.localStorage.getItem(BACKTEST_SPLIT_KEY);
+    if (!raw) return DEFAULT_BACKTEST_SPLIT_PCT;
+    var parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === "object" && parsed.leftPct !== undefined) {
+      return clampBacktestSplitPct(parsed.leftPct);
+    }
+    return DEFAULT_BACKTEST_SPLIT_PCT;
+  } catch (_err) {
+    return DEFAULT_BACKTEST_SPLIT_PCT;
+  }
+}
+
+export function writeBacktestSplitPref(pct) {
+  var clamped = clampBacktestSplitPct(pct);
+  try {
+    window.localStorage.setItem(BACKTEST_SPLIT_KEY, JSON.stringify({ leftPct: clamped }));
+  } catch (_err) {
+    /* ignore */
+  }
+  return clamped;
+}
+
+export function clearBacktestSplitPref() {
+  try {
+    window.localStorage.removeItem(BACKTEST_SPLIT_KEY);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+export function applyBacktestSplitPct(pct) {
+  var clamped = clampBacktestSplitPct(pct);
+  state.backtestSplitPct = clamped;
+  if (dom.backtestTablesGrid && dom.backtestTablesGrid.style) {
+    if (typeof dom.backtestTablesGrid.style.setProperty === "function") {
+      dom.backtestTablesGrid.style.setProperty("--bt-trades-col", clamped + "%");
+    } else {
+      dom.backtestTablesGrid.style["--bt-trades-col"] = clamped + "%";
+    }
+  }
+  if (dom.backtestTablesSplitter) {
+    dom.backtestTablesSplitter.setAttribute("aria-valuenow", String(Math.round(clamped)));
+  }
+  return clamped;
+}
+
+export function initBacktestTablesSplitter() {
+  var saved = readBacktestSplitPref();
+  applyBacktestSplitPct(saved);
+
+  var splitter = dom.backtestTablesSplitter;
+  var grid = dom.backtestTablesGrid;
+  if (!splitter || !grid) return;
+  if (splitter.dataset && splitter.dataset.btSplitterWired === "1") return;
+  if (splitter.dataset) splitter.dataset.btSplitterWired = "1";
+
+  var dragState = null;
+
+  splitter.addEventListener("pointerdown", function (ev) {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    if (ev.preventDefault) ev.preventDefault();
+    var rect = grid.getBoundingClientRect ? grid.getBoundingClientRect() : null;
+    dragState = {
+      pointerId: ev.pointerId,
+      rect: rect,
+    };
+    splitter.classList.add("is-dragging");
+    grid.classList.add("is-dragging");
+    if (splitter.setPointerCapture && ev.pointerId !== undefined) {
+      try {
+        splitter.setPointerCapture(ev.pointerId);
+      } catch (_err) {
+        /* ignore synthetic events */
+      }
+    }
+  });
+
+  splitter.addEventListener("pointermove", function (ev) {
+    if (!dragState) return;
+    if (
+      ev.pointerId !== undefined &&
+      dragState.pointerId !== undefined &&
+      ev.pointerId !== dragState.pointerId
+    ) {
+      return;
+    }
+    var rect = grid.getBoundingClientRect ? grid.getBoundingClientRect() : dragState.rect;
+    var nextPct = computeBacktestSplitPct(ev.clientX, rect);
+    applyBacktestSplitPct(nextPct);
+  });
+
+  function finishDrag(ev) {
+    if (!dragState) return;
+    if (
+      ev &&
+      ev.pointerId !== undefined &&
+      dragState.pointerId !== undefined &&
+      ev.pointerId !== dragState.pointerId
+    ) {
+      return;
+    }
+    var pid = dragState.pointerId;
+    dragState = null;
+    splitter.classList.remove("is-dragging");
+    grid.classList.remove("is-dragging");
+    if (splitter.releasePointerCapture && pid !== undefined) {
+      try {
+        if (!splitter.hasPointerCapture || splitter.hasPointerCapture(pid)) {
+          splitter.releasePointerCapture(pid);
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+    writeBacktestSplitPref(state.backtestSplitPct);
+  }
+
+  splitter.addEventListener("pointerup", finishDrag);
+  splitter.addEventListener("pointercancel", finishDrag);
+
+  splitter.addEventListener("dblclick", function () {
+    applyBacktestSplitPct(DEFAULT_BACKTEST_SPLIT_PCT);
+    clearBacktestSplitPref();
+  });
+
+  splitter.addEventListener("keydown", function (ev) {
+    var key = ev.key;
+    if (key === "ArrowLeft") {
+      if (ev.preventDefault) ev.preventDefault();
+      var nextLeft = applyBacktestSplitPct(
+        (state.backtestSplitPct || DEFAULT_BACKTEST_SPLIT_PCT) - 2
+      );
+      writeBacktestSplitPref(nextLeft);
+    } else if (key === "ArrowRight") {
+      if (ev.preventDefault) ev.preventDefault();
+      var nextRight = applyBacktestSplitPct(
+        (state.backtestSplitPct || DEFAULT_BACKTEST_SPLIT_PCT) + 2
+      );
+      writeBacktestSplitPref(nextRight);
+    } else if (key === "Home") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeBacktestSplitPref(applyBacktestSplitPct(MIN_BACKTEST_SPLIT_PCT));
+    } else if (key === "End") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeBacktestSplitPref(applyBacktestSplitPct(MAX_BACKTEST_SPLIT_PCT));
+    } else if (key === "Enter" || key === " ") {
+      if (ev.preventDefault) ev.preventDefault();
+      applyBacktestSplitPct(DEFAULT_BACKTEST_SPLIT_PCT);
+      clearBacktestSplitPref();
+    }
+  });
 }

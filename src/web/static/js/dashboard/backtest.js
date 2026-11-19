@@ -28,13 +28,17 @@ import {
   readCustomLegsFromUI,
   removeCustomBacktestLeg,
   renderCustomLegsEditor,
+  renderPaperTradesList,
   saveCurrentPaperTrade,
   setBacktestNotice,
+  setPaperTradesExpanded,
   stopPaperTrade,
   syncPaperTradesFromLedger,
   toIsoExpiry,
+  togglePaperTradesDrawer,
 } from "./backtest_paper.js";
 import {
+  initBacktestTablesSplitter,
   renderBacktestResult,
   renderTradeLog,
   toggleBacktestTradeExpand,
@@ -159,6 +163,7 @@ export async function backtestOnSnapshotsLoaded(ticker) {
     state.backtestEntriesTicker = sym;
     renderEntrySelectOptions(state.backtestEntries);
   }
+  renderPaperTradesList();
 }
 
 function findPaperTradeById(tradeId) {
@@ -366,6 +371,7 @@ function findMatchedLedgerPaperTrade(trades, campaignId, positionKey, ticker) {
 
 async function activateAndReplayPaperTrade(matched) {
   if (!matched) return;
+  setPaperTradesExpanded(false);
   if (!isPanelVisible("backtest")) {
     var nextVis = Object.assign({}, state.panelVisibility);
     nextVis.backtest = true;
@@ -479,6 +485,7 @@ async function replayPaperTradeFromList(pid) {
     await activateAndReplayPaperTrade(matched);
     return;
   }
+  setPaperTradesExpanded(false);
   state.backtestMode = "SINGLE_TRADE";
   state.backtestSource = "PAPER_TRADE";
   syncBacktestControlVisibility();
@@ -550,6 +557,15 @@ export function bindBacktestEvents() {
     });
   }
   if (dom.backtestPaperSelect) dom.backtestPaperSelect.addEventListener("change", syncSelectedPaperTradeQty);
+  if (dom.backtestPaperToggle) {
+    dom.backtestPaperToggle.addEventListener("click", togglePaperTradesDrawer);
+  }
+  if (dom.backtestPaperTickerFilter) {
+    dom.backtestPaperTickerFilter.addEventListener("change", function () {
+      state.backtestPaperTickerFilter = dom.backtestPaperTickerFilter.value || "ALL";
+      renderPaperTradesList();
+    });
+  }
   if (dom.backtestPaperFilter) {
     dom.backtestPaperFilter.addEventListener("change", function () {
       reloadPaperTradesAndSyncQty(loadPaperTrades);
@@ -611,9 +627,11 @@ export function bindBacktestEvents() {
       renderBacktestChart(state.backtestResult, themeVars());
     });
   }
+  initBacktestTablesSplitter();
 }
 
 export function initBacktestPanel() {
+  setPaperTradesExpanded(false);
   renderCustomLegsEditor();
   syncBacktestControlVisibility();
   renderBacktestEmptyPlaceholder();

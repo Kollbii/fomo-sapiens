@@ -87,6 +87,10 @@
   }
   .backtest-tables-grid {
     grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .backtest-tables-splitter {
+    display: none;
   }
 }
 
