@@ -70,3 +70,15 @@
 - **Status:** `[PLANNED — POPULATES RESERVED #editorial-banner-slot]`
 - **Specification:**
   - Deterministic rule-based synthesis engine (`src/analytics/narrative.py`) that populates the reserved `#editorial-banner-slot` in `index.html` with a 2-paragraph journalistic summary of the current ticker's Primary Call/Put Walls, dominant DTE volume concentration, and highest Z-score strike anomalies.
+
+---
+
+## 7. Frontend UX & Navigation Modernization Roadmap (Phases 2 & 3)
+- **Status:** `[PLANNED — PHASE 1 & DESIGN-SYSTEM HYGIENE COMPLETED; PHASES 2–3 PENDING BROWSER REVIEW]`
+- **Context:** Following the Golden UI/UX Standards pass (Phase 0 & Phase 1: canonical components, zero hardcoded CSS colors, WCAG 2.1 AA contrast, `Inter` prose/labels vs. `JetBrains Mono` data, Terminal Cyan primary accent, and `ux-ui-reviewer` gate), two follow-up UX phases were scoped:
+  - **Phase 2 — Focused Workspace Navigation & Row 3 Declutter:**
+    - Workspace Mode Tabs on the main canvas paired with a sticky mini context bar when scrolled: default landing tab combines Screener-first Discover (`#best-option-card` at the top) + Trade Desk (KPIs, Put/Call Walls, Wall Strike Corridor, Strategy Lab, Option Chain) while placing Trade Ledger and Backtester in dedicated Portfolio / Backtest workspace tabs alongside an All Panels classic scroll mode.
+    - Move advanced pull-scope controls (`Range %`, `Strike Step`, DTE fetch span, `0–29d Backtest` sync checkbox) into a clean popover beside `[REFRESH FROM IBKR]` with crisp summary telemetry (`±20% • Auto • 30–120d`) and explicit Network (IBKR/Flex) vs. Local-Cache visual indicators.
+  - **Phase 3 — Backtest Polish & Power-User Ergonomics:**
+    - Plain-English Backtest quality/trade flag pills with explanatory hover tooltips and a collapsible Advanced Portfolio Rules drawer for secondary backtest settings.
+    - Keyboard command palette (`Ctrl+K` / `/`) for quick ticker switching and panel navigation, plus subtle non-blocking action toast feedback when adding `+Leg` contracts or sending positions to Backtest Replay.

@@ -5,9 +5,26 @@
 > controls) live in `docs/reference/IMPLEMENTATION_NOTES.md` §5.1. Token values are defined
 > only in `src/web/static/css/tokens.css`.
 
-## 1. Design Philosophy: NYT Editorial Meets High-Density Terminal
+## 1. Design Philosophy & Golden UI/UX Standards
 1. **NYT editorial hierarchy:** high-contrast serif mastheads and section titles, double editorial rules (`--border-editorial`), clear separation between analytical blocks, journalistic framing of key levels.
 2. **Financial-terminal density:** monospaced tabular numerals, compact table padding, pill/keyboard navigation, consistent semantic colors for Calls, Puts, and anomalies.
+3. **Golden UX heuristics (Nielsen & Shneiderman):**
+   - **Visibility of system status:** every network pull, background batch, SSE stream, or local calculation surfaces its source, progress, and freshness without ambiguity; interactive controls expose immediate hover, pressed, dirty, and `:focus-visible` states.
+   - **Match between system and real world:** never surface internal enum names or raw error codes without plain-English explanation; reserve technical diagnostic details for collapsible `<details>` sections or hover tooltips.
+   - **Consistency & standards (Canonical Component Registry):** reuse shared panel headers, button tiers, badges, segmented controls, and KPI cards rather than introducing ad-hoc CSS variants or dead class names.
+   - **Overview first, filter/zoom, then details-on-demand:** keep high-level metrics and top-ranked opportunities scannable; tuck optional diagnostics, secondary inputs, and leg breakdowns behind expandable drawers or inline detail rows (`Progressive Disclosure`).
+   - **Error prevention & Network-vs-Cache clarity:** visually distinguish IBKR/Flex network actions (gateway-dependent) from zero-network local cache operations (instant), disable unsupported options explicitly, and surface non-blocking inline banners on failures.
+   - **Accessibility & legibility (WCAG 2.1 AA):** normal-text semantic foregrounds and primary CTA text clear `>= 4.5:1` contrast against all three surfaces (`--bg-canvas`, `--bg-surface`, `--bg-elevated`) in both themes; readable prose stays `>= 12px` and UI badges/pills never fall below `10px`; every interactive control shows a clear `2px solid` `--accent-focus` outline on keyboard `:focus-visible`. Enforced mechanically by `tests/unit/test_ui_integrity.py`.
+
+### Canonical Component Registry
+
+| Primitive | Canonical Classes | Avoid / Notes |
+| :--- | :--- | :--- |
+| Panel Card & Header | `.panel-card` > `header.panel-header` > `.panel-title-stack` + `.panel-controls` | Never use dead `.panel-head`, `.panel-head-left`, or `.panel-actions`. |
+| Buttons | `.btn` (default `12px`), `.btn-primary`, `.btn-sm` (`11px`, `28px`), `.btn-xs` (`11px`, `26px`) | `.wl-btn-small` applies strictly inside `.wl-picker__footer` / `.wl-progress`. |
+| Status Badges | `.badge`, `.badge--online`, `.badge--offline`, `.badge--info`, `.badge--live`, `.badge--amber`, `.badge--warn`, `.badge--delayed`, `.badge--muted` | Reserve `--accent-warn` strictly for warnings, delayed state, and open flags—never primary CTAs. |
+| Panel Toggles | `.panel-toggle-pill` (with `.active` + `aria-pressed`) | Exclusive panel visibility switcher style. |
+| Segmented Controls | `.ledger-seg-group` / `.ledger-seg-btn`, `.backtest-seg-group` / `.backtest-seg-btn`, `.dte-bucket-tabs` / `.dte-tab-btn` | Keep `11px` `--font-sans` labels and `--accent-focus` `:focus-visible` outlines. |
 
 ---
 
@@ -24,15 +41,17 @@
 | `--bg-table-stripe` / `--bg-hover` | `#F7F4EC` / `#ECE7DA` | `#0F141C` / `#1E2636` | Table striping, hover |
 | `--text-primary` | `#111111` | `#EAECEF` | Headlines, primary numbers |
 | `--text-secondary` | `#4A4A4A` | `#A0AAB8` | Subtitles, column headers |
-| `--text-muted` | `#727272` | `#6C7687` | Timestamps, metadata, chart captions |
+| `--text-muted` | `#5C5C5C` | `#8B97AA` | Timestamps, metadata, chart captions (WCAG AA `>= 4.5:1`) |
 | `--border-subtle` / `--border-strong` | `#DFDCD2` / `#111111` | `#252E3E` / `#3B475C` | Hairlines / emphasis borders |
 | `--border-editorial` | `3px double #111111` | `1px solid #3B475C` | Major section separators |
-| `--accent-primary` | `#1A1A1A` | `#F59E0B` | Primary actions |
+| `--accent-primary` | `#1A1A1A` | `#38BDF8` | Primary actions & active tabs (Terminal Cyan `9.08:1` on canvas) |
 | `--accent-call` | `#0F6E4F` | `#10B981` | Calls, Call Walls |
-| `--accent-put` | `#A82020` | `#EF4444` | Puts, Put Walls |
-| `--accent-warn` | `#B45309` | `#F59E0B` | Delayed/frozen feed badges, warnings |
-| `--accent-anomaly` | `#C2410C` | `#FB923C` | `Volume > OI` / Z-score anomalies |
-| `--accent-focus` | `#1D4ED8` | `#38BDF8` | Sorted column, active filters, focus rings (matches the first DTE palette color) |
+| `--accent-put` | `#A82020` | `#F25555` | Puts, Put Walls (WCAG AA `>= 4.5:1` on all surfaces) |
+| `--accent-warn` | `#9A4306` | `#F59E0B` | Delayed/frozen feed badges, warnings (never mixed with Terminal primary CTA) |
+| `--accent-anomaly` | `#B83B0A` | `#FB923C` | `Volume > OI` / Z-score anomalies |
+| `--accent-focus` / `--accent-focus-bg` | `#1D4ED8` / `rgba(29, 78, 216, 0.10)` | `#38BDF8` / `rgba(56, 189, 248, 0.14)` | Sorted column, active tabs/filters, `:focus-visible` outlines |
+| `--badge-delayed-ink` | `#1E3A8A` | `#38BDF8` | High-contrast delayed badge text |
+| `--accent-atm-bg` | `rgba(17, 17, 17, 0.06)` | `rgba(56, 189, 248, 0.10)` | ATM strike row highlight & expanded screener row |
 | `--plotly-bg` / `--plotly-grid` / `--plotly-ink` | `#FFFFFF` / `#E8E4DA` / `#111111` | `#11161F` / `#1E2636` / `#EAECEF` | Plotly paper, grid, text |
 | `--corridor-itm-call-bg` | `rgba(15, 110, 79, 0.045)` | `rgba(16, 185, 129, 0.065)` | Call-side ITM tint in T-Chain corridor cells |
 | `--corridor-itm-put-bg` | `rgba(168, 32, 32, 0.045)` | `rgba(239, 68, 68, 0.065)` | Put-side ITM tint in T-Chain corridor cells |
@@ -42,17 +61,20 @@
 | `--corridor-leg-sell-bg` | `rgba(234, 88, 12, 0.15)` | `rgba(251, 146, 60, 0.20)` | Short (`SELL`) Strategy Lab leg tint in Wall Corridor cells & badges |
 | `--wl-marquee-bg` / `--wl-marquee-border` | `rgba(29, 78, 216, 0.14)` / `var(--accent-focus)` | `rgba(56, 189, 248, 0.16)` / `var(--accent-focus)` | Watchlist marquee selection overlay & row highlight |
 | `--wl-logo-bg` / `--wl-logo-fallback-ink` | `#FFFFFF` / `#FFFFFF` | `#EEF2F7` / `#FFFFFF` | Watchlist company logo tile background (light backing for dark monochrome SVGs) & 2-letter monogram fallback text |
-| `--wl-active-bg` / `--wl-active-border` | `rgba(26, 26, 26, 0.06)` / `var(--accent-primary)` | `rgba(245, 158, 11, 0.11)` / `var(--accent-primary)` | Active watchlist row background tint & `3px` left indicator border |
+| `--wl-active-bg` / `--wl-active-border` | `rgba(26, 26, 26, 0.06)` / `var(--accent-primary)` | `rgba(56, 189, 248, 0.12)` / `var(--accent-primary)` | Active watchlist row background tint & `3px` left indicator border |
+| `--shadow-card` / `--shadow-popover` | `none` / `0 8px 24px rgba(0, 0, 0, 0.25)` | `0 1px 3px rgba(0, 0, 0, 0.45)` / `0 8px 24px rgba(0, 0, 0, 0.45)` | Card elevation & popover dropdown depth |
+| `--alert-pulse-ring` / `--alert-pulse-ring-end` | `rgba(217, 119, 6, 0.35)` / `rgba(217, 119, 6, 0)` | `rgba(245, 158, 11, 0.35)` / `rgba(245, 158, 11, 0)` | Fresh alert banner pulse keyframe rings |
+| `--hover-tint-subtle` | `rgba(128, 128, 128, 0.14)` | `rgba(148, 163, 184, 0.16)` | Subtle neutral hover/close button wash |
 
-Translucent `--accent-*-bg` variants and `--accent-atm-bg` back highlighted rows and badges.
+Translucent `--accent-*-bg` variants back highlighted rows and badges. `--shadow-popover`, `--alert-pulse-ring`, `--alert-pulse-ring-end`, `--hover-tint-subtle`, and all theme colors must stay inside `tokens.css` (enforced by `tests/unit/test_ui_integrity.py`).
 
 ---
 
 ## 3. Typography
 Google Fonts `Newsreader`, `JetBrains Mono`, `Inter` with system fallbacks:
-- **`--font-editorial`** (`Newsreader`, Georgia): masthead, editorial banner, section and panel titles, wall callouts.
-- **`--font-mono`** (`JetBrains Mono`): **mandatory** for every price, strike, DTE, percentage, Greek, volume, OI, timestamp, and control input, always with `font-variant-numeric: tabular-nums` (`.tabular`, `.mono`, `td.num`).
-- **`--font-sans`** (`Inter`): compact labels, tooltips, filter descriptions.
+- **`--font-editorial`** (`Newsreader`, Georgia): masthead, editorial banner copy, section and panel titles, wall callouts.
+- **`--font-sans`** (`Inter`): **mandatory** for UI field/KPI labels (`11px`), buttons, toggle pills, segmented tab labels, checkboxes, tooltips, notices, warnings, assumptions, rationales, and empty-state prose (`12px–13px`).
+- **`--font-mono`** (`JetBrains Mono`): **mandatory** for every price, strike, DTE, percentage, Greek, volume, OI, timestamp, ticker symbol, data table, numeric/ticker input, and compact status badge, always with `font-variant-numeric: tabular-nums` (`.tabular`, `.mono`, `td.num`). Keep UI badges `>= 10px` (only circular/square `.wl-logo__fallback` monograms may be `< 10px`).
 
 ---
 

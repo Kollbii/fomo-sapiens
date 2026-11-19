@@ -74,11 +74,12 @@ Every feature phase requires automated tests in `pytest`:
 8. **`tests/unit/test_security_guard.py`:**
    - Verifies `scripts/security_guard.py` passes on `src/`, enforces `SCOPED_ALLOWLIST` (`.reqExecutionsAsync(` and `.reqPositionsAsync(` allowed only inside `src/broker/ledger_sync.py`), and flags order/mutation APIs (`placeOrder`, `whatIfOrderAsync`, …), sync/disallowed account/position queries (`reqPositions`, `reqExecutions`, `reqAccountSummary`, …), `time.sleep`, and `pandas` imports.
 9. **`tests/unit/test_agent_specs.py`:**
-   - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-4-argon` at `thinkingLevel: HIGH`, `gemini-4-hydrogen` at `MEDIUM`/`LOW`, legacy `gemini-3.8-flash` at `HIGH`) while preserving unrelated settings, and invalid specs are rejected.
+   - Verifies `.claude/agents/` and `.gemini/agents/` are in sync with `.agent/agents/` + `.agent/models.yaml`, read-only agents (`safety-reviewer`, `ux-ui-reviewer`, `qa-git-runner`) have no `edit`/`write` tools, generated `.gemini/settings.json` `agents.overrides` thinking configs match `.agent/models.yaml` (`gemini-4-argon` at `thinkingLevel: HIGH`, `gemini-4-hydrogen` at `MEDIUM`/`LOW`, legacy `gemini-3.8-flash` at `HIGH`) while preserving unrelated settings, and invalid specs are rejected.
 10. **`tests/integration/test_offline_fixture_smoke.py`:**
-   - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
-11. **`tests/unit/test_docs_consistency.py`:**
-   - Fails when `AGENTS.md`, `docs/*.md`, or `.agent/agents/*.md` reference a `` `#<id>` `` missing from `src/web/` templates/JS/CSS, or a `GET|POST /api/...` route the app does not serve (checked against the OpenAPI schema).
+    - Loads the golden `NVDA_20261111_155004` snapshot with the current schema and renders `GET /` + `GET /api/chain/NVDA` offline (Gateway refused) end to end.
+11. **`tests/unit/test_docs_consistency.py` & `tests/unit/test_ui_integrity.py`:**
+    - `test_docs_consistency.py` fails when `AGENTS.md`, `docs/*.md`, or `.agent/agents/*.md` reference a `` `#<id>` `` missing from `src/web/` templates/JS/CSS, or a `GET|POST /api/...` route the app does not serve (checked against the OpenAPI schema).
+    - `test_ui_integrity.py` enforces zero hardcoded colors outside `src/web/static/css/tokens.css`, canonical `.panel-header` usage without dead header classes, defined CSS rules for every `btn*` / `badge--*` token in HTML/JS, WCAG 2.1 AA (`>= 4.5:1`) contrast in both `print` and `terminal` themes, distinct Terminal Cyan primary vs. Amber warning accents, and `>= 10px` CSS text floor outside `.wl-logo__fallback`.
 12. **`tests/unit/test_layering.py`:**
    - AST-scans every module in `src/{core,storage,broker,analytics,services,web}` and fails on imports that violate the §1 dependency rules (including banned third-party imports such as `fastapi` outside `web`).
 13. **`tests/unit/test_flex_and_ledger_storage.py`:**
@@ -107,8 +108,8 @@ Every feature phase requires automated tests in `pytest`:
    - Verifies `GET /api/watchlist`, `POST /api/watchlist/tickers`, `DELETE /api/watchlist/tickers/{ticker}`, `POST /api/refresh/batch`, `GET /api/refresh/batch/current`, `GET /api/refresh/batch/{batch_id}`, `POST /api/refresh/batch/{batch_id}/cancel`, and the `WATCHLIST_FULL` / `STORAGE_UNAVAILABLE` / `BATCH_NOT_FOUND` / `REFRESH_BUSY` / `INVALID_TICKER` error mapping.
 24a. **`tests/unit/test_watchlist_marquee_js.py`:**
    - Verifies pure marquee/range helpers and Node.js ES-module `watchlist.js` behavior: `>= 5px` drag threshold, `[data-wl-remove]` and non-primary click exclusion, live `.wl-marquee` / `.is-marquee` preview (including mid-drag `updateRows()`/`renderRows()` batch-poll preservation), `Ctrl`/`Cmd` additive check, `Shift+Click` forward/backward range selection, `24px` `requestAnimationFrame` edge auto-scroll, `Escape`/toggle cancel cleanup, and post-drag click/change suppression.
-25. **`tests/integration/test_backtest_api.py`:**
-   - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, `POST /api/backtest/paper-trades/sync-ledger`, fill-anchored Ledger replay (with chain snapshots and synthetic `LEDGER_MTM` fallback), structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks.
+25. **`tests/integration/test_backtest_api.py` & `tests/unit/test_backtest_ui_js.py`:**
+   - Verifies `GET /api/backtest/entries/{ticker}`, `POST /api/backtest/run`, `GET /api/backtest/paper-trades`, `POST /api/backtest/paper-trades`, `POST /api/backtest/paper-trades/{trade_id}/stop`, `POST /api/backtest/paper-trades/sync-ledger`, fill-anchored Ledger replay (with chain snapshots and synthetic `LEDGER_MTM` fallback), structured `409`/`422` error codes, and rendered `#backtest-card` + `#snapshot-picker` HTML smoke checks, alongside Node.js ES-module unit checks for the Backtest splitter and inline Paper Trades drawer (`test_backtest_ui_js.py`).
 
 ---
 

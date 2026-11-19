@@ -54,6 +54,15 @@
             }
           }
         }
+      },
+      "ux-ui-reviewer": {
+        "modelConfig": {
+          "generateContentConfig": {
+            "thinkingConfig": {
+              "thinkingLevel": "MEDIUM"
+            }
+          }
+        }
       }
     }
   }
