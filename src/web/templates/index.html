@@ -898,12 +898,12 @@
   </article>
 
   <article id="backtest-card" class="panel-card panel-card--span-12 panel-card--backtest" data-panel-id="backtest" data-default-span="12">
-    <div class="panel-head">
-      <div class="panel-head-left">
+    <header class="panel-header panel-header--backtest">
+      <div class="panel-title-stack">
         <h2 class="panel-title">Daily Options Backtester &amp; Paper Tracker</h2>
         <span class="panel-meta">ARCHIVED DAILY SNAPSHOT REPLAY + PORTFOLIO RULES</span>
       </div>
-      <div class="panel-actions backtest-head-actions">
+      <div class="panel-controls backtest-head-actions">
         <span id="backtest-status-badge" class="badge badge--muted">READY</span>
         <div id="backtest-mode-group" class="backtest-seg-group" role="group" aria-label="Backtest Mode">
           <button type="button" class="backtest-seg-btn is-active" data-bt-mode="SYSTEMATIC" aria-pressed="true">Systematic Study</button>
@@ -912,7 +912,7 @@
         <button type="button" id="backtest-save-paper-btn" class="btn">Save Paper Trade</button>
         <button type="button" id="backtest-run-btn" class="btn btn-primary">RUN BACKTEST</button>
       </div>
-    </div>
+    </header>
 
     <div class="panel-body backtest-body">
       <form id="backtest-form" class="backtest-controls">
@@ -1227,16 +1227,16 @@
   </article>
 
   <article id="best-option-card" class="panel-card panel-card--span-12 panel-card--best-option" data-panel-id="best_option" data-default-span="12">
-    <div class="panel-head">
-      <div class="panel-head-left">
+    <header class="panel-header panel-header--screener">
+      <div class="panel-title-stack">
         <h2 class="panel-title">Best Option Screener</h2>
         <span class="panel-meta">WATCHLIST-WIDE STRATEGY RANKING FROM CACHED SNAPSHOTS</span>
       </div>
-      <div class="panel-actions screener-head-actions">
+      <div class="panel-controls screener-head-actions">
         <span id="screener-live-badge" class="badge badge--muted" hidden></span>
         <span id="screener-md-label" class="badge badge--delayed" hidden></span>
       </div>
-    </div>
+    </header>
 
     <div class="panel-body screener-body">
       <form id="screener-form" class="screener-controls" autocomplete="off">
@@ -1496,5 +1496,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261119a"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261119b"></script>
 {% endblock %}

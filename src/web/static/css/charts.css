@@ -35,10 +35,10 @@
 }
 
 .kpi-label {
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -190,6 +190,11 @@
   border-color: var(--border-strong);
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+
+.panel-span-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
 }
 
 .btn-icon-copy {

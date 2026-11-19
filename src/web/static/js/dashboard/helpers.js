@@ -181,13 +181,13 @@ export function themeVars() {
     bg: cssVar("--plotly-bg", isTerminal ? "#11161F" : "#FFFFFF"),
     grid: cssVar("--plotly-grid", isTerminal ? "#1E2636" : "#E8E4DA"),
     ink: cssVar("--plotly-ink", isTerminal ? "#EAECEF" : "#111111"),
-    muted: cssVar("--text-muted", isTerminal ? "#6C7687" : "#727272"),
+    muted: cssVar("--text-muted", isTerminal ? "#8B97AA" : "#5C5C5C"),
     call: cssVar("--accent-call", isTerminal ? "#10B981" : "#0F6E4F"),
-    put: cssVar("--accent-put", isTerminal ? "#EF4444" : "#A82020"),
+    put: cssVar("--accent-put", isTerminal ? "#F25555" : "#A82020"),
     legBuy: cssVar("--corridor-leg-buy", isTerminal ? "#F59E0B" : "#B45309"),
     legSell: cssVar("--corridor-leg-sell", isTerminal ? "#FB923C" : "#EA580C"),
-    anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#C2410C"),
-    warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#B45309"),
+    anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#B83B0A"),
+    warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#9A4306"),
     fontMono: cssVar("--font-mono", "monospace"),
     dtePalette: isTerminal
       ? ["#38BDF8", "#10B981", "#F59E0B", "#A78BFA", "#F472B6"]

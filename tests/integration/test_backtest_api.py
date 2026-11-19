@@ -595,7 +595,7 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert 'id="backtest-tables-splitter"' in html
                 assert 'aria-expanded="false"' in html
                 assert 'class="backtest-paper-drawer" hidden' in html
-                assert "?v=20261119a" in html
+                assert "?v=20261119b" in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200

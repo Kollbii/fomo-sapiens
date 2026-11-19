@@ -49,10 +49,15 @@
   color: var(--text-primary);
 }
 
+.dte-tab-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
 .dte-tab-btn.active,
 .dte-tab-btn[aria-pressed="true"] {
   border-color: var(--accent-focus);
-  background: rgba(29, 78, 216, 0.1);
+  background: var(--accent-focus-bg);
   color: var(--text-primary);
   font-weight: 700;
 }
@@ -60,7 +65,7 @@
 html[data-theme="terminal"] .dte-tab-btn.active,
 html[data-theme="terminal"] .dte-tab-btn[aria-pressed="true"] {
   border-color: var(--accent-focus);
-  background: rgba(56, 189, 248, 0.14);
+  background: var(--accent-focus-bg);
   color: var(--accent-focus);
 }
 
@@ -203,6 +208,12 @@ html[data-theme="terminal"] .dte-tab-btn[aria-pressed="true"] {
 .th-filter-select:focus {
   outline: none;
   border-color: var(--accent-focus);
+}
+
+.th-filter-input:focus-visible,
+.th-filter-select:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -1px;
 }
 
 .th-filter-input.is-filtered,

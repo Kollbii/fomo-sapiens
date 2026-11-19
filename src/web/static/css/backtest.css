@@ -104,11 +104,17 @@
   border-right: 1px solid var(--border-subtle);
   background: transparent;
   color: var(--text-secondary);
-  font-family: var(--font-mono);
+  font-family: var(--font-sans);
   font-size: 11px;
+  font-weight: 600;
   padding: 5px 9px;
   cursor: pointer;
   white-space: nowrap;
+}
+
+.backtest-seg-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
 }
 
 .backtest-seg-btn:last-child {
@@ -207,8 +213,8 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-primary);
 }
@@ -232,9 +238,9 @@
 }
 
 .backtest-paper-toggle-label {
-  font-family: var(--font-mono);
-  font-size: 10px;
-  font-weight: 500;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
   color: var(--text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -271,8 +277,9 @@
 }
 
 .backtest-paper-hint {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--text-muted);
   margin: 0;
 }
@@ -339,8 +346,9 @@
 }
 
 .backtest-warning {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
   padding: 6px 10px;
   border-left: 3px solid var(--accent-warn);
   background: var(--accent-warn-bg);
@@ -368,9 +376,10 @@
 
 .backtest-kpi__label {
   display: block;
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.06em;
+  font-family: var(--font-sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -528,8 +537,8 @@
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 8px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   color: var(--text-secondary);
 }
 
@@ -604,6 +613,11 @@
 .backtest-expand-btn:hover {
   border-color: var(--accent-focus);
   color: var(--accent-focus);
+}
+
+.backtest-expand-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
 }
 
 .backtest-pill {
@@ -717,8 +731,8 @@
 }
 
 .backtest-drawer-title {
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-family: var(--font-sans);
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -760,8 +774,9 @@
 .backtest-rationale-list {
   margin: 0;
   padding-left: 16px;
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--text-primary);
   display: flex;
   flex-direction: column;
@@ -840,8 +855,9 @@
 }
 
 .backtest-assumptions {
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--text-muted);
   margin: 0;
 }

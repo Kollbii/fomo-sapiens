@@ -444,7 +444,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert 'id="th-filter-source"' in html
 
             # Stylesheets: every <link> from base.html, in cascade order (tokens first).
-            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261119a"', html)
+            sheets = re.findall(r'href="(/static/css/[a-z_]+\.css)\?v=20261119b"', html)
             assert sheets[0] == "/static/css/tokens.css"
             assert sheets[-1] == "/static/css/responsive.css"
             css_texts: list[str] = []
@@ -464,6 +464,8 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert ".badge--amber" in r_css.text
             assert ".badge--amber .badge-dot" in r_css.text
             assert ".badge--delayed" in r_css.text
+            assert ".badge--muted" in r_css.text
+            assert ".btn-sm" in r_css.text
             assert ".th-sort-btn" in r_css.text
             assert ".table-filter-row" in r_css.text
             assert ".th-filter-input.is-filtered" in r_css.text
@@ -523,7 +525,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             assert "var minStep = 5;" not in r_js.text
             assert "delBtn.disabled = state.strategyLegs.length <= 1" not in r_js.text
             assert "if (state.strategyLegs.length <= 1) return" not in r_js.text
-            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261119a">' in html
+            assert '<script type="module" src="/static/js/dashboard/main.js?v=20261119b">' in html
             assert 'source === "CACHED_PREVIEW"' not in r_js.text
             assert 'source !== "CACHED_PREVIEW"' not in r_js.text
             assert "GATEWAY TIMEOUT \\u2022 SOCKET RESET" in r_js.text

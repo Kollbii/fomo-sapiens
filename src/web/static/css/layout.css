@@ -118,7 +118,8 @@
   color: var(--accent-call);
 }
 
-.badge--amber {
+.badge--amber,
+.badge--warn {
   border-color: var(--accent-warn);
   background: var(--accent-warn-bg);
   color: var(--accent-warn);
@@ -129,15 +130,15 @@
 }
 
 .badge--delayed {
-  border-color: #1d4ed8;
-  background: rgba(29, 78, 216, 0.1);
-  color: #1e3a8a;
+  border-color: var(--accent-focus);
+  background: var(--accent-focus-bg);
+  color: var(--badge-delayed-ink);
 }
 
-html[data-theme="terminal"] .badge--delayed {
-  border-color: #38bdf8;
-  background: rgba(56, 189, 248, 0.12);
-  color: #38bdf8;
+.badge--muted {
+  border-color: var(--border-subtle);
+  background: var(--bg-surface);
+  color: var(--text-muted);
 }
 
 .btn {
@@ -150,10 +151,10 @@ html[data-theme="terminal"] .badge--delayed {
   border-radius: var(--radius-xs);
   background: var(--bg-elevated);
   color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 11px;
+  font-family: var(--font-sans);
+  font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
   cursor: pointer;
   transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
@@ -163,6 +164,11 @@ html[data-theme="terminal"] .badge--delayed {
 
 .btn:hover:not(:disabled) {
   background: var(--bg-hover);
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
 }
 
 .btn:disabled {
@@ -181,9 +187,15 @@ html[data-theme="terminal"] .badge--delayed {
   background: var(--accent-primary);
 }
 
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 11px;
+  height: 28px;
+}
+
 .btn-xs {
   padding: 3px 8px;
-  font-size: 10px;
+  font-size: 11px;
   height: 26px;
 }
 
