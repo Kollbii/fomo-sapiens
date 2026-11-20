@@ -1,17 +1,18 @@
 /* Row 4 KPI strip and Row 5 snap-to-grid Plotly chart cards. Loaded after tokens.css (order: base.html). */
 
 /* --------------------------------------------------------------------------
-   Row 4: Headline KPI Strip (4 Cards)
+   Row 4: Compact Market Structure & Guided Flow Ribbon
    -------------------------------------------------------------------------- */
 .kpi-strip {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(220px, 1fr) minmax(420px, 2.05fr) minmax(280px, 1.25fr);
+  gap: 8px;
+  align-items: stretch;
 }
 
 .kpi-card {
-  padding: 12px 14px;
+  padding: 7px 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-top: 2px solid var(--border-strong);
@@ -19,15 +20,17 @@
   box-shadow: var(--shadow-card);
   display: flex;
   flex-direction: column;
+  justify-content: center;
   gap: 4px;
+  min-width: 0;
 }
 
-.kpi-card--call {
-  border-top-color: var(--accent-call);
+.kpi-card--spot {
+  border-top-color: var(--accent-primary);
 }
 
-.kpi-card--put {
-  border-top-color: var(--accent-put);
+.kpi-card--walls-ribbon {
+  border-top-color: var(--border-strong);
 }
 
 .kpi-card--anomaly {
@@ -36,27 +39,213 @@
 
 .kpi-label {
   font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-muted);
+  white-space: nowrap;
 }
 
 .kpi-value {
   font-family: var(--font-mono);
-  font-size: 24px;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1.15;
   color: var(--text-primary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .kpi-sub {
   font-family: var(--font-mono);
   font-size: 11px;
+  line-height: 1.25;
   color: var(--text-secondary);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi-spot-main,
+.kpi-ribbon-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.kpi-spot-headline,
+.kpi-ribbon-title,
+.kpi-anomaly-headline {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.kpi-corridor-caption {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kpi-flow-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.kpi-flow-btn {
+  appearance: none;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.45;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.kpi-flow-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.kpi-flow-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+.kpi-flow-btn--accent {
+  border-color: var(--accent-primary);
+  color: var(--accent-primary);
+}
+
+.kpi-flow-btn--accent:hover {
+  background: var(--accent-focus-bg);
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.kpi-corridor-body {
+  display: grid;
+  grid-template-columns: auto minmax(56px, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.kpi-wall-node {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 2px 6px;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  cursor: pointer;
+  min-width: 0;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
+}
+
+.kpi-wall-node:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-subtle);
+}
+
+.kpi-wall-node:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
+.kpi-wall-node--put .kpi-value {
+  color: var(--accent-put);
+}
+
+.kpi-wall-node--call .kpi-value {
+  color: var(--accent-call);
+}
+
+.kpi-corridor-gauge {
+  padding: 5px 0;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+
+.kpi-corridor-gauge:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 2px;
+}
+
+.kpi-corridor-track {
+  position: relative;
+  height: 6px;
+  width: 100%;
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+}
+
+.kpi-corridor-pin {
+  position: absolute;
+  top: 50%;
+  width: 8px;
+  height: 14px;
+  border-radius: var(--radius-xs);
+  background: var(--accent-primary);
+  border: 1px solid var(--bg-elevated);
+  transform: translate(-50%, -50%);
+  transition: left 0.16s ease;
+}
+
+.kpi-anomaly-top {
+  appearance: none;
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 2px 6px;
+  border: 1px solid var(--border-subtle);
+  border-left: 2px solid var(--accent-anomaly);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background-color 0.12s ease, border-color 0.12s ease, color 0.12s ease;
+}
+
+.kpi-anomaly-top:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  border-left-color: var(--accent-anomaly);
+  color: var(--text-primary);
+}
+
+.kpi-anomaly-top:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
 }
 
 /* --------------------------------------------------------------------------
@@ -82,6 +271,7 @@
   max-height: 920px;
   resize: none;
   overflow: hidden;
+  scroll-margin-top: 58px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
@@ -110,6 +300,11 @@
 
 .panel-card--span-12 {
   grid-column: span 12;
+}
+
+.chain-panel,
+#chain-table {
+  scroll-margin-top: 58px;
 }
 
 html[data-workspace-mode="desk"] #best-option-card {

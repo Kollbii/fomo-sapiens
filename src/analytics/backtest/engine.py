@@ -16,14 +16,20 @@ from src.analytics.backtest.metrics import (
 )
 from src.analytics.backtest.models import (
     FLAG_BROKER_FILL_ENTRY,
+    FLAG_CALLED_AWAY,
     FLAG_LEG_FALLBACK_PRICE,
     FLAG_NO_USABLE_DAILY_SNAPSHOT,
+    FLAG_PUT_ASSIGNED,
+    FLAG_ROLL_SKIPPED,
+    FLAG_STOCK_LIQUIDATED_ON_SL,
+    FLAG_SYNTHETIC_STOCK_ENTRY,
     FLAG_TRACKED_LEG_USED,
     FLAG_UNRESOLVED_EXPIRY_LEG,
     FLAG_UNRESOLVED_EXPIRY_SPOT,
     BacktestConfig,
     BacktestMode,
     BacktestSimulationResult,
+    BacktestStrategyKind,
     BacktestTradeRecord,
     ClosePriceMode,
     EquityCurvePoint,
@@ -32,6 +38,7 @@ from src.analytics.backtest.models import (
     StepMarkSource,
     TradeDailyStep,
     TradeStatus,
+    WheelPhase,
     deduplicate_flags,
 )
 from src.analytics.backtest.pricing import (
@@ -46,11 +53,13 @@ from src.analytics.backtest.rules import (
     build_broker_fill_entry,
     build_entry_candidate_outcome,
     evaluate_exit_rule,
+    find_defensive_roll_candidate,
     parse_anchor_ts_utc,
     record_entry_attempt,
+    resolve_min_call_strike,
     should_attempt_entry,
 )
-from src.analytics.strategies.models import StrategyKind, StrategyLegInput
+from src.analytics.strategies.models import StrategyLegInput
 from src.core.calendar import fmt_et
 from src.core.exceptions import BacktestValidationError
 from src.core.security import TickerValidator
@@ -68,7 +77,19 @@ BACKTEST_ASSUMPTIONS: tuple[str, ...] = (
     "net P&L and portfolio equity deduct commissions.",
     "Expiry settlement uses session_for(expiry) + 15m DATA_DELAY and requires non-CLOSE "
     "spot (LAST or MID), else marks UNRESOLVED.",
+    "COVERED_CALL and WHEEL simulate 100 * qty synthetic shares marked to market daily at spot, "
+    "with $0 close fee on Put assignment or Call-away.",
 )
+
+
+@dataclass
+class _SyntheticStockLot:
+    shares: int
+    cost_basis: float
+    acquired_date: str
+    acquired_snapshot_id: str
+    cycle_credits_per_share: float = 0.0
+    last_unrealized_pnl: float = 0.0
 
 
 @dataclass
@@ -76,11 +97,17 @@ class _OpenTradeState:
     trade_id: str
     entry_date: str
     entry_snapshot_id: str
-    strategy_kind: StrategyKind
+    strategy_kind: BacktestStrategyKind
     qty: int
     entry: EntryBuildResult
     open_commission: float
     total_contracts: int
+    wheel_phase: WheelPhase | None = None
+    stock_shares: int = 0
+    stock_cost_basis: float | None = None
+    stock_exit_price: float | None = None
+    option_net_pnl_dollars: float | None = None
+    stock_pnl_dollars: float | None = None
     steps: list[TradeDailyStep] = field(default_factory=list)
     flags: list[str] = field(default_factory=list)
     status: TradeStatus = "OPEN"
@@ -130,6 +157,19 @@ def _derive_step_mark_source(
     return "MIXED"
 
 
+def _stock_step_mtm(
+    stock_lot: _SyntheticStockLot | None, spot: float | None
+) -> tuple[int, float | None, float | None]:
+    if stock_lot is None:
+        return 0, None, None
+    unrealized = (
+        round((spot - stock_lot.cost_basis) * float(stock_lot.shares), 2)
+        if (spot is not None and spot > 0.0)
+        else stock_lot.last_unrealized_pnl
+    )
+    return stock_lot.shares, stock_lot.cost_basis, unrealized
+
+
 def _make_daily_step(
     bar: DailyChainBar,
     bar_ctx: BarContext,
@@ -141,6 +181,9 @@ def _make_daily_step(
     close_price_mode: ClosePriceMode,
     extra_flags: Sequence[str] = (),
     mark_unresolved: bool = False,
+    stock_shares: int = 0,
+    stock_cost_basis: float | None = None,
+    stock_unrealized_pnl_dollars: float | None = None,
 ) -> tuple[TradeDailyStep, float | None, float | None]:
     if step_data.active_close_value_dollars is not None and not mark_unresolved:
         gross_val = round(entry_cash_mid_dollars + step_data.active_close_value_dollars, 2)
@@ -173,6 +216,9 @@ def _make_daily_step(
         status=step_data.status,
         flags=deduplicate_flags([*step_data.flags, *extra_flags]),
         tracked_snapshot_ids=step_data.tracked_snapshot_ids,
+        stock_shares=stock_shares,
+        stock_cost_basis=stock_cost_basis,
+        stock_unrealized_pnl_dollars=stock_unrealized_pnl_dollars,
     )
     return step, gross_pnl, net_pnl
 
@@ -183,9 +229,13 @@ def _start_trade_state(
     bar_ctx: BarContext,
     entry: EntryBuildResult,
     config: BacktestConfig,
+    *,
+    wheel_phase: WheelPhase | None = None,
+    stock_lot: _SyntheticStockLot | None = None,
 ) -> _OpenTradeState:
     total_contracts = sum(leg.qty for leg in entry.legs)
     open_comm = round(config.commission_per_contract * float(total_contracts), 2)
+    stk_shares, stk_basis, stk_mtm = _stock_step_mtm(stock_lot, bar_ctx.spot)
     step0, gross0, net0 = _make_daily_step(
         bar,
         bar_ctx,
@@ -195,6 +245,9 @@ def _start_trade_state(
         commission_deducted=open_comm,
         close_price_mode=config.close_price_mode,
         extra_flags=entry.flags,
+        stock_shares=stk_shares,
+        stock_cost_basis=stk_basis,
+        stock_unrealized_pnl_dollars=stk_mtm,
     )
     return _OpenTradeState(
         trade_id=trade_id,
@@ -205,6 +258,9 @@ def _start_trade_state(
         entry=entry,
         open_commission=open_comm,
         total_contracts=total_contracts,
+        wheel_phase=wheel_phase,
+        stock_shares=stk_shares,
+        stock_cost_basis=stk_basis,
         steps=[step0],
         flags=list(entry.flags),
         commissions_dollars=open_comm,
@@ -214,15 +270,260 @@ def _start_trade_state(
     )
 
 
+def _try_defensive_roll(
+    t: _OpenTradeState,
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    step_data: EvaluatedStepData,
+    config: BacktestConfig,
+    stock_lot: _SyntheticStockLot | None,
+) -> tuple[EntryBuildResult | None, list[str]]:
+    """Attempt an ITM-near-expiry roll for single-leg COVERED_CALL / WHEEL positions."""
+    if not config.roll_enabled or config.strategy_kind not in ("COVERED_CALL", "WHEEL"):
+        return None, []
+    if len(t.entry.legs) != 1 or bar_ctx.spot is None or bar_ctx.spot <= 0.0:
+        return None, []
+    leg0 = t.entry.legs[0]
+    is_itm = (
+        bar_ctx.spot > leg0.strike + 1e-6
+        if leg0.right == "C"
+        else bar_ctx.spot < leg0.strike - 1e-6
+    )
+    roll_window_dte = config.exit_dte if config.exit_dte is not None else 7
+    near_expiry = step_data.any_leg_settled or step_data.dte_min_leg <= roll_window_dte
+    if (
+        not is_itm
+        or not near_expiry
+        or step_data.active_close_value_dollars is None
+        or step_data.settlement_blocked
+    ):
+        return None, []
+
+    current_close_px = round(
+        abs(step_data.active_close_value_dollars) / (100.0 * float(leg0.qty)), 4
+    )
+    min_call_strike = (
+        resolve_min_call_strike(config, stock_lot.cost_basis, stock_lot.cycle_credits_per_share)
+        if (leg0.right == "C" and stock_lot is not None)
+        else None
+    )
+    roll_entry = find_defensive_roll_candidate(
+        bar,
+        bar_ctx,
+        config,
+        current_leg=leg0,
+        current_close_price_per_share=current_close_px,
+        stock_cost_basis=(stock_lot.cost_basis if stock_lot is not None else None),
+        min_call_strike=min_call_strike,
+    )
+    if roll_entry is None:
+        return None, [FLAG_ROLL_SKIPPED]
+    return roll_entry, []
+
+
+def _apply_wheel_or_cc_exit(
+    t: _OpenTradeState,
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    step_data: EvaluatedStepData,
+    reason: ExitReason,
+    config: BacktestConfig,
+    run_state: _SimRunState,
+    *,
+    close_comm: float,
+    opt_gross: float,
+    opt_net: float,
+) -> float:
+    """Resolve option/stock exit for COVERED_CALL / WHEEL; returns `realized_delta`."""
+    if config.strategy_kind not in ("COVERED_CALL", "WHEEL") or len(t.entry.legs) != 1:
+        t.exit_reason = reason
+        t.gross_pnl_dollars = opt_gross
+        t.net_pnl_dollars = opt_net
+        return opt_net
+
+    leg0 = t.entry.legs[0]
+    spot = bar_ctx.spot
+    lot = run_state.stock_lot
+    last_step = t.steps[-1]
+
+    if reason == "EXPIRY_SETTLED":
+        if (
+            leg0.right == "P"
+            and config.strategy_kind == "WHEEL"
+            and spot is not None
+            and spot < leg0.strike - 1e-6
+        ):
+            # Synthetic Put assignment: keep option premium, open 100 * qty shares @ strike K_p.
+            shares = leg0.qty * 100
+            opt_gross_keep = round(t.entry.entry_cash_mid_dollars, 2)
+            opt_net_keep = round(opt_gross_keep - t.open_commission, 2)
+            stk_unrealized = round((spot - leg0.strike) * float(shares), 2)
+            new_lot = _SyntheticStockLot(
+                shares=shares,
+                cost_basis=leg0.strike,
+                acquired_date=bar.market_date,
+                acquired_snapshot_id=bar.snapshot_id,
+                cycle_credits_per_share=round(opt_net_keep / float(shares), 4),
+                last_unrealized_pnl=stk_unrealized,
+            )
+            run_state.stock_lot = new_lot
+            t.exit_reason = "PUT_ASSIGNED"
+            t.exit_value_dollars = 0.0
+            t.commissions_dollars = t.open_commission
+            t.gross_pnl_dollars = opt_gross_keep
+            t.net_pnl_dollars = opt_net_keep
+            t.option_net_pnl_dollars = opt_net_keep
+            t.stock_pnl_dollars = 0.0
+            t.stock_shares = shares
+            t.stock_cost_basis = leg0.strike
+            t.flags = deduplicate_flags([*t.flags, FLAG_PUT_ASSIGNED])
+            t.steps[-1] = last_step.model_copy(
+                update={
+                    "gross_pnl_dollars": opt_gross_keep,
+                    "net_pnl_dollars": opt_net_keep,
+                    "pnl_pct_of_basis": pct_or_none(opt_net_keep, t.entry.entry_basis_dollars),
+                    "stock_shares": shares,
+                    "stock_cost_basis": leg0.strike,
+                    "stock_unrealized_pnl_dollars": stk_unrealized,
+                    "flags": deduplicate_flags([*last_step.flags, FLAG_PUT_ASSIGNED]),
+                }
+            )
+            return opt_net_keep
+
+        if (
+            leg0.right == "C"
+            and lot is not None
+            and (config.strategy_kind == "WHEEL" or config.cc_itm_mode == "CALL_AWAY_AND_REBUY")
+            and spot is not None
+            and spot > leg0.strike + 1e-6
+        ):
+            # Covered Call called away: keep option credit + realize stock gain/loss at K_c.
+            opt_gross_keep = round(t.entry.entry_cash_mid_dollars, 2)
+            opt_net_keep = round(opt_gross_keep - t.open_commission, 2)
+            stk_pnl = round((leg0.strike - lot.cost_basis) * float(lot.shares), 2)
+            total_gross = round(opt_gross_keep + stk_pnl, 2)
+            total_net = round(opt_net_keep + stk_pnl, 2)
+            t.exit_reason = "CALLED_AWAY"
+            t.exit_value_dollars = 0.0
+            t.commissions_dollars = t.open_commission
+            t.gross_pnl_dollars = total_gross
+            t.net_pnl_dollars = total_net
+            t.option_net_pnl_dollars = opt_net_keep
+            t.stock_pnl_dollars = stk_pnl
+            t.stock_shares = lot.shares
+            t.stock_cost_basis = lot.cost_basis
+            t.stock_exit_price = leg0.strike
+            t.flags = deduplicate_flags([*t.flags, FLAG_CALLED_AWAY])
+            t.steps[-1] = last_step.model_copy(
+                update={
+                    "gross_pnl_dollars": total_gross,
+                    "net_pnl_dollars": total_net,
+                    "pnl_pct_of_basis": pct_or_none(total_net, t.entry.entry_basis_dollars),
+                    "stock_shares": 0,
+                    "stock_unrealized_pnl_dollars": 0.0,
+                    "flags": deduplicate_flags([*last_step.flags, FLAG_CALLED_AWAY]),
+                }
+            )
+            run_state.stock_lot = None
+            return total_net
+
+    if (
+        reason == "STOP_LOSS"
+        and lot is not None
+        and config.stock_stop_mode == "LIQUIDATE_STOCK_ON_SL"
+        and spot is not None
+        and spot > 0.0
+    ):
+        stk_pnl = round((spot - lot.cost_basis) * float(lot.shares), 2)
+        total_gross = round(opt_gross + stk_pnl, 2)
+        total_net = round(opt_net + stk_pnl, 2)
+        t.exit_reason = "STOP_LOSS"
+        t.gross_pnl_dollars = total_gross
+        t.net_pnl_dollars = total_net
+        t.option_net_pnl_dollars = opt_net
+        t.stock_pnl_dollars = stk_pnl
+        t.stock_shares = lot.shares
+        t.stock_cost_basis = lot.cost_basis
+        t.stock_exit_price = spot
+        t.flags = deduplicate_flags([*t.flags, FLAG_STOCK_LIQUIDATED_ON_SL])
+        t.steps[-1] = last_step.model_copy(
+            update={
+                "gross_pnl_dollars": total_gross,
+                "net_pnl_dollars": total_net,
+                "pnl_pct_of_basis": pct_or_none(total_net, t.entry.entry_basis_dollars),
+                "stock_shares": 0,
+                "stock_unrealized_pnl_dollars": 0.0,
+                "flags": deduplicate_flags([*last_step.flags, FLAG_STOCK_LIQUIDATED_ON_SL]),
+            }
+        )
+        run_state.stock_lot = None
+        return total_net
+
+    # Option-only exit (OTM expiry, TP, Exit-DTE, ROLLED, Option-Only SL, or Cash-Settle Call).
+    t.exit_reason = reason
+    t.gross_pnl_dollars = opt_gross
+    t.net_pnl_dollars = opt_net
+    t.option_net_pnl_dollars = opt_net
+    if lot is not None:
+        t.stock_shares = lot.shares
+        t.stock_cost_basis = lot.cost_basis
+        t.stock_pnl_dollars = 0.0
+        lot.cycle_credits_per_share = round(
+            lot.cycle_credits_per_share + (opt_net / float(lot.shares)), 4
+        )
+    return opt_net
+
+
 def _step_open_trade(
     t: _OpenTradeState,
     bar: DailyChainBar,
     bar_ctx: BarContext,
     config: BacktestConfig,
-    notes: list[str],
-) -> tuple[bool, float]:
-    """Advance one open trade by one bar; returns `(stays_open, realized_delta)`."""
+    run_state: _SimRunState,
+) -> tuple[bool, float, EntryBuildResult | None]:
+    """Advance one open trade by one bar; returns `(stays_open, realized_delta, rolled_entry)`."""
     step_data = evaluate_trade_step_on_bar(bar, t.entry.legs, config, ctx=bar_ctx)
+    roll_entry, roll_flags = _try_defensive_roll(
+        t, bar, bar_ctx, step_data, config, run_state.stock_lot
+    )
+
+    if roll_entry is not None:
+        close_comm = round(config.commission_per_contract * float(t.total_contracts), 2)
+        stk_shares, stk_basis, stk_mtm = _stock_step_mtm(run_state.stock_lot, bar_ctx.spot)
+        step, gross_pnl, net_pnl = _make_daily_step(
+            bar,
+            bar_ctx,
+            step_data,
+            entry_cash_mid_dollars=t.entry.entry_cash_mid_dollars,
+            entry_basis_dollars=t.entry.entry_basis_dollars,
+            commission_deducted=t.open_commission + close_comm,
+            close_price_mode=config.close_price_mode,
+            extra_flags=["ROLLED"],
+            stock_shares=stk_shares,
+            stock_cost_basis=stk_basis,
+            stock_unrealized_pnl_dollars=stk_mtm,
+        )
+        t.steps.append(step)
+        t.flags = deduplicate_flags([*t.flags, *step.flags])
+        t.exit_date, t.exit_snapshot_id = bar.market_date, bar.snapshot_id
+        t.status = "CLOSED"
+        t.exit_value_dollars = step_data.active_close_value_dollars
+        t.commissions_dollars = round(t.open_commission + close_comm, 2)
+        assert gross_pnl is not None and net_pnl is not None
+        realized_delta = _apply_wheel_or_cc_exit(
+            t,
+            bar,
+            bar_ctx,
+            step_data,
+            "ROLLED",
+            config,
+            run_state,
+            close_comm=close_comm,
+            opt_gross=gross_pnl,
+            opt_net=net_pnl,
+        )
+        return False, realized_delta, roll_entry
+
     exit_dec = evaluate_exit_rule(
         step_data,
         config,
@@ -240,6 +541,7 @@ def _step_open_trade(
         )
         close_comm = round(config.commission_per_contract * float(contracts), 2)
 
+    stk_shares, stk_basis, stk_mtm = _stock_step_mtm(run_state.stock_lot, bar_ctx.spot)
     step, gross_pnl, net_pnl = _make_daily_step(
         bar,
         bar_ctx,
@@ -248,17 +550,20 @@ def _step_open_trade(
         entry_basis_dollars=t.entry.entry_basis_dollars,
         commission_deducted=t.open_commission + close_comm,
         close_price_mode=config.close_price_mode,
-        extra_flags=exit_dec.flags,
+        extra_flags=[*exit_dec.flags, *roll_flags],
         mark_unresolved=exit_dec.unresolved,
+        stock_shares=stk_shares,
+        stock_cost_basis=stk_basis,
+        stock_unrealized_pnl_dollars=stk_mtm,
     )
     t.steps.append(step)
     t.flags = deduplicate_flags([*t.flags, *step.flags])
-    notes.extend(exit_dec.notes)
+    run_state.notes.extend(exit_dec.notes)
 
     if not exit_dec.should_exit:
         if net_pnl is not None:
             t.last_known_unrealized_net = net_pnl
-        return True, 0.0
+        return True, 0.0, None
 
     assert exit_dec.reason is not None
     t.exit_reason, t.exit_date, t.exit_snapshot_id = (
@@ -266,40 +571,69 @@ def _step_open_trade(
         bar.market_date,
         bar.snapshot_id,
     )
-    if exit_dec.unresolved or net_pnl is None:
+    if exit_dec.unresolved or net_pnl is None or gross_pnl is None:
         t.status, t.commissions_dollars = "UNRESOLVED", t.open_commission
         t.exit_value_dollars = t.gross_pnl_dollars = t.net_pnl_dollars = None
-        return False, -t.open_commission
+        return False, -t.open_commission, None
 
     t.status = "CLOSED"
     t.exit_value_dollars = step_data.active_close_value_dollars
     t.commissions_dollars = round(t.open_commission + close_comm, 2)
-    t.gross_pnl_dollars, t.net_pnl_dollars = gross_pnl, net_pnl
-    return False, net_pnl
+    realized_delta = _apply_wheel_or_cc_exit(
+        t,
+        bar,
+        bar_ctx,
+        step_data,
+        exit_dec.reason,
+        config,
+        run_state,
+        close_comm=close_comm,
+        opt_gross=gross_pnl,
+        opt_net=net_pnl,
+    )
+    return False, realized_delta, None
 
 
 def _finalize(
-    state: _OpenTradeState, last_bar: DailyChainBar, config: BacktestConfig
+    trade_state: _OpenTradeState,
+    last_bar: DailyChainBar,
+    config: BacktestConfig,
+    *,
+    open_stock_lot: _SyntheticStockLot | None = None,
 ) -> BacktestTradeRecord:
+    attach_stk_mtm: float | None = None
+    stk_shares = trade_state.stock_shares
+    stk_basis = trade_state.stock_cost_basis
+    if trade_state.status == "OPEN" and open_stock_lot is not None:
+        attach_stk_mtm = open_stock_lot.last_unrealized_pnl
+        stk_shares = open_stock_lot.shares
+        stk_basis = open_stock_lot.cost_basis
     return finalize_trade_record(
-        trade_id=state.trade_id,
-        entry_date=state.entry_date,
-        entry_snapshot_id=state.entry_snapshot_id,
-        strategy_kind=state.strategy_kind,
-        qty=state.qty,
+        trade_id=trade_state.trade_id,
+        entry_date=trade_state.entry_date,
+        entry_snapshot_id=trade_state.entry_snapshot_id,
+        strategy_kind=trade_state.strategy_kind,
+        wheel_phase=trade_state.wheel_phase,
+        stock_shares=stk_shares,
+        stock_cost_basis=stk_basis,
+        stock_exit_price=trade_state.stock_exit_price,
+        option_net_pnl_dollars=trade_state.option_net_pnl_dollars,
+        stock_pnl_dollars=trade_state.stock_pnl_dollars,
+        open_stock_unrealized_pnl=attach_stk_mtm,
+        qty=trade_state.qty,
         config=config,
-        entry=state.entry,
-        open_commission=state.open_commission,
-        steps=state.steps,
-        flags=state.flags,
-        status=state.status,
-        exit_reason=state.exit_reason,
-        exit_date=state.exit_date,
-        exit_snapshot_id=state.exit_snapshot_id,
-        exit_value_dollars=state.exit_value_dollars,
-        commissions_dollars=state.commissions_dollars,
-        gross_pnl_dollars=state.gross_pnl_dollars,
-        net_pnl_dollars=state.net_pnl_dollars,
+        entry=trade_state.entry,
+        open_commission=trade_state.open_commission,
+        steps=trade_state.steps,
+        flags=trade_state.flags,
+        status=trade_state.status,
+        exit_reason=trade_state.exit_reason,
+        exit_date=trade_state.exit_date,
+        exit_snapshot_id=trade_state.exit_snapshot_id,
+        exit_value_dollars=trade_state.exit_value_dollars,
+        commissions_dollars=trade_state.commissions_dollars,
+        gross_pnl_dollars=trade_state.gross_pnl_dollars,
+        net_pnl_dollars=trade_state.net_pnl_dollars,
         last_bar=last_bar,
     )
 
@@ -309,6 +643,7 @@ class _SimRunState:
     peak_equity: float
     all_trades: list[_OpenTradeState] = field(default_factory=list)
     active_open: list[_OpenTradeState] = field(default_factory=list)
+    stock_lot: _SyntheticStockLot | None = None
     equity_curve: list[EquityCurvePoint] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     skipped_by_reason: dict[str, int] = field(default_factory=dict)
@@ -399,7 +734,7 @@ def _emit_equity_point(
     bar_flags: list[str],
     config: BacktestConfig,
 ) -> None:
-    unrealized = sum(
+    opt_unrealized = sum(
         (
             t.steps[-1].net_pnl_dollars
             if t.steps[-1].net_pnl_dollars is not None
@@ -407,6 +742,16 @@ def _emit_equity_point(
         )
         for t in state.active_open
     )
+    stk_unrealized = 0.0
+    if state.stock_lot is not None:
+        if spot is not None and spot > 0.0 and FLAG_NO_USABLE_DAILY_SNAPSHOT not in bar_flags:
+            stk_unrealized = round(
+                (spot - state.stock_lot.cost_basis) * float(state.stock_lot.shares), 2
+            )
+            state.stock_lot.last_unrealized_pnl = stk_unrealized
+        else:
+            stk_unrealized = state.stock_lot.last_unrealized_pnl
+    unrealized = round(opt_unrealized + stk_unrealized, 2)
     if any(t.status == "UNRESOLVED" for t in state.all_trades):
         bar_flags.append("UNRESOLVED_TRADE")
 
@@ -500,7 +845,9 @@ def _simulate_bars(
 
         still_open: list[_OpenTradeState] = []
         for t in state.active_open:
-            stays_open, realized_delta = _step_open_trade(t, bar, bar_ctx, config, state.notes)
+            stays_open, realized_delta, rolled_entry = _step_open_trade(
+                t, bar, bar_ctx, config, state
+            )
             state.realized_pnl += realized_delta
             bar_flags.extend(t.steps[-1].flags)
             if t.status == "UNRESOLVED":
@@ -511,18 +858,98 @@ def _simulate_bars(
                 )
             if stays_open:
                 still_open.append(t)
+            elif rolled_entry is not None:
+                if mode == "SYSTEMATIC":
+                    record_entry_attempt(bar, bar_idx, state.cadence)
+                state.trade_seq += 1
+                rolled_tid = f"{ticker}_BT_{state.trade_seq:04d}"
+                t_rolled = _start_trade_state(
+                    rolled_tid,
+                    bar,
+                    bar_ctx,
+                    rolled_entry,
+                    config,
+                    wheel_phase=t.wheel_phase,
+                    stock_lot=state.stock_lot,
+                )
+                state.all_trades.append(t_rolled)
+                still_open.append(t_rolled)
+                bar_flags.extend(t_rolled.flags)
         state.active_open = still_open
 
+        is_wheel_or_cc = config.strategy_kind in ("COVERED_CALL", "WHEEL")
         want_entry = (
             (bar_idx == 0 and broker_fill_anchor is None)
             if mode == "SINGLE_TRADE"
-            else should_attempt_entry(bar, bar_idx, config, len(state.active_open), state.cadence)
+            else (
+                False
+                if (is_wheel_or_cc and state.active_open)
+                else should_attempt_entry(
+                    bar, bar_idx, config, len(state.active_open), state.cadence
+                )
+            )
         )
         if want_entry:
+            entry_wheel_phase: WheelPhase | None = None
+            if config.strategy_kind == "COVERED_CALL":
+                entry_wheel_phase = "CC"
+            elif config.strategy_kind == "WHEEL":
+                entry_wheel_phase = "CC" if state.stock_lot is not None else "CSP"
+
             entry_res, _entry_notes, skip_reason = build_entry_candidate_outcome(
-                bar, config, legs=entry_legs, raise_on_error=(mode == "SINGLE_TRADE"), ctx=bar_ctx
+                bar,
+                config,
+                legs=entry_legs,
+                raise_on_error=(mode == "SINGLE_TRADE"),
+                ctx=bar_ctx,
+                wheel_phase=entry_wheel_phase,
+                stock_cost_basis=(
+                    state.stock_lot.cost_basis if state.stock_lot is not None else bar_ctx.spot
+                ),
+                cycle_credits_per_share=(
+                    state.stock_lot.cycle_credits_per_share if state.stock_lot is not None else 0.0
+                ),
             )
             if entry_res is not None:
+                if (
+                    config.strategy_kind == "COVERED_CALL"
+                    and state.stock_lot is None
+                    and bar_ctx.spot is not None
+                    and bar_ctx.spot > 0.0
+                ):
+                    shares = 100 * config.qty
+                    open_comm_est = round(
+                        config.commission_per_contract
+                        * float(sum(leg.qty for leg in entry_res.legs)),
+                        2,
+                    )
+                    state.stock_lot = _SyntheticStockLot(
+                        shares=shares,
+                        cost_basis=bar_ctx.spot,
+                        acquired_date=bar.market_date,
+                        acquired_snapshot_id=bar.snapshot_id,
+                        cycle_credits_per_share=round(
+                            (entry_res.entry_cash_mid_dollars - open_comm_est) / float(shares), 4
+                        ),
+                        last_unrealized_pnl=0.0,
+                    )
+                    entry_res = EntryBuildResult(
+                        legs=entry_res.legs,
+                        entry_cash_mid_dollars=entry_res.entry_cash_mid_dollars,
+                        entry_cash_natural_dollars=entry_res.entry_cash_natural_dollars,
+                        entry_basis_dollars=entry_res.entry_basis_dollars,
+                        max_profit_dollars=entry_res.max_profit_dollars,
+                        max_loss_dollars=entry_res.max_loss_dollars,
+                        max_loss_unbounded=entry_res.max_loss_unbounded,
+                        initial_step=entry_res.initial_step,
+                        selection_notes=deduplicate_flags(
+                            [
+                                f"Acquired {shares} synthetic shares @ ${bar_ctx.spot:.2f}.",
+                                *entry_res.selection_notes,
+                            ]
+                        ),
+                        flags=deduplicate_flags([FLAG_SYNTHETIC_STOCK_ENTRY, *entry_res.flags]),
+                    )
                 if mode == "SYSTEMATIC":
                     record_entry_attempt(bar, bar_idx, state.cadence)
                 state.trade_seq += 1
@@ -531,7 +958,15 @@ def _simulate_bars(
                     if (mode == "SINGLE_TRADE" and trade_id)
                     else f"{ticker}_BT_{state.trade_seq:04d}"
                 )
-                t_state = _start_trade_state(resolved_tid, bar, bar_ctx, entry_res, config)
+                t_state = _start_trade_state(
+                    resolved_tid,
+                    bar,
+                    bar_ctx,
+                    entry_res,
+                    config,
+                    wheel_phase=entry_wheel_phase,
+                    stock_lot=state.stock_lot,
+                )
                 state.all_trades.append(t_state)
                 state.active_open.append(t_state)
                 bar_flags.extend(t_state.flags)
@@ -581,7 +1016,16 @@ def _simulate_bars(
     elif not state.all_trades:
         state.notes.append("No trades opened during the simulation window.")
 
-    final_trades = [_finalize(t, active_bars[-1], config) for t in state.all_trades]
+    if state.stock_lot is not None:
+        state.notes.append(
+            f"End-of-window synthetic stock inventory open: {state.stock_lot.shares} shs @ "
+            f"${state.stock_lot.cost_basis:.2f} (MTM ${state.stock_lot.last_unrealized_pnl:+.2f})."
+        )
+
+    final_trades = [
+        _finalize(t, active_bars[-1], config, open_stock_lot=state.stock_lot)
+        for t in state.all_trades
+    ]
     summary = build_portfolio_summary(
         config,
         final_trades,

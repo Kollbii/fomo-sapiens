@@ -176,6 +176,88 @@ export function renderChainBadges(meta) {
   syncStickyContextBar(state.chainData);
 }
 
+// ------------------------------------------------------------------ KPI Strip Helpers
+export function formatWallBasisShort(basis) {
+  var key = String(basis || "OPEN_INTEREST").trim().toUpperCase();
+  if (key === "OPEN_INTEREST") return "OI";
+  if (key === "VOLUME") return "Vol";
+  return String(basis || "OI");
+}
+
+export function formatKpiContractScope(meta, snapshots) {
+  if (!meta) return "\u2014";
+  var viewCount = Number(meta.contract_count || 0);
+  var fullCount = null;
+  if (Array.isArray(snapshots) && snapshots.length) {
+    var byId = null;
+    var byDate = null;
+    for (var i = 0; i < snapshots.length; i++) {
+      var s = snapshots[i];
+      if (!s) continue;
+      if (meta.snapshot_id && s.snapshot_id === meta.snapshot_id) {
+        byId = s;
+        break;
+      }
+      if (!byDate && meta.market_date && s.market_date === meta.market_date) {
+        byDate = s;
+      }
+    }
+    var matched = byId || byDate;
+    if (matched && Number.isFinite(Number(matched.contract_count))) {
+      fullCount = Number(matched.contract_count);
+    }
+  }
+  if (fullCount !== null && fullCount > viewCount && viewCount > 0) {
+    return viewCount + "/" + fullCount + "c";
+  }
+  return viewCount + "c";
+}
+
+export function computeCorridorSpotPct(spot, putStrike, callStrike) {
+  var s = Number(spot);
+  var p = Number(putStrike);
+  var c = Number(callStrike);
+  if (
+    spot === null ||
+    spot === undefined ||
+    putStrike === null ||
+    putStrike === undefined ||
+    callStrike === null ||
+    callStrike === undefined ||
+    !Number.isFinite(s) ||
+    !Number.isFinite(p) ||
+    !Number.isFinite(c) ||
+    c <= p
+  ) {
+    return { pinPct: 50, rawPct: null, valid: false };
+  }
+  var rawPct = ((s - p) / (c - p)) * 100;
+  var pinPct = Math.max(4, Math.min(96, Math.round(rawPct * 10) / 10));
+  return { pinPct: pinPct, rawPct: rawPct, valid: true };
+}
+
+export function formatTopAnomalySummary(anomaliesReport) {
+  var list =
+    anomaliesReport && Array.isArray(anomaliesReport.anomalies) ? anomaliesReport.anomalies : [];
+  if (!list.length) {
+    var total = anomaliesReport && anomaliesReport.total_flagged ? anomaliesReport.total_flagged : 0;
+    return total ? total + " flagged contracts" : "0 flagged contracts";
+  }
+  var top = list[0];
+  var strikeNum = Number(top.strike);
+  var strikeStr = Number.isFinite(strikeNum)
+    ? "$" + fmtNum(strikeNum, strikeNum % 1 ? 2 : 0)
+    : "\u2014";
+  var dteStr = top.dte !== null && top.dte !== undefined ? " (" + top.dte + "d)" : "";
+  var ratioNum =
+    top.vol_oi_ratio !== null && top.vol_oi_ratio !== undefined ? Number(top.vol_oi_ratio) : NaN;
+  var metricStr =
+    Number.isFinite(ratioNum) && ratioNum > 0
+      ? fmtNum(ratioNum, 1) + "\u00D7 Vol/OI"
+      : "Z " + fmtNum(top.volume_zscore, 1);
+  return "Top: " + strikeStr + (top.right || "") + dteStr + " \u2022 " + metricStr;
+}
+
 // ------------------------------------------------------------------ KPI Strip
 function setKpi(cardEl, valueText, subText) {
   if (!cardEl) return;
@@ -218,75 +300,107 @@ export function syncStickyContextBar(data) {
 
 export function renderKpis(data) {
   if (!data) {
-    setKpi(dom.kpiSpot, "—", "No cached snapshot for " + state.ticker);
-    setKpi(dom.kpiCallWall, "—", "Click REFRESH FROM IBKR");
-    setKpi(dom.kpiPutWall, "—", "Click REFRESH FROM IBKR");
-    setKpi(dom.kpiAnomalies, "—", "0 flagged contracts");
+    setKpi(dom.kpiSpot, "\u2014", "No cached snapshot for " + state.ticker);
+    setKpi(dom.kpiPutWall, "\u2014", "Click REFRESH FROM IBKR");
+    setKpi(dom.kpiCallWall, "\u2014", "Click REFRESH FROM IBKR");
+    setKpi(dom.kpiAnomalies, "\u2014", "0 Vol>OI");
+    if (dom.kpiCorridorCaption) dom.kpiCorridorCaption.textContent = "OI / Vol structure";
+    if (dom.kpiCorridorPin && dom.kpiCorridorPin.style) dom.kpiCorridorPin.style.left = "50%";
+    if (dom.kpiAnomalyTop) dom.kpiAnomalyTop.textContent = "0 flagged contracts";
     syncStickyContextBar(null);
     return;
   }
 
   var meta = data.meta;
-  var walls = data.walls;
-  var anomalies = data.anomalies;
+  var walls = data.walls || {};
+  var anomalies = data.anomalies || {};
+  var basisShort = formatWallBasisShort(walls.primary_basis);
 
   setKpi(
     dom.kpiSpot,
     fmtMoney(meta.underlying_price),
     meta.underlying +
       " \u2022 " +
-      meta.source +
+      formatKpiContractScope(meta, state.snapshots) +
       " \u2022 " +
-      meta.contract_count +
-      "c \u2022 " +
       formatPullScopeSummary(meta) +
       " \u2022 " +
       meta.market_date
   );
-
-  var cw = walls.aggregate_primary_call_wall;
-  if (cw) {
-    var cwSign = cw.distance_from_spot_pct >= 0 ? "+" : "";
-    setKpi(
-      dom.kpiCallWall,
-      "$" + fmtNum(cw.strike, 2),
-      walls.primary_basis +
-        ": " +
-        fmtInt(cw.metric_value) +
-        " (" +
-        cwSign +
-        fmtNum(cw.distance_from_spot_pct, 1) +
-        "% vs spot)"
-    );
-  } else {
-    setKpi(dom.kpiCallWall, "—", "Insufficient Call " + walls.primary_basis);
-  }
 
   var pw = walls.aggregate_primary_put_wall;
   if (pw) {
     var pwSign = pw.distance_from_spot_pct >= 0 ? "+" : "";
     setKpi(
       dom.kpiPutWall,
-      "$" + fmtNum(pw.strike, 2),
-      walls.primary_basis +
-        ": " +
-        fmtInt(pw.metric_value) +
-        " (" +
-        pwSign +
+      "$" + fmtNum(pw.strike, pw.strike % 1 ? 2 : 0),
+      pwSign +
         fmtNum(pw.distance_from_spot_pct, 1) +
-        "% vs spot)"
+        "% \u2022 " +
+        basisShort +
+        " " +
+        fmtInt(pw.metric_value)
     );
   } else {
-    setKpi(dom.kpiPutWall, "—", "Insufficient Put " + walls.primary_basis);
+    setKpi(dom.kpiPutWall, "\u2014", "Insufficient Put " + basisShort);
+  }
+
+  var cw = walls.aggregate_primary_call_wall;
+  if (cw) {
+    var cwSign = cw.distance_from_spot_pct >= 0 ? "+" : "";
+    setKpi(
+      dom.kpiCallWall,
+      "$" + fmtNum(cw.strike, cw.strike % 1 ? 2 : 0),
+      cwSign +
+        fmtNum(cw.distance_from_spot_pct, 1) +
+        "% \u2022 " +
+        basisShort +
+        " " +
+        fmtInt(cw.metric_value)
+    );
+  } else {
+    setKpi(dom.kpiCallWall, "\u2014", "Insufficient Call " + basisShort);
+  }
+
+  var pos = computeCorridorSpotPct(
+    meta.underlying_price,
+    pw ? pw.strike : null,
+    cw ? cw.strike : null
+  );
+  if (dom.kpiCorridorPin && dom.kpiCorridorPin.style) {
+    dom.kpiCorridorPin.style.left = pos.pinPct + "%";
+  }
+  var cpRatio = null;
+  if (walls.primary_basis === "VOLUME") {
+    if (Number(walls.total_put_volume || 0) > 0) {
+      cpRatio = Number(walls.total_call_volume || 0) / Number(walls.total_put_volume);
+    }
+  } else if (Number(walls.total_put_oi || 0) > 0) {
+    cpRatio = Number(walls.total_call_oi || 0) / Number(walls.total_put_oi);
+  }
+  if (dom.kpiCorridorCaption) {
+    var capParts = [];
+    if (pos.valid) {
+      capParts.push("Spot " + Math.round(pos.rawPct) + "% of range");
+    }
+    if (cpRatio !== null && Number.isFinite(cpRatio)) {
+      capParts.push("C/P " + basisShort + " " + fmtNum(cpRatio, 2) + "\u00D7");
+    }
+    dom.kpiCorridorCaption.textContent = capParts.length
+      ? capParts.join(" \u2022 ")
+      : basisShort + " structure";
   }
 
   setKpi(
     dom.kpiAnomalies,
-    String(anomalies.total_flagged),
-    anomalies.vol_gt_oi_count +
+    String(anomalies.total_flagged || 0),
+    (anomalies.vol_gt_oi_count || 0) +
       " Vol>OI \u2022 " +
-      anomalies.high_zscore_count +
-      " High Z-score"
+      (anomalies.high_zscore_count || 0) +
+      " High Z"
   );
+  if (dom.kpiAnomalyTop) {
+    dom.kpiAnomalyTop.textContent = formatTopAnomalySummary(anomalies);
+  }
   syncStickyContextBar(data);
 }

@@ -42,10 +42,45 @@
 }
 
 .backtest-single-controls[hidden],
+.backtest-wheel-controls[hidden],
 .backtest-legs-box[hidden],
 .backtest-switch-group[hidden],
 .backtest-field[hidden] {
   display: none;
+}
+
+.backtest-wheel-controls {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 8px 12px;
+  align-items: end;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.backtest-wheel-roll-group {
+  min-width: 0;
+}
+
+.backtest-roll-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.backtest-roll-check input {
+  accent-color: var(--accent-primary);
+}
+
+.backtest-roll-check input:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 2px;
+}
+
+.backtest-wheel-roll-group .select-control:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .backtest-config-grid {

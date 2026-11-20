@@ -18,11 +18,15 @@ from src.analytics.backtest.context import (
 )
 from src.analytics.backtest.models import (
     FLAG_BROKER_FILL_ENTRY,
+    FLAG_LEG_FALLBACK_PRICE,
     FLAG_MISSING_PRICE,
     FLAG_NO_LAST_PRINT,
+    FLAG_ROLLED_ENTRY,
     BacktestConfig,
     BacktestLegMark,
+    BacktestStrategyKind,
     ExitReason,
+    WheelPhase,
     deduplicate_flags,
 )
 from src.analytics.backtest.pricing import (
@@ -33,17 +37,24 @@ from src.analytics.backtest.pricing import (
     lookup_legs_on_bar,
     resolve_row_prices,
 )
-from src.analytics.strategies.builders import StrategyFilterError
-from src.analytics.strategies.engine import evaluate_strategy
+from src.analytics.strategies.builders import StrategyFilterError, find_wall_for_expiry
+from src.analytics.strategies.chain import (
+    PreparedRow,
+    chain_reference_iv,
+    liquidity_score,
+    prepare_rows,
+)
+from src.analytics.strategies.engine import build_leg_states, evaluate_strategy, evaluated_legs
 from src.analytics.strategies.models import (
     EvaluatedLeg,
     StrategyEvaluationResponse,
+    StrategyKind,
     StrategyLegInput,
 )
 from src.analytics.walls import compute_walls
 from src.core.exceptions import BacktestValidationError
 from src.storage.backtest_store import DailyChainBar
-from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA
+from src.storage.schema import OPTION_CHAIN_POLARS_SCHEMA, OptionRight
 
 DENOM_EPS: Final = 1e-9
 TARGET_DTE_CENTER: Final = 38
@@ -93,6 +104,12 @@ class ExitDecision:
     unresolved: bool = False
     flags: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+
+
+def _to_strategy_kind(kind: BacktestStrategyKind) -> StrategyKind:
+    if kind == "COVERED_CALL" or kind == "WHEEL":
+        return "CUSTOM"
+    return kind
 
 
 def _adjust_risk_bounds(
@@ -279,10 +296,11 @@ def build_broker_fill_entry(
     entry_basis = round(abs(entry_cash_mid_r), 2) or 0.0
     anchor_note = f"Anchored to broker fill from {anchor.entry_snapshot_id} ({anchor.entry_date})."
 
+    ev_strategy_kind = _to_strategy_kind(config.strategy_kind)
     try:
         ev = evaluate_strategy(
             syn_df,
-            strategy_kind=config.strategy_kind,
+            strategy_kind=ev_strategy_kind,
             legs=list(legs),
             qty_multiplier=config.qty,
             risk_free_rate=config.risk_free_rate,
@@ -415,6 +433,476 @@ def build_entry_candidate(
     return entry, notes
 
 
+def _single_leg_row_dict(row: PreparedRow) -> dict[str, object]:
+    return {
+        "bid": row.bid,
+        "ask": row.ask,
+        "last": row.last,
+        "close": row.close,
+    }
+
+
+def _build_single_leg_entry_result(
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    config: BacktestConfig,
+    *,
+    spec: StrategyLegInput,
+    chosen_row: PreparedRow,
+    all_rows: Sequence[PreparedRow],
+    stock_cost_basis: float | None,
+    selection_notes: Sequence[str],
+    extra_flags: Sequence[str] = (),
+) -> tuple[EntryBuildResult | None, list[str], str | None]:
+    spot_val = float(bar_ctx.spot or 0.0)
+    if spot_val <= 0.0:
+        return None, [f"Skipped entry on {bar.market_date}: invalid spot."], "INVALID_SPOT"
+
+    ref_iv = chain_reference_iv(list(all_rows), spot_val, chosen_row.expiry)
+    leg_states = build_leg_states([(spec, chosen_row)], spot_val, config.risk_free_rate, ref_iv)
+    eval_legs = evaluated_legs(leg_states, config.qty)
+    entry_rows, _ = lookup_legs_on_bar(
+        bar,
+        eval_legs,
+        price_basis=config.price_basis,
+        close_price_mode=config.close_price_mode,
+        risk_free_rate=config.risk_free_rate,
+    )
+    found_entry = entry_rows.get(0)
+    if found_entry is None:
+        return (
+            None,
+            [
+                f"Skipped entry on {bar.market_date}: missing leg "
+                f"{spec.expiry} {spec.strike:g}{spec.right}."
+            ],
+            "MISSING_CONTRACT",
+        )
+    raw_row, _ = found_entry
+    res = resolve_row_prices(
+        raw_row,
+        side=spec.side,
+        price_basis=config.price_basis,
+        close_price_mode=config.close_price_mode,
+    )
+    if res.price_used is None or res.no_last_print or res.price_used <= 0.0:
+        reason_flag = FLAG_NO_LAST_PRINT if res.no_last_print else FLAG_MISSING_PRICE
+        return (
+            None,
+            [
+                f"Skipped entry on {bar.market_date}: unusable price ({reason_flag}) for "
+                f"{spec.expiry} {spec.strike:g}{spec.right}."
+            ],
+            "UNUSABLE_ENTRY_PRICE",
+        )
+
+    base_leg = eval_legs[0]
+    nat_open = res.natural_open_price if res.natural_open_price is not None else res.price_used
+    cash_sign = -1.0 if spec.side == "BUY" else 1.0
+    entry_cash_mid_r = round(cash_sign * float(base_leg.qty) * 100.0 * res.price_used, 2)
+    entry_cash_nat_r = round(cash_sign * float(base_leg.qty) * 100.0 * nat_open, 2)
+    entry_basis = round(abs(entry_cash_mid_r), 2)
+
+    updated_legs = [
+        base_leg.model_copy(
+            update={
+                "mid": round(res.price_used, 4),
+                "natural_fill": round(nat_open, 4),
+            }
+        )
+    ]
+
+    if spec.right == "P":
+        max_profit_dollars = entry_cash_mid_r
+        max_loss_dollars = round(
+            max(0.0, spec.strike * 100.0 * float(config.qty) - entry_cash_mid_r), 2
+        )
+    else:
+        eff_basis = stock_cost_basis if stock_cost_basis is not None else spot_val
+        max_profit_dollars = round(
+            entry_cash_mid_r + max(0.0, (spec.strike - eff_basis) * 100.0 * float(config.qty)),
+            2,
+        )
+        max_loss_dollars = round(
+            max(0.0, eff_basis * 100.0 * float(config.qty) - entry_cash_mid_r),
+            2,
+        )
+
+    entry_flags: list[str] = list(extra_flags)
+    if res.used_fallback:
+        entry_flags.append(FLAG_LEG_FALLBACK_PRICE)
+
+    initial_step = evaluate_trade_step_on_bar(bar, updated_legs, config, ctx=bar_ctx)
+    all_flags = deduplicate_flags([*entry_flags, *initial_step.flags])
+    return (
+        EntryBuildResult(
+            legs=updated_legs,
+            entry_cash_mid_dollars=entry_cash_mid_r,
+            entry_cash_natural_dollars=entry_cash_nat_r,
+            entry_basis_dollars=entry_basis,
+            max_profit_dollars=max_profit_dollars,
+            max_loss_dollars=max_loss_dollars,
+            max_loss_unbounded=False,
+            initial_step=initial_step,
+            selection_notes=deduplicate_flags(list(selection_notes)),
+            flags=all_flags,
+        ),
+        [],
+        None,
+    )
+
+
+def _rank_short_candidates_for_mode(
+    candidates: list[PreparedRow],
+    *,
+    spot: float,
+    right: OptionRight,
+    config: BacktestConfig,
+    wall: float | None,
+) -> list[PreparedRow]:
+    if config.strike_selection_mode == "WALL_ANCHORED":
+        is_put = right == "P"
+        anchor_ref = (
+            wall
+            if (wall is not None and ((wall <= spot * 1.02) if is_put else (wall >= spot * 0.98)))
+            else (spot * 0.95 if is_put else spot * 1.05)
+        )
+
+        def _wall_score(r: PreparedRow) -> float:
+            eff_delta = r.delta if r.delta is not None else config.target_delta
+            delta_err = abs(abs(eff_delta) - config.target_delta) * 30.0
+            wall_bonus = 22.0 if (wall is not None and abs(r.strike - wall) < 1e-4) else 0.0
+            dist_pen = (abs(r.strike - anchor_ref) / max(spot, 1.0)) * 80.0
+            return liquidity_score(r) + wall_bonus - delta_err - dist_pen
+
+        return sorted(candidates, key=_wall_score, reverse=True)
+
+    def _delta_key(r: PreparedRow) -> tuple[int, float, float, float]:
+        has_delta = r.delta is not None
+        delta_err = (
+            round(abs(abs(r.delta) - config.target_delta), 6) if r.delta is not None else 999.0
+        )
+        dist = abs(r.strike - spot) / max(spot, 1.0)
+        return (0 if has_delta else 1, delta_err, dist, -liquidity_score(r))
+
+    return sorted(candidates, key=_delta_key)
+
+
+def select_short_option_candidate(
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    config: BacktestConfig,
+    *,
+    right: OptionRight,
+    stock_cost_basis: float | None = None,
+    min_call_strike: float | None = None,
+    eff_min_credit: float | None = None,
+    raise_on_error: bool = False,
+) -> tuple[EntryBuildResult | None, list[str], str | None]:
+    """Select an OTM Short Call (Covered Call / Wheel CC) or Short Put (Wheel CSP) on `bar`."""
+    if bar.df.height == 0:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: empty option chain.",
+            raise_on_error=raise_on_error,
+            skip_reason="EMPTY_CHAIN",
+        )
+    front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
+    if front_df.height == 0:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: no contracts in "
+            f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
+            raise_on_error=raise_on_error,
+            skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+        )
+    unsettled_front = [
+        str(exp)
+        for exp in front_df["expiry"].unique().to_list()
+        if not is_leg_settled(str(exp), bar.ts_utc)
+    ]
+    if not unsettled_front:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: "
+            "selected expiry already reached settlement cutoff.",
+            raise_on_error=raise_on_error,
+            skip_reason="ALREADY_SETTLED",
+        )
+
+    front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
+    front_expiry = _pick_front_expiry(
+        front_df,
+        target_dte_min=config.target_dte_min,
+        target_dte_max=config.target_dte_max,
+    )
+    enriched_df = enrich_filtered_greeks(
+        front_df.filter(pl.col("expiry") == front_expiry),
+        risk_free_rate=config.risk_free_rate,
+    )
+    walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+    _, call_wall, put_wall = find_wall_for_expiry(walls, front_expiry)
+    wall = call_wall if right == "C" else put_wall
+
+    _und, _df_spot, all_rows = prepare_rows(enriched_df)
+    side_rows = [r for r in all_rows if r.expiry == front_expiry and r.right == right]
+    right_label = "Call" if right == "C" else "Put"
+    if not side_rows:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: no {right_label} contracts on {front_expiry}.",
+            raise_on_error=raise_on_error,
+            skip_reason="NO_CALL_CONTRACTS" if right == "C" else "NO_PUT_CONTRACTS",
+        )
+
+    spot_val = float(bar_ctx.spot or 0.0)
+    otm_rows = [
+        r
+        for r in side_rows
+        if (r.strike >= spot_val * 0.995 if right == "C" else r.strike <= spot_val * 1.005)
+    ]
+    if not otm_rows:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: "
+            f"no OTM/near-ATM {right_label.lower()} candidates.",
+            raise_on_error=raise_on_error,
+            skip_reason="NO_OTM_CALL_CANDIDATES" if right == "C" else "NO_OTM_PUT_CANDIDATES",
+        )
+
+    candidates = otm_rows
+    if right == "C" and min_call_strike is not None:
+        candidates = [r for r in otm_rows if r.strike >= min_call_strike - 1e-6]
+        if not candidates:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: no OTM Call strike >= "
+                f"${min_call_strike:.2f} ({config.cc_strike_floor} floor).",
+                raise_on_error=raise_on_error,
+                skip_reason="BELOW_COST_BASIS_FLOOR",
+            )
+
+    ranked = _rank_short_candidates_for_mode(
+        candidates, spot=spot_val, right=right, config=config, wall=wall
+    )
+
+    chosen_row: PreparedRow | None = None
+    chosen_px = 0.0
+    saw_below_credit = False
+    for cand in ranked:
+        res = resolve_row_prices(
+            _single_leg_row_dict(cand),
+            side="SELL",
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+        )
+        if res.price_used is None or res.no_last_print or res.price_used <= 0.0:
+            continue
+        per_contract_credit = round(res.price_used * 100.0, 2)
+        if eff_min_credit is not None and per_contract_credit < eff_min_credit - 1e-9:
+            saw_below_credit = True
+            continue
+        chosen_row = cand
+        chosen_px = res.price_used
+        break
+
+    if chosen_row is None:
+        if saw_below_credit and eff_min_credit is not None:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: short {right_label.lower()} credit "
+                f"below Min Credit ${eff_min_credit:.2f}.",
+                raise_on_error=raise_on_error,
+                skip_reason="BELOW_MIN_CREDIT",
+            )
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: no usable short {right_label.lower()} quote.",
+            raise_on_error=raise_on_error,
+            skip_reason="UNUSABLE_ENTRY_PRICE",
+        )
+
+    delta_str = f"Delta={chosen_row.delta:.2f}" if chosen_row.delta is not None else "Delta=n/a"
+    if config.strike_selection_mode == "WALL_ANCHORED":
+        anchor_txt = f"{right_label} Wall ${wall:g}" if wall is not None else f"OTM {right_label}"
+        note = (
+            f"Short {right_label} ${chosen_row.strike:g} anchored to {anchor_txt} "
+            f"({delta_str}, Entry=${chosen_px:.2f})."
+        )
+        leg_reason = f"Short {right_label} ({anchor_txt})"
+    else:
+        note = (
+            f"Short {right_label} ${chosen_row.strike:g} via Target Delta "
+            f"{config.target_delta:.2f} ({delta_str}, Entry=${chosen_px:.2f})."
+        )
+        leg_reason = f"Short {right_label} ({config.target_delta:.2f} target delta)"
+
+    notes = [note]
+    if right == "C" and min_call_strike is not None:
+        notes.append(
+            f"Strike >= ${min_call_strike:.2f} ({config.cc_strike_floor} floor satisfied)."
+        )
+
+    spec = StrategyLegInput(
+        side="SELL",
+        right=right,
+        expiry=chosen_row.expiry,
+        strike=chosen_row.strike,
+        qty=1,
+        selection_reason=leg_reason,
+    )
+    entry_res, err_notes, skip_code = _build_single_leg_entry_result(
+        bar,
+        bar_ctx,
+        config,
+        spec=spec,
+        chosen_row=chosen_row,
+        all_rows=all_rows,
+        stock_cost_basis=stock_cost_basis,
+        selection_notes=notes,
+    )
+    if entry_res is None:
+        return _fail_or_skip(
+            err_notes[0] if err_notes else f"Skipped entry on {bar.market_date}.",
+            raise_on_error=raise_on_error,
+            skip_reason=skip_code or "UNUSABLE_ENTRY_PRICE",
+        )
+    return entry_res, [], None
+
+
+def find_defensive_roll_candidate(
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    config: BacktestConfig,
+    *,
+    current_leg: EvaluatedLeg,
+    current_close_price_per_share: float,
+    stock_cost_basis: float | None = None,
+    min_call_strike: float | None = None,
+) -> EntryBuildResult | None:
+    """Find a further-out, directionally improved Short Call/Put meeting `roll_credit_mode`."""
+    if bar.df.height == 0 or bar_ctx.spot is None or bar_ctx.spot <= 0.0:
+        return None
+    right = current_leg.right
+    later_df = bar.df.filter((pl.col("expiry") > current_leg.expiry) & (pl.col("right") == right))
+    if later_df.height == 0:
+        return None
+
+    unsettled = [
+        str(exp)
+        for exp in later_df["expiry"].unique().to_list()
+        if not is_leg_settled(str(exp), bar.ts_utc)
+    ]
+    if not unsettled:
+        return None
+    later_df = later_df.filter(pl.col("expiry").is_in(unsettled))
+
+    dte_windows = (
+        (max(1, config.target_dte_min), config.target_dte_max),
+        (max(1, config.target_dte_min), max(config.target_dte_max, 60)),
+        (1, 120),
+    )
+    scoped_df = pl.DataFrame(schema=later_df.schema)
+    for lo_dte, hi_dte in dte_windows:
+        if lo_dte > hi_dte:
+            continue
+        sub = filter_df_for_dte_window(later_df, lo_dte, hi_dte)
+        if sub.height > 0:
+            scoped_df = sub
+            break
+    if scoped_df.height == 0:
+        return None
+
+    target_expiry = _pick_front_expiry(
+        scoped_df,
+        target_dte_min=config.target_dte_min,
+        target_dte_max=config.target_dte_max,
+    )
+    enriched_df = enrich_filtered_greeks(
+        scoped_df.filter(pl.col("expiry") == target_expiry),
+        risk_free_rate=config.risk_free_rate,
+    )
+    walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+    _, call_wall, put_wall = find_wall_for_expiry(walls, target_expiry)
+    wall = call_wall if right == "C" else put_wall
+
+    _und, _df_spot, all_rows = prepare_rows(enriched_df)
+    if not all_rows:
+        return None
+
+    spot_val = float(bar_ctx.spot)
+    eligible: list[PreparedRow] = []
+    for row in all_rows:
+        if row.expiry != target_expiry or row.right != right:
+            continue
+        if right == "C":
+            if row.strike <= current_leg.strike + 1e-6:
+                continue
+            if min_call_strike is not None and row.strike < min_call_strike - 1e-6:
+                continue
+        else:
+            if row.strike >= current_leg.strike - 1e-6:
+                continue
+        eligible.append(row)
+
+    if not eligible:
+        return None
+
+    ordered_pool = _rank_short_candidates_for_mode(
+        eligible, spot=spot_val, right=right, config=config, wall=wall
+    )
+
+    for cand in ordered_pool:
+        res = resolve_row_prices(
+            _single_leg_row_dict(cand),
+            side="SELL",
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+        )
+        if res.price_used is None or res.no_last_print or res.price_used <= 0.0:
+            continue
+        net_roll_ps = round(res.price_used - current_close_price_per_share, 4)
+        if config.roll_credit_mode == "CREDIT_ONLY" and net_roll_ps <= 1e-6:
+            continue
+        if config.roll_credit_mode == "ZERO_OR_CREDIT" and net_roll_ps < -1e-6:
+            continue
+
+        net_roll_total = round(net_roll_ps * 100.0 * float(config.qty), 2)
+        dir_word = "Up & Out" if right == "C" else "Down & Out"
+        note = (
+            f"Rolled {dir_word} {right}: {current_leg.expiry} ${current_leg.strike:g} "
+            f"(buyback ${current_close_price_per_share:.2f}) -> {cand.expiry} ${cand.strike:g} "
+            f"(open ${res.price_used:.2f}, net roll credit ${net_roll_total:+.2f})."
+        )
+        spec = StrategyLegInput(
+            side="SELL",
+            right=right,
+            expiry=cand.expiry,
+            strike=cand.strike,
+            qty=1,
+            selection_reason=f"Rolled {dir_word} ({config.roll_credit_mode})",
+        )
+        entry_res, _errs, _skip = _build_single_leg_entry_result(
+            bar,
+            bar_ctx,
+            config,
+            spec=spec,
+            chosen_row=cand,
+            all_rows=all_rows,
+            stock_cost_basis=stock_cost_basis,
+            selection_notes=[note],
+            extra_flags=(FLAG_ROLLED_ENTRY,),
+        )
+        if entry_res is not None:
+            return entry_res
+    return None
+
+
+def resolve_min_call_strike(
+    config: BacktestConfig,
+    stock_cost_basis: float | None,
+    cycle_credits_per_share: float = 0.0,
+) -> float | None:
+    """Return the minimum Covered Call strike required by `cc_strike_floor`, or `None`."""
+    if stock_cost_basis is None or config.cc_strike_floor == "NONE":
+        return None
+    if config.cc_strike_floor == "COST_BASIS":
+        return stock_cost_basis
+    return max(0.01, round(stock_cost_basis - cycle_credits_per_share, 4))
+
+
 def build_entry_candidate_outcome(
     bar: DailyChainBar,
     config: BacktestConfig,
@@ -422,6 +910,9 @@ def build_entry_candidate_outcome(
     legs: Sequence[StrategyLegInput] | None = None,
     raise_on_error: bool = False,
     ctx: BarContext | None = None,
+    wheel_phase: WheelPhase | None = None,
+    stock_cost_basis: float | None = None,
+    cycle_credits_per_share: float = 0.0,
 ) -> tuple[EntryBuildResult | None, list[str], str | None]:
     """Construct and validate a new trade candidate, returning `(entry, notes, skip_reason)`."""
     bar_ctx = ctx if ctx is not None else extract_bar_context(bar)
@@ -430,6 +921,36 @@ def build_entry_candidate_outcome(
             f"Skipped entry on {bar.market_date}: invalid underlying spot price.",
             raise_on_error=raise_on_error,
             skip_reason="INVALID_SPOT",
+        )
+
+    is_wheel_or_cc = config.strategy_kind in ("COVERED_CALL", "WHEEL")
+    if legs is None and is_wheel_or_cc:
+        right: OptionRight = (
+            "C" if (config.strategy_kind == "COVERED_CALL" or wheel_phase == "CC") else "P"
+        )
+        eff_basis = stock_cost_basis if stock_cost_basis is not None else float(bar_ctx.spot)
+        min_call_strike = (
+            resolve_min_call_strike(config, eff_basis, cycle_credits_per_share)
+            if right == "C"
+            else None
+        )
+        cc_min_credit = (
+            config.min_entry_credit_dollars
+            if (
+                config.min_entry_credit_dollars is not None
+                and config.min_entry_credit_dollars > 0.0
+            )
+            else None
+        )
+        return select_short_option_candidate(
+            bar,
+            bar_ctx,
+            config,
+            right=right,
+            stock_cost_basis=eff_basis if right == "C" else None,
+            min_call_strike=min_call_strike,
+            eff_min_credit=cc_min_credit,
+            raise_on_error=raise_on_error,
         )
 
     apply_bps_filters = legs is None and config.strategy_kind == "BULL_PUT_SPREAD"
@@ -485,10 +1006,11 @@ def build_entry_candidate_outcome(
             row["underlying_price"] = bar_ctx.spot
         leg_df = pl.DataFrame(leg_rows, schema=OPTION_CHAIN_POLARS_SCHEMA)
         walls = compute_walls(bar.df, top_n=config.walls_top_n) if bar.df.height > 0 else None
+        ev_strategy_kind = _to_strategy_kind(config.strategy_kind)
         try:
             ev = evaluate_strategy(
                 leg_df,
-                strategy_kind=config.strategy_kind,
+                strategy_kind=ev_strategy_kind,
                 legs=list(legs),
                 qty_multiplier=config.qty,
                 risk_free_rate=config.risk_free_rate,
@@ -549,10 +1071,11 @@ def build_entry_candidate_outcome(
             scope_df = front_df
         enriched_df = enrich_filtered_greeks(scope_df, risk_free_rate=config.risk_free_rate)
         walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+        ev_strategy_kind = _to_strategy_kind(config.strategy_kind)
         try:
             ev = evaluate_strategy(
                 enriched_df,
-                strategy_kind=config.strategy_kind,
+                strategy_kind=ev_strategy_kind,
                 target_expiry=front_expiry,
                 qty_multiplier=config.qty,
                 risk_free_rate=config.risk_free_rate,

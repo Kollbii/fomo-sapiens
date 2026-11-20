@@ -597,7 +597,12 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert 'id="backtest-tables-splitter"' in html
                 assert 'aria-expanded="false"' in html
                 assert 'class="backtest-paper-drawer" hidden' in html
-                assert "?v=20261120b" in html
+                assert "?v=20261120f" in html
+                assert 'id="backtest-wheel-controls"' in html
+                assert 'value="COVERED_CALL"' in html
+                assert 'value="WHEEL"' in html
+                assert 'id="backtest-strike-mode-select"' in html
+                assert 'id="backtest-roll-toggle"' in html
 
                 r_css = await client.get("/static/css/backtest.css")
                 assert r_css.status_code == 200
@@ -1097,5 +1102,73 @@ def test_paper_trades_ledger_multilot_qty_override_scales_entry_and_pnl(
                 assert nvda_one_trade["steps"][1]["gross_pnl_dollars"] == pytest.approx(-70.0)
                 assert nvda_one_trade["steps"][-1]["gross_pnl_dollars"] == pytest.approx(130.0)
                 assert nvda_one_trade["gross_pnl_dollars"] == pytest.approx(130.0)
+
+    run_coro(_exercise())
+
+
+def test_backtest_api_covered_call_and_wheel_endpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _build_app(tmp_path)
+    asgi_app = _patch_inline_threads(monkeypatch, app)
+
+    async def _exercise() -> None:
+        async with app.router.lifespan_context(app):
+            transport = httpx.ASGITransport(app=asgi_app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                r_cc = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SYSTEMATIC",
+                        "ticker": "NVDA",
+                        "config": {
+                            "strategy_kind": "COVERED_CALL",
+                            "strike_selection_mode": "TARGET_DELTA",
+                            "target_delta": 0.25,
+                            "cc_strike_floor": "COST_BASIS",
+                            "stock_stop_mode": "OPTION_ONLY",
+                            "cc_itm_mode": "CALL_AWAY_AND_REBUY",
+                            "entry_cadence": "WHEN_FLAT",
+                            "min_entry_credit_dollars": 100.0,
+                            "profit_target_pct": None,
+                            "stop_loss_pct": None,
+                        },
+                    },
+                )
+                assert r_cc.status_code == 200
+                cc_sim = r_cc.json()["simulation"]
+                assert cc_sim["trades"]
+                cc_trade = cc_sim["trades"][0]
+                assert cc_trade["strategy_kind"] == "COVERED_CALL"
+                assert cc_trade["wheel_phase"] == "CC"
+                assert cc_trade["stock_shares"] == 100
+                assert cc_trade["legs"][0]["right"] == "C"
+
+                r_wheel = await client.post(
+                    "/api/backtest/run",
+                    json={
+                        "mode": "SYSTEMATIC",
+                        "ticker": "NVDA",
+                        "config": {
+                            "strategy_kind": "WHEEL",
+                            "strike_selection_mode": "WALL_ANCHORED",
+                            "roll_enabled": True,
+                            "roll_credit_mode": "ZERO_OR_CREDIT",
+                            "entry_cadence": "WHEN_FLAT",
+                            "min_entry_credit_dollars": 100.0,
+                            "profit_target_pct": None,
+                            "stop_loss_pct": None,
+                        },
+                    },
+                )
+                assert r_wheel.status_code == 200
+                wheel_sim = r_wheel.json()["simulation"]
+                assert wheel_sim["trades"]
+                wheel_trade = wheel_sim["trades"][0]
+                assert wheel_trade["strategy_kind"] == "WHEEL"
+                assert wheel_trade["wheel_phase"] == "CSP"
+                assert wheel_trade["legs"][0]["right"] == "P"
 
     run_coro(_exercise())

@@ -11,7 +11,13 @@ import pytest
 
 from src.analytics.backtest import (
     FLAG_BROKER_FILL_ENTRY,
+    FLAG_CALLED_AWAY,
     FLAG_NO_USABLE_DAILY_SNAPSHOT,
+    FLAG_PUT_ASSIGNED,
+    FLAG_ROLL_SKIPPED,
+    FLAG_ROLLED_ENTRY,
+    FLAG_STOCK_LIQUIDATED_ON_SL,
+    FLAG_SYNTHETIC_STOCK_ENTRY,
     FLAG_TRACKED_LEG_USED,
     BacktestConfig,
     BrokerFillAnchor,
@@ -1594,3 +1600,543 @@ def test_broker_fill_anchor_skips_pre_anchor_intraday_bar_and_handles_prior_same
         run_single_trade_replay(
             [b_morning, b_next], cfg, ticker="NVDA", legs=legs, broker_fill_anchor=later_anchor
         )
+
+
+def test_covered_call_target_delta_and_call_away_rebuy() -> None:
+    d0 = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+    d1 = datetime(2026, 11, 13, 20, 0, tzinfo=UTC)
+    d2 = datetime(2026, 12, 18, 21, 20, tzinfo=UTC)  # past exp1 16:15 EST cutoff
+    exp1 = "2026-12-18"
+    exp2 = "2027-01-22"
+
+    b0 = _bar(
+        "cc0",
+        d0,
+        "2026-11-06",
+        _make_chain_df(
+            snapshot_id="cc0",
+            ts_utc=d0,
+            market_date="2026-11-06",
+            spot=100.0,
+            strikes=(95.0, 100.0, 105.0, 110.0, 115.0),
+            expiries=((exp1, -1), (exp2, -1)),
+            overrides={
+                (exp1, 105.0, "C"): {
+                    "bid": 3.0,
+                    "ask": 3.2,
+                    "mid": 3.1,
+                    "last": 3.1,
+                    "delta": 0.31,
+                },
+                (exp1, 110.0, "C"): {
+                    "bid": 1.4,
+                    "ask": 1.6,
+                    "mid": 1.5,
+                    "last": 1.5,
+                    "delta": 0.16,
+                },
+            },
+        ),
+        spot=100.0,
+    )
+    b1 = _bar(
+        "cc1",
+        d1,
+        "2026-11-13",
+        _make_chain_df(
+            snapshot_id="cc1",
+            ts_utc=d1,
+            market_date="2026-11-13",
+            spot=103.0,
+            strikes=(95.0, 100.0, 105.0, 110.0, 115.0),
+            expiries=((exp1, -1), (exp2, -1)),
+            overrides={
+                (exp1, 105.0, "C"): {
+                    "bid": 4.0,
+                    "ask": 4.2,
+                    "mid": 4.1,
+                    "last": 4.1,
+                    "delta": 0.45,
+                },
+            },
+        ),
+        spot=103.0,
+    )
+    b2 = _bar(
+        "cc2",
+        d2,
+        "2026-12-18",
+        _make_chain_df(
+            snapshot_id="cc2",
+            ts_utc=d2,
+            market_date="2026-12-18",
+            spot=110.0,
+            strikes=(100.0, 105.0, 110.0, 115.0, 120.0),
+            expiries=((exp1, 0), (exp2, -1)),
+            overrides={
+                (exp2, 115.0, "C"): {
+                    "bid": 3.5,
+                    "ask": 3.7,
+                    "mid": 3.6,
+                    "last": 3.6,
+                    "delta": 0.30,
+                },
+            },
+        ),
+        spot=110.0,
+    )
+
+    cfg = BacktestConfig(
+        strategy_kind="COVERED_CALL",
+        strike_selection_mode="TARGET_DELTA",
+        target_delta=0.30,
+        cc_itm_mode="CALL_AWAY_AND_REBUY",
+        entry_cadence="WHEN_FLAT",
+        target_dte_min=30,
+        target_dte_max=60,
+        commission_per_contract=0.65,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        min_entry_credit_dollars=100.0,
+    )
+    res = run_systematic_backtest([b0, b1, b2], cfg, ticker="NVDA")
+    assert len(res.trades) == 2
+
+    tr1, tr2 = res.trades[0], res.trades[1]
+    assert tr1.wheel_phase == "CC"
+    assert tr1.legs[0].strike == pytest.approx(105.0)
+    assert tr1.stock_shares == 100
+    assert tr1.stock_cost_basis == pytest.approx(100.0)
+    assert FLAG_SYNTHETIC_STOCK_ENTRY in tr1.flags
+
+    # On b1 (spot=103): option unrealized = (3.10 - 4.10)*100 - 0.65 = -100.65,
+    # stock unrealized = (103 - 100)*100 = +300.00 -> equity = 10000 + 199.35 = 10199.35
+    assert res.equity_curve[1].unrealized_pnl_dollars == pytest.approx(199.35)
+    assert res.equity_curve[1].equity_dollars == pytest.approx(10199.35)
+
+    # On b2 (exp1 expiry @ 110): $105C called away -> opt_net = 310 - 0.65 = 309.35,
+    # stock_pnl = (105 - 100)*100 = +500.00, total = +809.35, zero close comm.
+    assert tr1.exit_reason == "CALLED_AWAY"
+    assert FLAG_CALLED_AWAY in tr1.flags
+    assert tr1.stock_exit_price == pytest.approx(105.0)
+    assert tr1.option_net_pnl_dollars == pytest.approx(309.35)
+    assert tr1.stock_pnl_dollars == pytest.approx(500.0)
+    assert tr1.net_pnl_dollars == pytest.approx(809.35)
+    assert tr1.commissions_dollars == pytest.approx(0.65)
+
+    # Re-bought 100 shares on b2 @ $110.0 and sold exp2 $115C.
+    assert tr2.status == "OPEN"
+    assert tr2.stock_cost_basis == pytest.approx(110.0)
+    assert tr2.legs[0].expiry == exp2
+    assert tr2.legs[0].strike == pytest.approx(115.0)
+
+
+def test_covered_call_keep_shares_cash_settle_mode() -> None:
+    d0 = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+    d_exp = datetime(2026, 12, 18, 21, 20, tzinfo=UTC)
+    exp1, exp2 = "2026-12-18", "2027-01-22"
+
+    b0 = _bar(
+        "cs0",
+        d0,
+        "2026-11-06",
+        _make_chain_df(
+            snapshot_id="cs0",
+            ts_utc=d0,
+            market_date="2026-11-06",
+            spot=100.0,
+            strikes=(100.0, 105.0, 110.0),
+            expiries=((exp1, -1), (exp2, -1)),
+            overrides={
+                (exp1, 105.0, "C"): {
+                    "bid": 3.0,
+                    "ask": 3.2,
+                    "mid": 3.1,
+                    "last": 3.1,
+                    "delta": 0.30,
+                },
+            },
+        ),
+        spot=100.0,
+    )
+    b1 = _bar(
+        "cs1",
+        d_exp,
+        "2026-12-18",
+        _make_chain_df(
+            snapshot_id="cs1",
+            ts_utc=d_exp,
+            market_date="2026-12-18",
+            spot=112.0,
+            strikes=(105.0, 110.0, 115.0, 120.0),
+            expiries=((exp1, 0), (exp2, -1)),
+            overrides={
+                (exp2, 115.0, "C"): {
+                    "bid": 3.4,
+                    "ask": 3.6,
+                    "mid": 3.5,
+                    "last": 3.5,
+                    "delta": 0.30,
+                },
+            },
+        ),
+        spot=112.0,
+    )
+
+    cfg = BacktestConfig(
+        strategy_kind="COVERED_CALL",
+        cc_itm_mode="KEEP_SHARES_CASH_SETTLE",
+        cc_strike_floor="COST_BASIS",
+        entry_cadence="WHEN_FLAT",
+        target_dte_min=30,
+        target_dte_max=60,
+        commission_per_contract=0.65,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        min_entry_credit_dollars=100.0,
+    )
+    res = run_systematic_backtest([b0, b1], cfg, ticker="NVDA")
+    assert len(res.trades) == 2
+    tr1, tr2 = res.trades[0], res.trades[1]
+    assert tr1.exit_reason == "EXPIRY_SETTLED"
+    # Cash-settled $105C @ spot=112 -> close val = -700; opt_net = 310 - 700 - 0.65 = -390.65
+    assert tr1.option_net_pnl_dollars == pytest.approx(-390.65)
+    assert tr1.stock_pnl_dollars == pytest.approx(0.0)
+    # Day-0 shares remain at original $100 basis in Trade 2!
+    assert tr2.stock_cost_basis == pytest.approx(100.0)
+    assert tr2.stock_pnl_dollars == pytest.approx(1200.0)
+    # Total equity = 10000 - 390.65 (tr1 opt) + 1200.0 (stock @ 112) - 0.65 (tr2 open comm)
+    assert res.summary.final_equity == pytest.approx(10808.70)
+
+
+def test_wheel_full_cycle_csp_assignment_floors_and_called_away() -> None:
+    d0 = datetime(2026, 11, 6, 20, 0, tzinfo=UTC)
+    d1 = datetime(2026, 12, 18, 21, 20, tzinfo=UTC)  # exp1 expiry: ITM Put assignment
+    d2 = datetime(2026, 12, 21, 20, 0, tzinfo=UTC)  # below cost-basis check bar
+    d3 = datetime(2027, 1, 22, 21, 20, tzinfo=UTC)  # exp2 expiry: Called Away -> back to CSP
+    exp1, exp2, exp3 = "2026-12-18", "2027-01-22", "2027-02-26"
+
+    b0 = _bar(
+        "w0",
+        d0,
+        "2026-11-06",
+        _make_chain_df(
+            snapshot_id="w0",
+            ts_utc=d0,
+            market_date="2026-11-06",
+            spot=105.0,
+            strikes=(95.0, 100.0, 105.0, 110.0),
+            expiries=((exp1, -1),),
+            overrides={
+                (exp1, 100.0, "P"): {
+                    "bid": 2.4,
+                    "ask": 2.6,
+                    "mid": 2.5,
+                    "last": 2.5,
+                    "delta": -0.30,
+                },
+            },
+        ),
+        spot=105.0,
+    )
+    # Bar 1: Spot drops to 92.0 at exp1 expiry -> $100P assigned!
+    # Offers $95C (below $100 cost basis & $97.51 net breakeven) and $98C (>= $97.51 breakeven).
+    b1 = _bar(
+        "w1",
+        d1,
+        "2026-12-18",
+        _make_chain_df(
+            snapshot_id="w1",
+            ts_utc=d1,
+            market_date="2026-12-18",
+            spot=92.0,
+            strikes=(95.0, 98.0),
+            expiries=((exp1, 0), (exp2, -1)),
+            overrides={
+                (exp2, 95.0, "C"): {"bid": 2.9, "ask": 3.1, "mid": 3.0, "last": 3.0, "delta": 0.35},
+                (exp2, 98.0, "C"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0, "delta": 0.25},
+            },
+        ),
+        spot=92.0,
+    )
+    # 1) Under COST_BASIS floor ($100), $95C and $98C skip -> stock MTM tracked!
+    cfg_cost_floor = BacktestConfig(
+        strategy_kind="WHEEL",
+        cc_strike_floor="COST_BASIS",
+        entry_cadence="WHEN_FLAT",
+        target_dte_min=30,
+        target_dte_max=60,
+        commission_per_contract=0.65,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        min_entry_credit_dollars=100.0,
+    )
+    res_cost_floor = run_systematic_backtest([b0, b1], cfg_cost_floor, ticker="NVDA")
+    assert res_cost_floor.trades[0].exit_reason == "PUT_ASSIGNED"
+    assert res_cost_floor.trades[0].wheel_phase == "CSP"
+    assert res_cost_floor.trades[0].option_net_pnl_dollars == pytest.approx(249.35)
+    assert res_cost_floor.trades[0].stock_shares == 100
+    assert res_cost_floor.trades[0].stock_cost_basis == pytest.approx(100.0)
+    assert FLAG_PUT_ASSIGNED in res_cost_floor.trades[0].flags
+    assert res_cost_floor.summary.skipped_by_reason.get("BELOW_COST_BASIS_FLOOR") == 1
+    # Zero discontinuity check: 10000 + 249.35 (opt) + (92 - 100)*100 (stock MTM) = 9449.35
+    assert res_cost_floor.equity_curve[1].equity_dollars == pytest.approx(9449.35)
+    assert res_cost_floor.summary.final_equity == pytest.approx(9449.35)
+
+    # 2) With NET_BREAKEVEN floor ($100 - $2.4935 = $97.5065): $98C IS allowed!
+    #    Add b2 (spot=102, holding $98C) and b3 (exp2 @ 106 -> Called Away -> CSP)
+    b1_with_100 = _bar(
+        "w1b",
+        d1,
+        "2026-12-18",
+        _make_chain_df(
+            snapshot_id="w1b",
+            ts_utc=d1,
+            market_date="2026-12-18",
+            spot=92.0,
+            strikes=(95.0, 98.0, 102.0),
+            expiries=((exp1, 0), (exp2, -1)),
+            overrides={
+                (exp2, 95.0, "C"): {"bid": 2.9, "ask": 3.1, "mid": 3.0, "last": 3.0, "delta": 0.40},
+                (exp2, 98.0, "C"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0, "delta": 0.30},
+                (exp2, 102.0, "C"): {
+                    "bid": 0.8,
+                    "ask": 0.9,
+                    "mid": 0.85,
+                    "last": 0.85,
+                    "delta": 0.15,
+                },
+            },
+        ),
+        spot=92.0,
+    )
+    b2 = _bar(
+        "w2",
+        d2,
+        "2026-12-21",
+        _make_chain_df(
+            snapshot_id="w2",
+            ts_utc=d2,
+            market_date="2026-12-21",
+            spot=101.0,
+            strikes=(95.0, 98.0, 102.0),
+            expiries=((exp2, -1),),
+        ),
+        spot=101.0,
+    )
+    b3 = _bar(
+        "w3",
+        d3,
+        "2027-01-22",
+        _make_chain_df(
+            snapshot_id="w3",
+            ts_utc=d3,
+            market_date="2027-01-22",
+            spot=106.0,
+            strikes=(95.0, 98.0, 100.0, 105.0),
+            expiries=((exp2, 0), (exp3, -1)),
+            overrides={
+                (exp3, 100.0, "P"): {
+                    "bid": 2.1,
+                    "ask": 2.3,
+                    "mid": 2.2,
+                    "last": 2.2,
+                    "delta": -0.30,
+                },
+            },
+        ),
+        spot=106.0,
+    )
+    cfg_breakeven = cfg_cost_floor.model_copy(update={"cc_strike_floor": "NET_BREAKEVEN"})
+    res_be = run_systematic_backtest([b0, b1_with_100, b2, b3], cfg_breakeven, ticker="NVDA")
+    assert len(res_be.trades) == 3
+    tr_csp1, tr_cc, tr_csp2 = res_be.trades
+    assert tr_csp1.wheel_phase == "CSP" and tr_csp1.exit_reason == "PUT_ASSIGNED"
+    assert tr_cc.wheel_phase == "CC" and tr_cc.legs[0].strike == pytest.approx(98.0)
+    assert tr_cc.exit_reason == "CALLED_AWAY"
+    assert tr_cc.option_net_pnl_dollars == pytest.approx(199.35)
+    assert tr_cc.stock_pnl_dollars == pytest.approx(-200.0)  # called away @ 98 from 100 basis
+    assert tr_cc.net_pnl_dollars == pytest.approx(-0.65)
+    assert tr_csp2.wheel_phase == "CSP" and tr_csp2.legs[0].right == "P"
+
+    # 3) With cc_strike_floor="NONE", $95C is picked on b1 instead of skipping
+    cfg_none = cfg_cost_floor.model_copy(update={"cc_strike_floor": "NONE", "target_delta": 0.35})
+    res_none = run_systematic_backtest([b0, b1], cfg_none, ticker="NVDA")
+    assert len(res_none.trades) == 2
+    assert res_none.trades[1].wheel_phase == "CC"
+    assert res_none.trades[1].legs[0].strike == pytest.approx(95.0)
+
+
+def test_stock_stop_mode_option_only_vs_liquidate_stock_on_sl() -> None:
+    t0 = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
+    t1 = datetime(2026, 11, 5, 20, 0, tzinfo=UTC)
+    t2 = datetime(2026, 11, 10, 20, 0, tzinfo=UTC)
+    exp = "2026-12-18"
+
+    b0 = _bar(
+        "sl0",
+        t0,
+        "2026-11-02",
+        _make_chain_df(
+            snapshot_id="sl0",
+            ts_utc=t0,
+            market_date="2026-11-02",
+            spot=100.0,
+            strikes=(100.0, 105.0, 110.0),
+            expiries=((exp, -1),),
+            overrides={
+                (exp, 105.0, "C"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0, "delta": 0.30}
+            },
+        ),
+        spot=100.0,
+    )
+    # Bar 1: Spot jumps to 108 -> Call rallies to $5.00 (-$300 option loss > 100% SL)
+    b1 = _bar(
+        "sl1",
+        t1,
+        "2026-11-05",
+        _make_chain_df(
+            snapshot_id="sl1",
+            ts_utc=t1,
+            market_date="2026-11-05",
+            spot=108.0,
+            strikes=(100.0, 105.0, 110.0),
+            expiries=((exp, -1),),
+            overrides={
+                (exp, 105.0, "C"): {"bid": 4.9, "ask": 5.1, "mid": 5.0, "last": 5.0, "delta": 0.72}
+            },
+        ),
+        spot=108.0,
+    )
+    # Bar 2: Outside [30, 60] DTE window so no new Call opens; verifies held stock MTM!
+    b2 = _bar(
+        "sl2",
+        t2,
+        "2026-11-10",
+        _make_chain_df(
+            snapshot_id="sl2",
+            ts_utc=t2,
+            market_date="2026-11-10",
+            spot=112.0,
+            strikes=(105.0,),
+            expiries=(("2026-12-04", 24),),  # outside [30, 60] so no new call opens
+        ),
+        spot=112.0,
+    )
+
+    cfg_opt_only = BacktestConfig(
+        strategy_kind="COVERED_CALL",
+        entry_cadence="EVERY_N_DAYS",
+        entry_every_n_days=20,
+        stock_stop_mode="OPTION_ONLY",
+        profit_target_pct=None,
+        stop_loss_pct=100.0,
+        commission_per_contract=0.65,
+        min_entry_credit_dollars=100.0,
+    )
+    res_opt = run_systematic_backtest([b0, b1, b2], cfg_opt_only, ticker="NVDA")
+    tr_opt = res_opt.trades[0]
+    assert tr_opt.exit_reason == "STOP_LOSS"
+    assert tr_opt.option_net_pnl_dollars == pytest.approx(-301.30)  # +200 - 500 - 1.30
+    assert tr_opt.stock_pnl_dollars == pytest.approx(0.0)
+    # Shares stay open at $100 basis -> on b2 (spot=112), stock MTM = +1200!
+    assert res_opt.summary.realized_pnl_dollars == pytest.approx(-301.30)
+    assert res_opt.summary.unrealized_pnl_dollars == pytest.approx(1200.0)
+    assert res_opt.summary.final_equity == pytest.approx(10898.70)
+
+    cfg_liq = cfg_opt_only.model_copy(update={"stock_stop_mode": "LIQUIDATE_STOCK_ON_SL"})
+    res_liq = run_systematic_backtest([b0, b1, b2], cfg_liq, ticker="NVDA")
+    tr_liq = res_liq.trades[0]
+    assert tr_liq.exit_reason == "STOP_LOSS"
+    assert FLAG_STOCK_LIQUIDATED_ON_SL in tr_liq.flags
+    assert tr_liq.stock_exit_price == pytest.approx(108.0)
+    assert tr_liq.option_net_pnl_dollars == pytest.approx(-301.30)
+    assert tr_liq.stock_pnl_dollars == pytest.approx(800.0)  # (108 - 100)*100 realized on SL!
+    assert tr_liq.net_pnl_dollars == pytest.approx(498.70)
+    # Stock lot was liquidated on b1, so b2 has zero unrealized stock MTM!
+    assert res_liq.summary.unrealized_pnl_dollars == pytest.approx(0.0)
+    assert res_liq.summary.final_equity == pytest.approx(10498.70)
+
+
+def test_defensive_roll_up_and_out_and_credit_rules() -> None:
+    d0 = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
+    d1 = datetime(2026, 11, 20, 20, 0, tzinfo=UTC)  # 4 DTE to exp1 -> triggers ITM roll window
+    exp1 = "2026-11-24"
+    exp2 = "2027-01-08"
+
+    b0 = _bar(
+        "r0",
+        d0,
+        "2026-11-02",
+        _make_chain_df(
+            snapshot_id="r0",
+            ts_utc=d0,
+            market_date="2026-11-02",
+            spot=100.0,
+            strikes=(100.0, 102.0, 105.0, 110.0),
+            expiries=((exp1, 22),),
+            overrides={
+                (exp1, 102.0, "C"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0, "delta": 0.30}
+            },
+        ),
+        spot=100.0,
+    )
+    # Bar 1: Spot = 104 (102C ITM @ DTE=4), buyback = $3.50; exp2 $105C = $3.50 ($0 roll!)
+    b1_even = _bar(
+        "r1_even",
+        d1,
+        "2026-11-20",
+        _make_chain_df(
+            snapshot_id="r1_even",
+            ts_utc=d1,
+            market_date="2026-11-20",
+            spot=104.0,
+            strikes=(102.0, 105.0),
+            expiries=((exp1, 4), (exp2, 49)),
+            overrides={
+                (exp1, 102.0, "C"): {
+                    "bid": 3.4,
+                    "ask": 3.6,
+                    "mid": 3.5,
+                    "last": 3.5,
+                    "delta": 0.78,
+                },
+                (exp2, 105.0, "C"): {
+                    "bid": 3.4,
+                    "ask": 3.6,
+                    "mid": 3.5,
+                    "last": 3.5,
+                    "delta": 0.45,
+                },
+            },
+        ),
+        spot=104.0,
+    )
+
+    cfg_credit_only = BacktestConfig(
+        strategy_kind="COVERED_CALL",
+        entry_cadence="EVERY_N_DAYS",
+        entry_every_n_days=20,
+        roll_enabled=True,
+        roll_credit_mode="CREDIT_ONLY",
+        exit_dte=7,
+        target_dte_min=15,
+        target_dte_max=60,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        min_entry_credit_dollars=100.0,
+    )
+    res_skip = run_systematic_backtest([b0, b1_even], cfg_credit_only, ticker="NVDA")
+    # Even ($0.00) roll rejected by CREDIT_ONLY -> ROLL_SKIPPED flag & falls back to EXIT_DTE
+    assert len(res_skip.trades) == 1
+    assert res_skip.trades[0].exit_reason == "EXIT_DTE"
+    assert FLAG_ROLL_SKIPPED in res_skip.trades[0].flags
+
+    # Under ZERO_OR_CREDIT, even ($0.00) roll succeeds -> trade 1 ROLLED, trade 2 opens exp2 $105C!
+    cfg_zero_ok = cfg_credit_only.model_copy(update={"roll_credit_mode": "ZERO_OR_CREDIT"})
+    res_roll = run_systematic_backtest([b0, b1_even], cfg_zero_ok, ticker="NVDA")
+    assert len(res_roll.trades) == 2
+    assert res_roll.trades[0].exit_reason == "ROLLED"
+    assert res_roll.trades[1].legs[0].expiry == exp2
+    assert res_roll.trades[1].legs[0].strike == pytest.approx(105.0)
+    assert FLAG_ROLLED_ENTRY in res_roll.trades[1].flags

@@ -322,7 +322,7 @@ def test_ledger_html_surface_and_offline_empty_state(
                 assert r_html.status_code == 200
                 html = r_html.text
 
-                assert 'href="/static/css/ledger.css?v=20261120b"' in html
+                assert 'href="/static/css/ledger.css?v=20261120f"' in html
                 assert 'data-panel-target="trade_ledger"' in html
                 assert 'id="trade-ledger-card"' in html
                 assert 'data-panel-id="trade_ledger"' in html
@@ -339,6 +339,8 @@ def test_ledger_html_surface_and_offline_empty_state(
                     "ledger-import-file",
                     "btn-ledger-mtm",
                     "ledger-kpi-strip",
+                    "ledger-split",
+                    "ledger-split-splitter",
                     "chart-ledger",
                     "ledger-table-container",
                     "ledger-table-body",

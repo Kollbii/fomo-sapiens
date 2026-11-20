@@ -14,6 +14,7 @@ export var TABLE_SORT_KEY = "ibkr_chain_table_sort_v1";
 export var STRATEGY_AUTO_POPULATE_KEY = "ibkr_strategy_auto_populate_v1";
 export var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
 export var LEDGER_PREFS_KEY = "ibkr_ledger_prefs_v1";
+export var LEDGER_SPLIT_KEY = "ibkr_ledger_split_v1";
 export var SCREENER_PREFS_KEY = "ibkr_screener_prefs_v1";
 export var WATCHLIST_SELECTION_KEY = "ibkr_watchlist_selection_v1";
 export var BACKTEST_SPLIT_KEY = "ibkr_backtest_split_v1";
@@ -120,6 +121,7 @@ export var state = {
   ledgerSyncMode: "auto",
   ledgerData: null,
   ledgerExpandedIds: {},
+  ledgerSplitPct: 34,
   ledgerBusy: false,
   snapshotPickerOpenDays: {},
   backtestMode: "SYSTEMATIC",
@@ -203,10 +205,15 @@ export var dom = {
   panelVisibilityControls: document.getElementById("panel-visibility-controls"),
   panelVisibilityReset: document.getElementById("panel-visibility-reset"),
   alertBanner: document.getElementById("alert-banner"),
+  kpiStrip: document.querySelector(".kpi-strip"),
   kpiSpot: document.getElementById("kpi-spot"),
   kpiCallWall: document.getElementById("kpi-call-wall"),
   kpiPutWall: document.getElementById("kpi-put-wall"),
+  kpiCorridorCaption: document.getElementById("kpi-corridor-caption"),
+  kpiCorridorGauge: document.getElementById("kpi-corridor-gauge"),
+  kpiCorridorPin: document.getElementById("kpi-corridor-pin"),
   kpiAnomalies: document.getElementById("kpi-anomalies"),
+  kpiAnomalyTop: document.getElementById("kpi-anomaly-top"),
   wallsBasisLabel: document.getElementById("walls-basis-label"),
   wallsViewSelect: document.getElementById("walls-view-select"),
   wallsMetricSelect: document.getElementById("walls-metric-select"),
@@ -283,6 +290,8 @@ export var dom = {
   ledgerImportBtn: document.getElementById("btn-ledger-import"),
   ledgerMtmBtn: document.getElementById("btn-ledger-mtm"),
   ledgerKpiStrip: document.getElementById("ledger-kpi-strip"),
+  ledgerSplit: document.getElementById("ledger-split"),
+  ledgerSplitSplitter: document.getElementById("ledger-split-splitter"),
   ledgerChartEl: document.getElementById("chart-ledger"),
   ledgerTableContainer: document.getElementById("ledger-table-container"),
   ledgerTableHead: document.getElementById("ledger-table-head"),
@@ -316,8 +325,17 @@ export var dom = {
   backtestTpPct: document.getElementById("backtest-tp-pct"),
   backtestSlPct: document.getElementById("backtest-sl-pct"),
   backtestExitDte: document.getElementById("backtest-exit-dte"),
+  backtestEntryFiltersLabel: document.getElementById("backtest-entry-filters-label"),
   backtestMinCredit: document.getElementById("backtest-min-credit"),
   backtestMinRor: document.getElementById("backtest-min-ror"),
+  backtestWheelControls: document.getElementById("backtest-wheel-controls"),
+  backtestStrikeModeSelect: document.getElementById("backtest-strike-mode-select"),
+  backtestTargetDelta: document.getElementById("backtest-target-delta"),
+  backtestCcFloorSelect: document.getElementById("backtest-cc-floor-select"),
+  backtestStockStopSelect: document.getElementById("backtest-stock-stop-select"),
+  backtestCcItmSelect: document.getElementById("backtest-cc-itm-select"),
+  backtestRollToggle: document.getElementById("backtest-roll-toggle"),
+  backtestRollCreditSelect: document.getElementById("backtest-roll-credit-select"),
   backtestLegsBox: document.getElementById("backtest-legs-box"),
   backtestImportLabBtn: document.getElementById("backtest-import-lab-btn"),
   backtestAddLegBtn: document.getElementById("backtest-add-leg-btn"),

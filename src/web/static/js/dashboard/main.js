@@ -29,6 +29,7 @@ import {
   loadChain,
 } from "./network.js";
 import {
+  initLedgerSplitter,
   loadLedger,
   restoreLedgerPreferences,
 } from "./ledger.js";
@@ -53,6 +54,7 @@ function init() {
   updateThemeToggleLabel();
   restoreWallsPreferences();
   restoreLedgerPreferences();
+  initLedgerSplitter();
   syncStrategyAutoPopulateUI();
   applyTickerPullPrefsToControls(state.ticker);
   syncPullScopeSummary();
