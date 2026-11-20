@@ -114,16 +114,27 @@ def compute_initial_stk_shares(
 ) -> float:
     """Reconstruct pre-ledger share inventory from `open_positions` anchor and `STK` fills."""
     net_delta = 0.0
-    min_cum_delta = 0.0
+    long_bal = 0.0
+    short_bal = 0.0
+    needed_pre_ledger = 0.0
     for ex in stk_execs:
-        signed_qty = ex.quantity if ex.side == "BOT" else -ex.quantity
-        net_delta += signed_qty
-        if net_delta < min_cum_delta:
-            min_cum_delta = net_delta
+        if ex.side == "BOT":
+            net_delta += ex.quantity
+            cov = min(ex.quantity, short_bal)
+            short_bal -= cov
+            long_bal += ex.quantity - cov
+        else:
+            net_delta -= ex.quantity
+            if ex.open_close == "O":
+                short_bal += ex.quantity
+            else:
+                used = min(ex.quantity, long_bal)
+                long_bal -= used
+                needed_pre_ledger += ex.quantity - used
 
     if pos_stk_shares is not None:
         return pos_stk_shares - net_delta
-    return max(0.0, -min_cum_delta)
+    return needed_pre_ledger
 
 
 def _episode_lifecycle_kind(ep: Sequence[NormalizedExecution]) -> bool | None:

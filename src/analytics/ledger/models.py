@@ -51,6 +51,7 @@ class RollStep(BaseModel):
     step_index: int
     executed_at: str
     action: RollAction
+    asset_class: LedgerAssetClass = "OPT"
     roll_label: str | None = None
     summary: str
     expiry: str | None = None

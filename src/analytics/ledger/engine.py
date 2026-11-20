@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -17,6 +17,7 @@ from src.analytics.ledger.classifier import (
     NormalizedPosition,
     classify_option_legs,
     format_expiry_short,
+    format_strike,
     format_utc_iso,
 )
 from src.analytics.ledger.models import (
@@ -32,6 +33,7 @@ from src.analytics.ledger.models import (
     LedgerView,
     LedgerWindow,
     MarkSource,
+    RollStep,
 )
 from src.analytics.ledger.rolls import (
     CampaignRecord,
@@ -764,6 +766,52 @@ def _format_chart_date_label(date_str: str, *, include_year: bool) -> str:
     return date_str
 
 
+def _build_stock_roll_steps(reals: Sequence[StkRealization]) -> list[RollStep]:
+    """Build chronological `RollStep(asset_class='STK')` rows grouped by closing execution."""
+    if not reals:
+        return []
+    grouped: dict[tuple[str, LedgerSide, str], list[StkRealization]] = defaultdict(list)
+    for r in reals:
+        grouped[(r.close_exec_id, r.close_side, r.close_executed_at)].append(r)
+
+    steps: list[RollStep] = []
+    for idx, key in enumerate(sorted(grouped, key=lambda k: (k[2], k[0])), start=1):
+        _eid, close_side, close_ts = key
+        grp = grouped[key]
+        qty = sum(r.quantity for r in grp)
+        pnl = sum(r.realized_pnl_ex_fee for r in grp)
+        close_fees = sum(r.close_fee_slice for r in grp)
+        close_price = grp[0].close_price
+        cashflow = (qty * close_price) if close_side == "SLD" else (-qty * close_price)
+        if qty > _EPS:
+            avg_open = (
+                (qty * close_price - pnl) / qty
+                if close_side == "SLD"
+                else (qty * close_price + pnl) / qty
+            )
+        else:
+            avg_open = grp[0].open_price
+        roll_label = "STOCK SOLD" if close_side == "SLD" else "STOCK COVERED"
+        steps.append(
+            RollStep(
+                step_index=idx,
+                executed_at=close_ts,
+                action="CLOSE",
+                asset_class="STK",
+                roll_label=roll_label,
+                summary=f"{close_side} {qty:g} shs @ ${close_price:.2f} (basis ${avg_open:.2f})",
+                expiry=None,
+                strike_summary=f"STK {format_strike(round(avg_open, 2))} -> ${close_price:.2f}",
+                contracts=qty,
+                cashflow_ex_fee=cashflow,
+                realized_pnl_ex_fee=pnl,
+                fees=close_fees,
+                ib_order_id=grp[0].ib_order_id,
+            )
+        )
+    return steps
+
+
 @dataclass(frozen=True, slots=True)
 class CompiledLedgerData:
     """Pre-extracted executions/positions and per-underlying FIFO roll-chains."""
@@ -1027,6 +1075,28 @@ def build_ledger_report(
                 if _in_window(r.open_executed_at_dt):
                     daily_fees[r.open_executed_at[:10]] += r.open_fee_slice
 
+        if include_stock_gain and camp_stk_reals:
+            stk_steps = _build_stock_roll_steps(camp_stk_reals)
+            merged_steps = sorted(
+                [*(s.model_copy() for s in steps_in_win), *stk_steps],
+                key=lambda s: (s.executed_at, 0 if s.asset_class == "OPT" else 1),
+            )
+            display_steps = [
+                s.model_copy(update={"step_index": idx})
+                for idx, s in enumerate(merged_steps, start=1)
+            ]
+            last_activity_at = max(
+                camp.last_activity_at,
+                max(r.close_executed_at for r in camp_stk_reals),
+            )
+        else:
+            display_steps = (
+                [s.model_copy() for s in steps_in_win]
+                if compiled_data is not None
+                else steps_in_win
+            )
+            last_activity_at = camp.last_activity_at
+
         window_campaigns.append(
             LedgerCampaignRow(
                 campaign_id=camp.campaign_id,
@@ -1034,7 +1104,7 @@ def build_ledger_report(
                 strategy_type=camp.strategy_type,
                 status=status,
                 opened_at=camp.opened_at,
-                last_activity_at=camp.last_activity_at,
+                last_activity_at=last_activity_at,
                 roll_count=rolls_in_win,
                 initial_summary=camp.initial_summary,
                 current_summary=camp.current_summary,
@@ -1047,16 +1117,25 @@ def build_ledger_report(
                     camp_mtm_sums.get(camp.campaign_id) if view == "open_mtm" else None
                 ),
                 fees=opt_fees + stk_fees,
-                steps=(
-                    [s.model_copy() for s in steps_in_win]
-                    if compiled_data is not None
-                    else steps_in_win
-                ),
+                steps=display_steps,
             )
         )
 
     # Emit standalone `STOCK_LOT` campaign rows when `include_stock_gain=True` & realized.
     if include_stock_gain:
+        pos_stk_map: dict[_StkPosKey, NormalizedPosition] = {
+            _stk_pos_key(pos.underlying): pos
+            for pos in filtered_positions
+            if pos.asset_class == "STK"
+        }
+        gw_stk_snapshot_ts = max(
+            (
+                p.updated_at
+                for p in filtered_positions
+                if p.source == "GATEWAY_LIVE" and p.asset_class == "STK" and p.updated_at
+            ),
+            default="",
+        )
         for u, reals in sorted(standalone_stk_by_u.items()):
             stk_pnl = sum(r.realized_pnl_ex_fee for r in reals)
             stk_fees = 0.0
@@ -1071,9 +1150,26 @@ def build_ledger_report(
                     stk_fees += r.open_fee_slice
                     daily_fees[r.open_executed_at[:10]] += r.open_fee_slice
 
-            open_stk_qty = sum(
-                lot.remaining_qty for lot in open_stk_lots_all if lot.underlying == u
+            u_open_lots = [lot for lot in open_stk_lots_all if lot.underlying == u]
+            open_stk_qty = sum(lot.remaining_qty for lot in u_open_lots)
+            stk_key = _stk_pos_key(u)
+            pos_row = pos_stk_map.get(stk_key)
+            latest_stk_activity_at = max(
+                max((lot.executed_at for lot in u_open_lots), default=""),
+                latest_stk_exec_at.get(stk_key, ""),
             )
+            if (
+                pos_row is not None
+                and pos_row.source == "GATEWAY_LIVE"
+                and pos_row.updated_at >= latest_stk_activity_at
+            ):
+                open_stk_qty = abs(pos_row.position)
+            elif (
+                pos_row is None
+                and gw_stk_snapshot_ts
+                and latest_stk_activity_at < gw_stk_snapshot_ts
+            ):
+                open_stk_qty = 0.0
             curr_sum = f"{u} {open_stk_qty:g} shs" if open_stk_qty > _EPS else "Closed"
             window_campaigns.append(
                 LedgerCampaignRow(
@@ -1093,7 +1189,7 @@ def build_ledger_report(
                     stock_realized_pnl_ex_fee=stk_pnl,
                     unrealized_mtm_ex_fee=None,
                     fees=stk_fees,
-                    steps=[],
+                    steps=_build_stock_roll_steps(reals),
                 )
             )
 

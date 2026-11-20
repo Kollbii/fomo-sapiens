@@ -79,6 +79,10 @@ class StkLot:
     symbol: str
     executed_at: str
     executed_at_dt: datetime
+    open_price: float = 0.0
+    open_event_code: LedgerEventCode = "TRADE"
+    open_ib_order_id: str | None = None
+    assigned_campaign_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -101,6 +105,10 @@ class StkRealization:
     ib_order_id: str | None
     event_code: LedgerEventCode
     campaign_id: str | None = None
+    open_price: float = 0.0
+    open_event_code: LedgerEventCode = "TRADE"
+    open_ib_order_id: str | None = None
+    open_campaign_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -281,6 +289,65 @@ def _invert_legs_for_classification(legs: Sequence[AggregatedLeg]) -> list[Aggre
     return inverted
 
 
+def _expected_assignment_stock_side(
+    right: Literal["C", "P"],
+    event_code: LedgerEventCode,
+) -> LedgerSide:
+    """Return assignment (`C->SLD`, `P->BOT`) or exercise (`C->BOT`, `P->SLD`) stock fill side."""
+    if (right == "C" and event_code == "ASSIGNED") or (right == "P" and event_code == "EXERCISED"):
+        return "SLD"
+    return "BOT"
+
+
+def _expected_opened_stk_direction(
+    right: Literal["C", "P"],
+    event_code: LedgerEventCode,
+) -> Literal["LONG", "SHORT"] | None:
+    if event_code not in ("ASSIGNED", "EXERCISED"):
+        return None
+    side = _expected_assignment_stock_side(right, event_code)
+    return "LONG" if side == "BOT" else "SHORT"
+
+
+def _link_open_stk_lots_to_assign(
+    camp: CampaignRecord,
+    assign: AssignRecord,
+    stk_queues: dict[Literal["LONG", "SHORT"], deque[StkLot]],
+) -> None:
+    """Tag unlinked assignment/exercise-opened stock lots with their option campaign ID."""
+    target_dir = _expected_opened_stk_direction(assign.right, assign.event_code)
+    if target_dir is None:
+        return
+    queue = stk_queues[target_dir]
+    if not queue:
+        return
+
+    candidates: list[tuple[tuple[int, float, float], StkLot]] = []
+    for lot in queue:
+        if (
+            lot.open_event_code != assign.event_code
+            or lot.assigned_campaign_id is not None
+            or lot.remaining_qty <= _EPS
+        ):
+            continue
+        price_diff = abs(lot.open_price - assign.strike)
+        if price_diff > 0.05:
+            continue
+        day_gap = abs((lot.executed_at_dt - assign.executed_at_dt).total_seconds()) / 86400.0
+        if day_gap > 3.5:
+            continue
+        same_order = 0 if (assign.ib_order_id and lot.open_ib_order_id == assign.ib_order_id) else 1
+        candidates.append(((same_order, day_gap, price_diff), lot))
+
+    candidates.sort(key=lambda item: item[0])
+    rem_shares = 100.0 * assign.contracts
+    for _score, lot in candidates:
+        if rem_shares <= _EPS:
+            break
+        lot.assigned_campaign_id = camp.campaign_id
+        rem_shares -= min(rem_shares, lot.remaining_qty)
+
+
 def _match_stk_execution(
     ex: NormalizedExecution,
     stk_queues: dict[Literal["LONG", "SHORT"], deque[StkLot]],
@@ -288,17 +355,41 @@ def _match_stk_execution(
     exec_attribution: dict[str, ExecutionAttribution],
     *,
     pre_ledger_shares: list[float],
+    preferred_campaign_ids: frozenset[str] = frozenset(),
 ) -> None:
-    """Apply FIFO stock execution; update open `stk_queues` and record realizations."""
+    """Apply FIFO stock execution (with Option A assigned-lot priority); update `stk_queues`."""
     remaining = ex.quantity
     close_dir: Literal["LONG", "SHORT"] = "LONG" if ex.side == "SLD" else "SHORT"
     open_dir: Literal["LONG", "SHORT"] = "LONG" if ex.side == "BOT" else "SHORT"
     realized_total = 0.0
 
-    # Match against open FIFO stock lots of opposite direction.
     opp_queue = stk_queues[close_dir]
-    while remaining > _EPS and opp_queue:
-        lot = opp_queue[0]
+    has_assigned_lots = ex.event_code == "TRADE" and any(
+        lot.open_event_code in ("ASSIGNED", "EXERCISED") for lot in opp_queue
+    )
+    if has_assigned_lots:
+        tier1 = [
+            lot
+            for lot in opp_queue
+            if lot.open_event_code in ("ASSIGNED", "EXERCISED")
+            and lot.assigned_campaign_id in preferred_campaign_ids
+        ]
+        tier2 = [
+            lot
+            for lot in opp_queue
+            if lot.open_event_code in ("ASSIGNED", "EXERCISED")
+            and lot.assigned_campaign_id not in preferred_campaign_ids
+        ]
+        tier3 = [lot for lot in opp_queue if lot.open_event_code not in ("ASSIGNED", "EXERCISED")]
+        match_order = [*tier1, *tier2, *tier3]
+    else:
+        match_order = list(opp_queue)
+
+    for lot in match_order:
+        if remaining <= _EPS:
+            break
+        if lot.remaining_qty <= _EPS:
+            continue
         matched = min(remaining, lot.remaining_qty)
         lot_ratio = matched / lot.initial_qty if lot.initial_qty > _EPS else 0.0
         ex_ratio = matched / ex.quantity if ex.quantity > _EPS else 0.0
@@ -330,13 +421,22 @@ def _match_stk_execution(
                 close_executed_at_dt=ex.executed_at_dt,
                 ib_order_id=ex.ib_order_id,
                 event_code=ex.event_code,
+                open_price=lot.open_price,
+                open_event_code=lot.open_event_code,
+                open_ib_order_id=lot.open_ib_order_id,
+                open_campaign_id=lot.assigned_campaign_id,
             )
         )
-        if lot.remaining_qty <= _EPS:
-            opp_queue.popleft()
+    if opp_queue:
+        stk_queues[close_dir] = deque(lot for lot in opp_queue if lot.remaining_qty > _EPS)
 
     # If pre-ledger shares existed (e.g. bought >365d ago), consume them before creating a short.
-    if remaining > _EPS and ex.side == "SLD" and pre_ledger_shares[0] > _EPS:
+    if (
+        remaining > _EPS
+        and ex.side == "SLD"
+        and ex.open_close != "O"
+        and pre_ledger_shares[0] > _EPS
+    ):
         absorbed = min(remaining, pre_ledger_shares[0])
         pre_ledger_shares[0] -= absorbed
         remaining -= absorbed
@@ -357,6 +457,9 @@ def _match_stk_execution(
                 symbol=ex.symbol,
                 executed_at=ex.executed_at,
                 executed_at_dt=ex.executed_at_dt,
+                open_price=ex.price,
+                open_event_code=ex.event_code,
+                open_ib_order_id=ex.ib_order_id,
             )
         )
 
@@ -397,20 +500,18 @@ def _link_stock_realizations_to_assignments(
     if not candidates or not realizations:
         return
 
+    camp_step_orders: dict[str, set[str]] = {
+        camp.campaign_id: {s.ib_order_id for s in camp.steps if s.ib_order_id} for camp in campaigns
+    }
+
+    # Pass 1: closing-side assignment/exercise (e.g. Covered Call SLD / Long Put EXERCISED).
     for real in realizations:
         best_cid: str | None = None
         best_score = float("inf")
         for camp, assign in candidates:
             if camp.underlying != real.underlying:
                 continue
-            # Covered Call / Short Call assignment -> SLD 100 * N shares at strike.
-            # Long Put exercise -> SLD 100 * N shares at strike.
-            expected_side: LedgerSide = (
-                "SLD"
-                if (assign.right == "C" and camp.strategy_type in ("COVERED_CALL", "NAKED_CALL"))
-                or (assign.right == "P" and camp.strategy_type == "LONG_PUT")
-                else "BOT"
-            )
+            expected_side = _expected_assignment_stock_side(assign.right, assign.event_code)
             if real.close_side != expected_side:
                 continue
             price_diff = abs(real.close_price - assign.strike)
@@ -429,6 +530,96 @@ def _link_stock_realizations_to_assignments(
                 best_score = score
                 best_cid = camp.campaign_id
         real.campaign_id = best_cid
+
+    # Pass 2: liquidation of assignment/exercise-opened stock lots (Short Put / Bull Put Spread).
+    for real in realizations:
+        if real.campaign_id is not None or real.open_event_code not in ("ASSIGNED", "EXERCISED"):
+            continue
+        if real.open_campaign_id is not None:
+            real.campaign_id = real.open_campaign_id
+            continue
+        open_side: LedgerSide = "BOT" if real.close_side == "SLD" else "SLD"
+        best_cid = None
+        best_score = float("inf")
+        for camp, assign in candidates:
+            if camp.underlying != real.underlying or assign.event_code != real.open_event_code:
+                continue
+            if _expected_assignment_stock_side(assign.right, assign.event_code) != open_side:
+                continue
+            price_diff = abs(real.open_price - assign.strike)
+            if price_diff > 0.05:
+                continue
+            day_gap = (
+                abs((real.open_executed_at_dt - assign.executed_at_dt).total_seconds()) / 86400.0
+            )
+            if day_gap > 3.5:
+                continue
+            same_open_order_bonus = (
+                -10.0
+                if (real.open_ib_order_id and real.open_ib_order_id == assign.ib_order_id)
+                else 0.0
+            )
+            same_close_order_bonus = (
+                -5.0
+                if (real.ib_order_id and real.ib_order_id in camp_step_orders[camp.campaign_id])
+                else 0.0
+            )
+            score = same_open_order_bonus + same_close_order_bonus + day_gap + price_diff
+            if score < best_score:
+                best_score = score
+                best_cid = camp.campaign_id
+        real.campaign_id = best_cid
+
+
+def _preferred_campaign_ids_for_stock(
+    stk_ex: NormalizedExecution,
+    ep: Sequence[NormalizedExecution],
+    ep_order_ids: set[str],
+    opt_queues: dict[OptionContractKey, deque[OptLot]],
+) -> frozenset[str]:
+    if not stk_ex.ib_order_id or stk_ex.ib_order_id not in ep_order_ids:
+        return frozenset()
+    cids: set[str] = set()
+    for opt_ex in ep:
+        if opt_ex.ib_order_id != stk_ex.ib_order_id:
+            continue
+        if opt_ex.expiry is None or opt_ex.strike is None or opt_ex.right is None:
+            continue
+        opt_q = opt_queues.get((opt_ex.underlying, opt_ex.expiry, opt_ex.strike, opt_ex.right))
+        if not opt_q:
+            continue
+        expected_dir: Literal["LONG", "SHORT"] = "SHORT" if opt_ex.side == "BOT" else "LONG"
+        for lot in opt_q:
+            if lot.direction == expected_dir and lot.remaining_qty > _EPS and lot.campaign_id:
+                cids.add(lot.campaign_id)
+    return frozenset(cids)
+
+
+def _record_assign_events(
+    camp: CampaignRecord,
+    *,
+    action: RollAction,
+    underlying: str,
+    closed_legs: Sequence[AggregatedLeg],
+    ep_max_dt: datetime,
+    ep_ib_order_id: str | None,
+    stk_queues: dict[Literal["LONG", "SHORT"], deque[StkLot]],
+) -> None:
+    if action not in ("ASSIGN", "EXERCISE"):
+        return
+    ev_code: LedgerEventCode = "ASSIGNED" if action == "ASSIGN" else "EXERCISED"
+    for cleg in closed_legs:
+        rec = AssignRecord(
+            underlying=underlying,
+            strike=cleg.strike,
+            right=cleg.right,
+            contracts=cleg.quantity,
+            executed_at_dt=ep_max_dt,
+            ib_order_id=ep_ib_order_id,
+            event_code=ev_code,
+        )
+        camp.assign_events.append(rec)
+        _link_open_stk_lots_to_assign(camp, rec, stk_queues)
 
 
 def build_underlying_ledger(
@@ -485,12 +676,16 @@ def build_underlying_ledger(
                 stk_ex.ib_order_id is not None and stk_ex.ib_order_id in ep_order_ids
             )
             if dt_diff <= 0.0 or is_buywrite_pair:
+                preferred_cids = _preferred_campaign_ids_for_stock(
+                    stk_ex, ep, ep_order_ids, opt_queues
+                )
                 _match_stk_execution(
                     stk_ex,
                     stk_queues,
                     stk_realizations,
                     exec_attribution,
                     pre_ledger_shares=pre_ledger_shares,
+                    preferred_campaign_ids=preferred_cids,
                 )
                 stk_idx += 1
             else:
@@ -837,6 +1032,15 @@ def build_underlying_ledger(
                 for s in camp_slices:
                     exec_attribution[s.exec_id].campaign_id = orphan_cid
                     exec_attribution[s.exec_id].strategy_type = orphan_strategy
+                _record_assign_events(
+                    orphan_camp,
+                    action=action,
+                    underlying=underlying,
+                    closed_legs=closed_legs,
+                    ep_max_dt=ep_max_dt,
+                    ep_ib_order_id=ep_ib_order_id,
+                    stk_queues=stk_queues,
+                )
                 campaigns.append(orphan_camp)
                 campaigns_by_id[orphan_cid] = orphan_camp
                 continue
@@ -887,20 +1091,15 @@ def build_underlying_ledger(
                     closed_legs, already_aggregated=True
                 )
 
-            if action in ("ASSIGN", "EXERCISE"):
-                for cleg in closed_legs:
-                    ev_code: LedgerEventCode = "ASSIGNED" if action == "ASSIGN" else "EXERCISED"
-                    camp.assign_events.append(
-                        AssignRecord(
-                            underlying=underlying,
-                            strike=cleg.strike,
-                            right=cleg.right,
-                            contracts=cleg.quantity,
-                            executed_at_dt=ep_max_dt,
-                            ib_order_id=ep_ib_order_id,
-                            event_code=ev_code,
-                        )
-                    )
+            _record_assign_events(
+                camp,
+                action=action,
+                underlying=underlying,
+                closed_legs=closed_legs,
+                ep_max_dt=ep_max_dt,
+                ep_ib_order_id=ep_ib_order_id,
+                stk_queues=stk_queues,
+            )
 
             if open_after <= _EPS:
                 camp.terminal_event = action

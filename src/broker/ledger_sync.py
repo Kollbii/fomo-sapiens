@@ -14,6 +14,7 @@ from src.broker.client import IBKRBrokerClient, SleepFn, poll_until
 from src.broker.corridor.quotes import compute_mid
 from src.core.exceptions import ConfigurationError, PacingViolationError
 from src.storage.ledger_schema import (
+    LedgerEventCode,
     LedgerExecutionRow,
     LedgerPositionRow,
     LedgerSide,
@@ -26,7 +27,7 @@ from src.storage.ledger_schema import (
     sanitize_signed_float,
     synthesize_exec_id,
 )
-from src.storage.schema import sanitize_price
+from src.storage.schema import INT_SENTINEL, sanitize_price
 
 logger = logging.getLogger(__name__)
 
@@ -246,6 +247,99 @@ def _position_to_row(pos: Any, *, include_stock: bool, updated_at: str) -> Ledge
     )
 
 
+_EXPECTED_LIFECYCLE_STK_SIDE: dict[tuple[str, str], LedgerSide] = {
+    ("P", "BOT"): "BOT",
+    ("C", "BOT"): "SLD",
+    ("C", "SLD"): "BOT",
+    ("P", "SLD"): "SLD",
+}
+
+
+def _parse_utc_iso_dt(ts: str) -> datetime:
+    text = ts.strip()
+    if text.endswith("Z"):
+        return datetime.fromisoformat(text[:-1] + "+00:00").astimezone(UTC)
+    return datetime.fromisoformat(normalize_utc_timestamp(text)[:-1] + "+00:00").astimezone(UTC)
+
+
+def _tag_gateway_lifecycle_events(
+    rows: Sequence[LedgerExecutionRow],
+    *,
+    lifecycle_opt_ids: set[str],
+    include_stock: bool,
+) -> list[LedgerExecutionRow]:
+    """Tag Gateway `$0.00` overnight assignment/exercise/expiration bookings cleanly."""
+    if not rows:
+        return []
+    row_list = list(rows)
+    parsed_dts = [_parse_utc_iso_dt(r.executed_at) for r in row_list]
+    matched_opt: set[int] = set()
+    matched_stk: set[int] = set()
+
+    opt_indices = [
+        idx
+        for idx, r in enumerate(row_list)
+        if r.asset_class == "OPT"
+        and r.event_code == "TRADE"
+        and r.price <= 1e-6
+        and r.commission <= 1e-6
+    ]
+    stk_indices = [
+        idx
+        for idx, r in enumerate(row_list)
+        if r.asset_class == "STK" and r.event_code == "TRADE" and r.commission <= 1e-6
+    ]
+
+    for opt_idx in opt_indices:
+        opt = row_list[opt_idx]
+        if opt.strike is None or opt.right is None:
+            continue
+        expected_stk_side = _EXPECTED_LIFECYCLE_STK_SIDE.get((opt.right, opt.side))
+        if expected_stk_side is None:
+            continue
+        expected_shares = opt.quantity * opt.multiplier
+        best_stk_idx: int | None = None
+        best_key: tuple[int, float] = (2, float("inf"))
+        for stk_idx in stk_indices:
+            if stk_idx in matched_stk:
+                continue
+            stk = row_list[stk_idx]
+            if stk.underlying != opt.underlying or stk.side != expected_stk_side:
+                continue
+            if abs(stk.price - opt.strike) > 1e-4 or abs(stk.quantity - expected_shares) > 1e-4:
+                continue
+            same_order = bool(opt.ib_order_id and opt.ib_order_id == stk.ib_order_id)
+            gap_sec = abs((parsed_dts[opt_idx] - parsed_dts[stk_idx]).total_seconds())
+            if not same_order and gap_sec > 5.0:
+                continue
+            cand_key = (0 if same_order else 1, gap_sec)
+            if cand_key < best_key:
+                best_key = cand_key
+                best_stk_idx = stk_idx
+        if best_stk_idx is not None:
+            ev: LedgerEventCode = "ASSIGNED" if opt.side == "BOT" else "EXERCISED"
+            row_list[opt_idx] = opt.model_copy(update={"event_code": ev, "open_close": "C"})
+            row_list[best_stk_idx] = row_list[best_stk_idx].model_copy(update={"event_code": ev})
+            matched_opt.add(opt_idx)
+            matched_stk.add(best_stk_idx)
+
+    for opt_idx in opt_indices:
+        if opt_idx in matched_opt:
+            continue
+        opt = row_list[opt_idx]
+        if opt.exec_id not in lifecycle_opt_ids:
+            continue
+        updates: dict[str, Any] = {"open_close": "C"}
+        exec_day = opt.executed_at[:10].replace("-", "")
+        if opt.expiry is not None and opt.expiry > exec_day:
+            updates["event_code"] = "ASSIGNED" if opt.side == "BOT" else "EXERCISED"
+        elif include_stock:
+            updates["event_code"] = "EXPIRED"
+        row_list[opt_idx] = opt.model_copy(update=updates)
+
+    return row_list
+
+
 async def fetch_gateway_ledger(
     broker: IBKRBrokerClient,
     *,
@@ -286,6 +380,7 @@ async def fetch_gateway_ledger(
     )
 
     executions_by_id: dict[str, LedgerExecutionRow] = {}
+    lifecycle_candidate_ids: set[str] = set()
     for fill in [*opt_fills, *stk_fills]:
         execution = getattr(fill, "execution", None)
         raw_exec_id = getattr(execution, "execId", None) if execution is not None else None
@@ -305,6 +400,27 @@ async def fetch_gateway_ledger(
         )
         if row is not None:
             executions_by_id[row.exec_id] = row
+            if row.asset_class == "OPT" and row.price <= 1e-6 and row.commission <= 1e-6:
+                raw_last_liq = getattr(execution, "lastLiquidity", None)
+                is_unset_liq = (
+                    isinstance(raw_last_liq, (int, float))
+                    and not isinstance(raw_last_liq, bool)
+                    and raw_last_liq >= INT_SENTINEL
+                )
+                order_id_num = int(getattr(execution, "orderId", 0) or 0)
+                fill_comm = getattr(fill, "commissionReport", None)
+                if _is_blank_commission_report(fill_comm) and not _is_blank_commission_report(
+                    cached_comm_report
+                ):
+                    fill_comm = cached_comm_report
+                if is_unset_liq or (order_id_num == 0 and _is_blank_commission_report(fill_comm)):
+                    lifecycle_candidate_ids.add(row.exec_id)
+
+    tagged_rows = _tag_gateway_lifecycle_events(
+        list(executions_by_id.values()),
+        lifecycle_opt_ids=lifecycle_candidate_ids,
+        include_stock=include_stock,
+    )
 
     now_iso = normalize_utc_timestamp((clock or (lambda: datetime.now(UTC)))())
     positions: list[LedgerPositionRow] = []
@@ -313,7 +429,7 @@ async def fetch_gateway_ledger(
         if prow is not None:
             positions.append(prow)
 
-    return list(executions_by_id.values()), positions
+    return tagged_rows, positions
 
 
 def _contract_for_mark(pos: LedgerPositionRow) -> Contract | None:

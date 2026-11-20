@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -26,6 +26,7 @@ from src.storage.ledger_schema import (
     LEDGER_POSITION_POLARS_SCHEMA,
     LedgerExecutionRow,
     LedgerPositionRow,
+    normalize_utc_timestamp,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +34,17 @@ logger = logging.getLogger(__name__)
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_utc_iso(ts: str) -> datetime:
+    text = ts.strip()
+    if text.endswith("Z"):
+        try:
+            return datetime.fromisoformat(text[:-1] + "+00:00").astimezone(UTC)
+        except ValueError:
+            pass
+    iso = normalize_utc_timestamp(text)
+    return datetime.fromisoformat(iso[:-1] + "+00:00").astimezone(UTC)
 
 
 def _exec_id_suffix_match(id_a: str, id_b: str) -> bool:
@@ -44,6 +56,33 @@ def _exec_id_suffix_match(id_a: str, id_b: str) -> bool:
         return True
     shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
     return len(shorter) >= 8 and (longer.endswith(f".{shorter}") or longer.endswith(shorter))
+
+
+def _matches_lifecycle_gateway_to_flex(gw: LedgerExecutionRow, fx: LedgerExecutionRow) -> bool:
+    """Match an overnight `GATEWAY_LIVE` lifecycle row against a settled `FLEX_*` lifecycle row."""
+    if (
+        gw.source != "GATEWAY_LIVE"
+        or fx.source not in FLEX_SOURCES
+        or fx.event_code not in _LIFECYCLE_EVENTS
+    ):
+        return False
+    delta_hours = (
+        _parse_utc_iso(gw.executed_at) - _parse_utc_iso(fx.executed_at)
+    ).total_seconds() / 3600.0
+    if fx.executed_at.endswith("T00:00:00Z"):
+        if not (0.0 <= delta_hours <= 36.0):
+            return False
+    elif not (-6.0 <= delta_hours <= 20.0):
+        return False
+
+    if fx.asset_class == "OPT":
+        return fx.price <= 1e-6 and gw.price <= 1e-6
+    if fx.asset_class == "STK":
+        return fx.event_code in ("ASSIGNED", "EXERCISED") and (
+            gw.event_code in ("ASSIGNED", "EXERCISED")
+            or (gw.commission <= 1e-6 and gw.open_close is None)
+        )
+    return False
 
 
 def _matches_secondary(gw: LedgerExecutionRow, fx: LedgerExecutionRow) -> bool:
@@ -63,7 +102,11 @@ def _matches_secondary(gw: LedgerExecutionRow, fx: LedgerExecutionRow) -> bool:
     if abs(gw.quantity - fx.quantity) > 1e-6 or abs(gw.price - fx.price) > 1e-4:
         return False
     same_minute = gw.executed_at[:16] == fx.executed_at[:16]
-    return same_minute or _exec_id_suffix_match(gw.exec_id, fx.exec_id)
+    return (
+        same_minute
+        or _exec_id_suffix_match(gw.exec_id, fx.exec_id)
+        or _matches_lifecycle_gateway_to_flex(gw, fx)
+    )
 
 
 _LIFECYCLE_EVENTS: frozenset[str] = frozenset({"EXPIRED", "ASSIGNED", "EXERCISED"})
@@ -101,6 +144,45 @@ def _merge_execution_metadata(
         if getattr(primary, field_name) is None and getattr(fallback, field_name) is not None:
             updates[field_name] = getattr(fallback, field_name)
     return primary.model_copy(update=updates) if updates else primary
+
+
+def _reconcile_gateway_duplicates(
+    by_id: dict[str, LedgerExecutionRow],
+    inserted_ids: set[str],
+    updated_ids: set[str],
+    *,
+    used_fx_ids: set[str] | None = None,
+) -> int:
+    """Upgrade/prune `GATEWAY_LIVE` rows already matched 1-to-1 by `FLEX_*` rows in `by_id`."""
+    fx_rows = sorted(
+        (r for r in by_id.values() if r.source in FLEX_SOURCES),
+        key=lambda r: (r.executed_at, r.exec_id),
+    )
+    gw_rows = sorted(
+        (r for r in by_id.values() if r.source == "GATEWAY_LIVE"),
+        key=lambda r: (r.executed_at, r.exec_id),
+    )
+    if not fx_rows or not gw_rows:
+        return 0
+
+    paired_fx: set[str] = set(used_fx_ids) if used_fx_ids is not None else set()
+    removed = 0
+    for gw in gw_rows:
+        match = next(
+            (fx for fx in fx_rows if fx.exec_id not in paired_fx and _matches_secondary(gw, fx)),
+            None,
+        )
+        if match is None:
+            continue
+        paired_fx.add(match.exec_id)
+        del by_id[gw.exec_id]
+        merged = _merge_execution_metadata(by_id[match.exec_id], gw)
+        by_id[match.exec_id] = merged
+        inserted_ids.discard(gw.exec_id)
+        if match.exec_id not in inserted_ids:
+            updated_ids.add(match.exec_id)
+        removed += 1
+    return removed
 
 
 class LedgerSyncState(BaseModel):
@@ -234,6 +316,36 @@ class LedgerRepository:
                 path_stat_sig(self.positions_path),
             )
 
+    def _write_executions_locked(self, rows: Iterable[LedgerExecutionRow]) -> None:
+        ordered = sorted(rows, key=lambda r: (r.executed_at, r.exec_id))
+        out_df = pl.DataFrame(
+            [r.model_dump() for r in ordered],
+            schema=LEDGER_EXECUTION_POLARS_SCHEMA,
+        )
+        atomic_write_csv(out_df, self.executions_path)
+        sig = path_stat_sig(self.executions_path)
+        self._exec_cache_sig = sig
+        self._exec_cache_df = out_df if sig is not None else None
+        self._sync_cache_sig = None
+        self._sync_cache_data = None
+
+    def reconcile_duplicates(self) -> int:
+        """Prune existing `GATEWAY_LIVE` duplicates already covered by `FLEX_*` rows on disk."""
+        with self._lock:
+            existing_df = self.load_executions()
+            if existing_df.is_empty():
+                return 0
+            by_id: dict[str, LedgerExecutionRow] = {}
+            for rec in existing_df.to_dicts():
+                model = LedgerExecutionRow.model_validate(rec)
+                by_id[model.exec_id] = model
+            removed = _reconcile_gateway_duplicates(by_id, set(), set())
+            if removed <= 0:
+                return 0
+            self.ensure_layout()
+            self._write_executions_locked(by_id.values())
+            return removed
+
     # ------------------------------------------------------------------ write
     def upsert_executions(
         self, rows: Sequence[LedgerExecutionRow | Mapping[str, Any]]
@@ -259,6 +371,7 @@ class LedgerRepository:
 
             inserted_ids: set[str] = set()
             updated_ids: set[str] = set()
+            used_fx_ids: set[str] = set()
 
             for inc in incoming:
                 if (
@@ -278,6 +391,8 @@ class LedgerRepository:
                         None,
                     )
                     if syn_match is not None:
+                        if syn_match.source == "GATEWAY_LIVE":
+                            used_fx_ids.add(inc.exec_id)
                         del by_id[syn_match.exec_id]
                         cur = by_id.get(inc.exec_id)
                         merged = _merge_execution_metadata(inc, cur) if cur is not None else inc
@@ -306,6 +421,8 @@ class LedgerRepository:
                         None,
                     )
                     if real_match is not None:
+                        if inc.source == "GATEWAY_LIVE" and real_match.source in FLEX_SOURCES:
+                            used_fx_ids.add(real_match.exec_id)
                         if inc.exec_id in by_id:
                             del by_id[inc.exec_id]
                             inserted_ids.discard(inc.exec_id)
@@ -321,6 +438,7 @@ class LedgerRepository:
                 if inc.exec_id in by_id:
                     cur = by_id[inc.exec_id]
                     if cur.source in FLEX_SOURCES and inc.source == "GATEWAY_LIVE":
+                        used_fx_ids.add(cur.exec_id)
                         continue
                     merged = _merge_execution_metadata(inc, cur)
                     if merged != cur:
@@ -339,6 +457,7 @@ class LedgerRepository:
                         None,
                     )
                     if gw_match is not None:
+                        used_fx_ids.add(inc.exec_id)
                         del by_id[gw_match.exec_id]
                         merged = _merge_execution_metadata(inc, gw_match)
                         by_id[inc.exec_id] = merged
@@ -353,27 +472,26 @@ class LedgerRepository:
                         (
                             row
                             for row in by_id.values()
-                            if row.source in FLEX_SOURCES and _matches_secondary(inc, row)
+                            if row.source in FLEX_SOURCES
+                            and row.exec_id not in used_fx_ids
+                            and _matches_secondary(inc, row)
                         ),
                         None,
                     )
                     if fx_match is not None:
+                        used_fx_ids.add(fx_match.exec_id)
                         continue
 
                 by_id[inc.exec_id] = inc
                 inserted_ids.add(inc.exec_id)
 
-            ordered = sorted(by_id.values(), key=lambda r: (r.executed_at, r.exec_id))
-            out_df = pl.DataFrame(
-                [r.model_dump() for r in ordered],
-                schema=LEDGER_EXECUTION_POLARS_SCHEMA,
+            _reconcile_gateway_duplicates(
+                by_id,
+                inserted_ids,
+                updated_ids,
+                used_fx_ids=used_fx_ids,
             )
-            atomic_write_csv(out_df, self.executions_path)
-            sig = path_stat_sig(self.executions_path)
-            self._exec_cache_sig = sig
-            self._exec_cache_df = out_df if sig is not None else None
-            self._sync_cache_sig = None
-            self._sync_cache_data = None
+            self._write_executions_locked(by_id.values())
             return (len(inserted_ids), len(updated_ids))
 
     def replace_positions(self, rows: Sequence[LedgerPositionRow | Mapping[str, Any]]) -> int:

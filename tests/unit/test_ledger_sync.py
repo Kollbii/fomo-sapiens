@@ -518,3 +518,176 @@ def test_refresh_open_option_marks_cancels_all_on_cancelled_error_and_double_fal
     assert marks_chain == {700001: 4.0}
     assert broker_chain.current_type == 4
     assert len(fake_ib_chain.subscribed) == len(fake_ib_chain.cancelled) == 3
+
+
+def test_fetch_gateway_ledger_tags_overnight_assignments_exercises_and_expirations() -> None:
+    fake_ib = _FakeLedgerIB()
+    ts_assign = datetime(2026, 11, 20, 3, 37, 48, tzinfo=UTC)
+    ts_ex_opt = datetime(2026, 11, 20, 4, 10, 0, tzinfo=UTC)
+    ts_ex_stk = datetime(2026, 11, 20, 4, 10, 2, tzinfo=UTC)
+
+    nvda_put = Contract(
+        secType="OPT",
+        conId=937687610,
+        symbol="NVDA",
+        localSymbol="NVDA  261204P00205000",
+        lastTradeDateOrContractMonth="20261204",
+        strike=205.0,
+        right="P",
+        multiplier="100",
+        currency="USD",
+    )
+    nvda_stk = Contract(secType="STK", conId=4815747, symbol="NVDA", currency="USD")
+    avgo_call = Contract(
+        secType="OPT",
+        conId=932503577,
+        symbol="AVGO",
+        localSymbol="AVGO  261120C00330000",
+        lastTradeDateOrContractMonth="20261120",
+        strike=330.0,
+        right="C",
+        multiplier="100",
+        currency="USD",
+    )
+    avgo_stk = Contract(secType="STK", conId=313130367, symbol="AVGO", currency="USD")
+    crdo_put = Contract(
+        secType="OPT",
+        conId=932538959,
+        symbol="CRDO",
+        localSymbol="CRDO  261120P00130000",
+        lastTradeDateOrContractMonth="20261120",
+        strike=130.0,
+        right="P",
+        multiplier="100",
+        currency="USD",
+    )
+    pltr_put = Contract(
+        secType="OPT",
+        conId=932594929,
+        symbol="PLTR",
+        localSymbol="PLTR  261204P00150000",
+        lastTradeDateOrContractMonth="20261204",
+        strike=150.0,
+        right="P",
+        multiplier="100",
+        currency="USD",
+    )
+
+    fake_ib.fills_opt = [
+        Fill(
+            contract=nvda_put,
+            execution=Execution(
+                execId="gw-assign-opt",
+                acctNumber="U1234567",
+                side="BOT",
+                shares=1.0,
+                price=0.0,
+                orderId=0,
+                permId=1342513378,
+                lastLiquidity=2147483647,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_assign,
+        ),
+        Fill(
+            contract=avgo_call,
+            execution=Execution(
+                execId="gw-exer-opt",
+                acctNumber="U1234567",
+                side="SLD",
+                shares=1.0,
+                price=0.0,
+                orderId=0,
+                permId=1400000001,
+                lastLiquidity=2147483647,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_ex_opt,
+        ),
+        Fill(
+            contract=crdo_put,
+            execution=Execution(
+                execId="gw-exp-opt",
+                acctNumber="U1234567",
+                side="BOT",
+                shares=1.0,
+                price=0.0,
+                orderId=0,
+                permId=1400000002,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_assign,
+        ),
+    ]
+    fake_ib.fills_stk = [
+        Fill(
+            contract=nvda_stk,
+            execution=Execution(
+                execId="gw-assign-stk",
+                acctNumber="U1234567",
+                side="BOT",
+                shares=100.0,
+                price=205.0,
+                orderId=0,
+                permId=1342513378,
+                lastLiquidity=2147483647,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_assign,
+        ),
+        Fill(
+            contract=avgo_stk,
+            execution=Execution(
+                execId="gw-exer-stk",
+                acctNumber="U1234567",
+                side="BOT",
+                shares=100.0,
+                price=330.0,
+                orderId=0,
+                permId=1400000003,
+                lastLiquidity=2147483647,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_ex_stk,
+        ),
+    ]
+
+    broker = IBKRBrokerClient(_settings(enabled=True), ib_factory=lambda: fake_ib)
+    execs, _ = run_coro(fetch_gateway_ledger(broker, include_stock=True, clock=lambda: ts_assign))
+    by_id = {row.exec_id: row for row in execs}
+
+    assert by_id["gw-assign-opt"].event_code == "ASSIGNED"
+    assert by_id["gw-assign-opt"].open_close == "C"
+    assert by_id["gw-assign-stk"].event_code == "ASSIGNED"
+
+    assert by_id["gw-exer-opt"].event_code == "EXERCISED"
+    assert by_id["gw-exer-opt"].open_close == "C"
+    assert by_id["gw-exer-stk"].event_code == "EXERCISED"
+
+    assert by_id["gw-exp-opt"].event_code == "EXPIRED"
+    assert by_id["gw-exp-opt"].open_close == "C"
+
+    # Unpaired early-assignment option fill when include_stock=False gets ASSIGNED + open_close="C"
+    fake_ib.fills_opt = [
+        Fill(
+            contract=pltr_put,
+            execution=Execution(
+                execId="gw-early-opt",
+                acctNumber="U1234567",
+                side="BOT",
+                shares=1.0,
+                price=0.0,
+                orderId=0,
+                permId=1400000004,
+                lastLiquidity=2147483647,
+            ),
+            commissionReport=CommissionReport(),
+            time=ts_assign,
+        )
+    ]
+    execs_no_stk, _ = run_coro(
+        fetch_gateway_ledger(broker, include_stock=False, clock=lambda: ts_assign)
+    )
+    assert len(execs_no_stk) == 1
+    assert execs_no_stk[0].event_code == "ASSIGNED"
+    assert execs_no_stk[0].open_close == "C"

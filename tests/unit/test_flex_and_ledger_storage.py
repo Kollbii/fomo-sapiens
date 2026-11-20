@@ -1029,3 +1029,225 @@ def test_ledger_repository_stat_cache_and_invalidation(
     assert repo.load_executions().height == 0
     assert repo.load_positions().height == 0
     assert repo.load_sync_state()["total_executions"] == 0
+
+
+def test_ledger_repository_dedups_cross_timestamp_lifecycle_and_reconcile_duplicates(
+    tmp_path: Path,
+) -> None:
+    flex_opt = LedgerExecutionRow(
+        exec_id="1666174338",
+        ib_order_id="7094235917",
+        conid=937687610,
+        symbol="NVDA  261204P00205000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261204",
+        strike=205.0,
+        right="P",
+        multiplier=100,
+        side="BOT",
+        quantity=1.0,
+        price=0.0,
+        proceeds=0.0,
+        commission=0.0,
+        open_close="C",
+        event_code="ASSIGNED",
+        executed_at="2026-11-19T16:20:00Z",
+        source="FLEX_MONTHLY",
+    )
+    flex_stk = LedgerExecutionRow(
+        exec_id="1666174339",
+        ib_order_id="7094235984",
+        conid=4815747,
+        symbol="NVDA",
+        underlying="NVDA",
+        asset_class="STK",
+        multiplier=1,
+        side="BOT",
+        quantity=100.0,
+        price=205.0,
+        proceeds=-20500.0,
+        commission=0.0,
+        open_close="O",
+        event_code="ASSIGNED",
+        executed_at="2026-11-19T16:20:00Z",
+        source="FLEX_MONTHLY",
+    )
+    gw_opt_legacy = LedgerExecutionRow(
+        exec_id="00028060.6afed864.03.01",
+        ib_order_id="1342513378",
+        conid=937687610,
+        symbol="NVDA  261204P00205000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261204",
+        strike=205.0,
+        right="P",
+        multiplier=100,
+        side="BOT",
+        quantity=1.0,
+        price=0.0,
+        proceeds=0.0,
+        commission=0.0,
+        open_close=None,
+        event_code="TRADE",
+        executed_at="2026-11-20T03:37:48Z",
+        source="GATEWAY_LIVE",
+    )
+    gw_stk_legacy = LedgerExecutionRow(
+        exec_id="00028060.6afed864.02.01",
+        ib_order_id="1342513378",
+        conid=4815747,
+        symbol="NVDA",
+        underlying="NVDA",
+        asset_class="STK",
+        multiplier=1,
+        side="BOT",
+        quantity=100.0,
+        price=205.0,
+        proceeds=-20500.0,
+        commission=0.0,
+        open_close=None,
+        event_code="TRADE",
+        executed_at="2026-11-20T03:37:48Z",
+        source="GATEWAY_LIVE",
+    )
+
+    # 1. Flex first, then Gateway overnight fills (both legacy TRADE and tagged ASSIGNED) -> skipped
+    repo1 = LedgerRepository(tmp_path / "order_fx_first")
+    assert repo1.upsert_executions([flex_opt, flex_stk]) == (2, 0)
+    assert repo1.upsert_executions([gw_opt_legacy, gw_stk_legacy]) == (0, 0)
+    gw_opt_tagged = gw_opt_legacy.model_copy(update={"event_code": "ASSIGNED", "open_close": "C"})
+    gw_stk_tagged = gw_stk_legacy.model_copy(update={"event_code": "ASSIGNED"})
+    assert repo1.upsert_executions([gw_opt_tagged, gw_stk_tagged]) == (0, 0)
+    assert repo1.load_executions().height == 2
+
+    # 2. Gateway first, then Flex (without conid on Flex) -> upgrades Gateway and backfills conid
+    repo2 = LedgerRepository(tmp_path / "order_gw_first")
+    assert repo2.upsert_executions([gw_opt_legacy, gw_stk_legacy]) == (2, 0)
+    assert repo2.upsert_executions(
+        [flex_opt.model_copy(update={"conid": None}), flex_stk.model_copy(update={"conid": None})]
+    ) == (0, 2)
+    df2 = repo2.load_executions()
+    assert df2["exec_id"].to_list() == ["1666174338", "1666174339"]
+    assert df2["conid"].to_list() == [937687610, 4815747]
+
+    # 3. <OptionEAE> midnight timestamp matches next-day Gateway clearing within 36h
+    repo_eae = LedgerRepository(tmp_path / "eae_midnight")
+    eae_opt = flex_opt.model_copy(
+        update={
+            "exec_id": "sha256:00112233445566778899aabb",
+            "executed_at": "2026-11-19T00:00:00Z",
+            "conid": None,
+        }
+    )
+    assert repo_eae.upsert_executions([eae_opt]) == (1, 0)
+    assert repo_eae.upsert_executions([gw_opt_legacy]) == (0, 0)
+    assert repo_eae.load_executions().height == 1
+
+    # 4. Pre-existing duplicates on disk are healed by reconcile_duplicates() 1-to-1
+    repo_heal = LedgerRepository(tmp_path / "heal")
+    repo_heal.ensure_layout()
+    raw_df = pl.DataFrame(
+        [r.model_dump() for r in (flex_opt, flex_stk, gw_opt_legacy, gw_stk_legacy)],
+        schema=LEDGER_EXECUTION_POLARS_SCHEMA,
+    )
+    raw_df.write_csv(repo_heal.executions_path)
+    assert repo_heal.load_executions().height == 4
+    assert repo_heal.reconcile_duplicates() == 2
+    assert repo_heal.reconcile_duplicates() == 0
+    healed_df = repo_heal.load_executions()
+    assert healed_df["exec_id"].to_list() == ["1666174338", "1666174339"]
+
+    # 5. Negative guards: >20h consecutive-day assignment, paid-commission STK fill, and 1-to-1 cap
+    repo_guard = LedgerRepository(tmp_path / "guards")
+    assert repo_guard.upsert_executions([flex_opt, flex_stk]) == (2, 0)
+    far_gw_opt = gw_opt_legacy.model_copy(
+        update={"exec_id": "gw-far-opt", "executed_at": "2026-11-21T03:37:48Z"}
+    )
+    paid_gw_stk = gw_stk_legacy.model_copy(
+        update={"exec_id": "gw-paid-stk", "commission": 1.00, "open_close": "O"}
+    )
+    assert repo_guard.upsert_executions([far_gw_opt, paid_gw_stk]) == (2, 0)
+
+    # Second distinct Gateway assignment on same day must NOT be absorbed by the single Flex row
+    repo_one_to_one = LedgerRepository(tmp_path / "one_to_one")
+    repo_one_to_one.ensure_layout()
+    gw_opt_second = gw_opt_legacy.model_copy(update={"exec_id": "gw-second-opt"})
+    pl.DataFrame(
+        [r.model_dump() for r in (flex_opt, gw_opt_legacy, gw_opt_second)],
+        schema=LEDGER_EXECUTION_POLARS_SCHEMA,
+    ).write_csv(repo_one_to_one.executions_path)
+    assert repo_one_to_one.reconcile_duplicates() == 1
+    assert repo_one_to_one.load_executions().height == 2
+
+
+def test_ledger_repository_preserves_one_to_one_flex_gateway_dedup_cardinality(
+    tmp_path: Path,
+) -> None:
+    fx1 = LedgerExecutionRow(
+        exec_id="flex-1666174338",
+        ib_order_id="7094235917",
+        conid=937687610,
+        symbol="NVDA  261204P00205000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261204",
+        strike=205.0,
+        right="P",
+        multiplier=100,
+        side="BOT",
+        quantity=1.0,
+        price=0.0,
+        proceeds=0.0,
+        commission=0.0,
+        open_close="C",
+        event_code="ASSIGNED",
+        executed_at="2026-11-19T16:20:00Z",
+        source="FLEX_MONTHLY",
+    )
+    gw1 = LedgerExecutionRow(
+        exec_id="00028060.6afed864.03.01",
+        ib_order_id="1342513378",
+        conid=937687610,
+        symbol="NVDA  261204P00205000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261204",
+        strike=205.0,
+        right="P",
+        multiplier=100,
+        side="BOT",
+        quantity=1.0,
+        price=0.0,
+        proceeds=0.0,
+        commission=0.0,
+        open_close="C",
+        event_code="ASSIGNED",
+        executed_at="2026-11-20T03:37:48Z",
+        source="GATEWAY_LIVE",
+    )
+    gw2 = gw1.model_copy(update={"exec_id": "00028060.6afed864.04.01"})
+
+    # 1. Two Gateway fills persisted first, then one matching Flex row -> 1-to-1 upgrade only
+    repo_gw_then_fx = LedgerRepository(tmp_path / "gw_then_fx")
+    assert repo_gw_then_fx.upsert_executions([gw1, gw2]) == (2, 0)
+    assert repo_gw_then_fx.upsert_executions([fx1]) == (0, 1)
+    df1 = repo_gw_then_fx.load_executions()
+    assert df1.height == 2
+    assert set(df1["exec_id"].to_list()) == {fx1.exec_id, gw2.exec_id}
+
+    # 2. Combined batch [fx1, gw1, gw2] -> skips gw1 cleanly while preserving gw2
+    repo_combined = LedgerRepository(tmp_path / "combined_batch")
+    assert repo_combined.upsert_executions([fx1, gw1, gw2]) == (2, 0)
+    df2 = repo_combined.load_executions()
+    assert df2.height == 2
+    assert set(df2["exec_id"].to_list()) == {fx1.exec_id, gw2.exec_id}
+
+    # 3. Single Flex fill persisted first, then [gw1, gw2] -> skips gw1, inserts gw2
+    repo_fx_then_gw = LedgerRepository(tmp_path / "fx_then_gw")
+    assert repo_fx_then_gw.upsert_executions([fx1]) == (1, 0)
+    assert repo_fx_then_gw.upsert_executions([gw1, gw2]) == (1, 0)
+    df3 = repo_fx_then_gw.load_executions()
+    assert df3.height == 2
+    assert set(df3["exec_id"].to_list()) == {fx1.exec_id, gw2.exec_id}

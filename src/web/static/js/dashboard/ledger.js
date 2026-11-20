@@ -1223,6 +1223,9 @@ function buildTimelineStepHtml(step) {
         : step.action === "ASSIGN" || step.action === "EXERCISE"
           ? "ledger-pill--assigned"
           : "ledger-pill--open";
+  var qtyRaw = Number(step.contracts || 0);
+  var qtyDecimals = Math.abs(qtyRaw - Math.round(qtyRaw)) < 1e-6 ? 0 : 2;
+  var qtyUnit = step.asset_class === "STK" ? " shs" : "x";
   return (
     '<div class="ledger-timeline-step">' +
     '<span class="ledger-timeline-step-idx">#' +
@@ -1242,8 +1245,8 @@ function buildTimelineStepHtml(step) {
     escapeHtml(step.strike_summary || step.summary || "\u2014") +
     "</span>" +
     '<span class="ledger-timeline-step-num">' +
-    escapeHtml(fmtNum(step.contracts, 0)) +
-    "x</span>" +
+    escapeHtml(fmtNum(qtyRaw, qtyDecimals) + qtyUnit) +
+    "</span>" +
     '<span class="ledger-timeline-step-num ' +
     pnlToneClass(step.cashflow_ex_fee) +
     '">' +
@@ -1263,16 +1266,25 @@ function buildTimelineStepHtml(step) {
 
 function buildCampaignTimelineRowHtml(camp) {
   var steps = camp.steps || [];
+  var emptyCopy =
+    camp.strategy_type === "STOCK_LOT"
+      ? "No stock execution steps in this window."
+      : "No individual option roll steps in this window.";
   var stepsHtml = steps.length
     ? steps.map(buildTimelineStepHtml).join("")
-    : '<div class="ledger-timeline-empty">No individual option roll steps in this window.</div>';
+    : '<div class="ledger-timeline-empty">' + emptyCopy + "</div>";
+  var timelinePrefix =
+    camp.strategy_type === "STOCK_LOT"
+      ? "Stock Execution Timeline \u2022 "
+      : "Roll Chain Timeline \u2022 ";
   return (
     '<tr class="ledger-timeline-row" data-campaign-detail="' +
     escapeHtml(camp.campaign_id) +
     '">' +
     '<td colspan="9">' +
     '<div class="ledger-timeline">' +
-    '<div class="ledger-timeline-title">Roll Chain Timeline \u2022 ' +
+    '<div class="ledger-timeline-title">' +
+    timelinePrefix +
     escapeHtml(camp.underlying) +
     " \u2022 " +
     escapeHtml(formatStrategyLabel(camp.strategy_type)) +
@@ -1367,7 +1379,11 @@ function renderCampaignsTable(report, status) {
       escapeHtml(c.campaign_id) +
       '" aria-expanded="' +
       (expanded ? "true" : "false") +
-      '" aria-label="Toggle roll chain timeline"' +
+      '" aria-label="' +
+      (c.strategy_type === "STOCK_LOT"
+        ? "Toggle stock execution timeline"
+        : "Toggle roll chain timeline") +
+      '"' +
       (hasSteps ? "" : " disabled") +
       ">" +
       (expanded ? "\u25BC" : "\u25B6") +
