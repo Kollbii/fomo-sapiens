@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
@@ -219,22 +220,45 @@ def _widening_sequence(base_step: float) -> list[float]:
     return steps
 
 
+def _window_bounds(
+    spot: float,
+    range_pct: float,
+    spot_envelope: tuple[float, float] | None = None,
+) -> tuple[float, float]:
+    """Compute `[lo, hi]` strike bounds spanning current `spot` and optional historical envelope."""
+    low_ref = float(spot)
+    high_ref = float(spot)
+    if spot_envelope is not None:
+        env_lo, env_hi = spot_envelope
+        if env_lo > 0.0 and math.isfinite(env_lo):
+            low_ref = min(low_ref, float(env_lo))
+        if env_hi > 0.0 and math.isfinite(env_hi):
+            high_ref = max(high_ref, float(env_hi))
+    lo = max(0.01, low_ref * (1.0 - range_pct)) - _EPS
+    hi = high_ref * (1.0 + range_pct) + _EPS
+    return lo, hi
+
+
 def choose_auto_strike_step(
     available: Iterable[float],
     spot: float,
     range_pct: float,
     max_strikes: int | None = None,
+    *,
+    spot_envelope: tuple[float, float] | None = None,
 ) -> float:
-    """Choose the finest canonical exchange step that fits inside `min(28, max_strikes)`."""
+    """Choose the finest canonical exchange step that fits inside the available strike cap."""
     if spot <= 0 or not 0 < range_pct <= 1:
         raise ValueError("spot and range_pct must be positive")
-    lo, hi = spot * (1 - range_pct) - _EPS, spot * (1 + range_pct) + _EPS
+    lo, hi = _window_bounds(spot, range_pct, spot_envelope=spot_envelope)
     window = sorted({float(s) for s in available if s > 0 and lo <= s <= hi})
     if len(window) < 2:
         return 5.0
     diffs = [round(b - a, 4) for a, b in zip(window, window[1:], strict=False) if b - a > 1e-6]
     min_avail = min(diffs) if diffs else 1.0
-    target_cap = min(28, max_strikes) if max_strikes is not None else 28
+    span_ratio = (hi - lo) / max(spot * 0.50, 1.0)
+    scaled_base = max(28, int(math.ceil(28.0 * span_ratio)))
+    target_cap = min(scaled_base, max_strikes) if max_strikes is not None else 28
     candidates = [s for s in _CANONICAL_STEPS if s >= min_avail - _EPS] or [_CANONICAL_STEPS[-1]]
     for cand in candidates:
         is_fractional_step = cand < 1.0 or not _is_grid_multiple(cand, 1.0)
@@ -242,7 +266,13 @@ def choose_auto_strike_step(
             _is_grid_multiple(s, cand) and not _is_grid_multiple(s, cand * 2.0) for s in window
         ):
             continue
-        sel = select_strikes(window, spot=spot, range_pct=range_pct, strike_step=cand)
+        sel = select_strikes(
+            window,
+            spot=spot,
+            range_pct=range_pct,
+            strike_step=cand,
+            spot_envelope=spot_envelope,
+        )
         if len(sel.strikes) <= target_cap:
             return cand
     return candidates[-1]
@@ -263,11 +293,13 @@ def detect_available_strike_steps(
     spot: float,
     range_pct: float,
     candidate_steps: Sequence[float] | None = None,
+    *,
+    spot_envelope: tuple[float, float] | None = None,
 ) -> list[float]:
     """Identify candidate strike steps that match exchange strikes in `+-range_pct`."""
     if spot <= 0 or not 0 < range_pct <= 1:
         return list(candidate_steps or ())
-    lo, hi = spot * (1 - range_pct) - _EPS, spot * (1 + range_pct) + _EPS
+    lo, hi = _window_bounds(spot, range_pct, spot_envelope=spot_envelope)
     window = sorted({float(s) for s in available if s > 0 and lo <= s <= hi})
     if len(window) < 2:
         return [detect_native_strike_step(available)]
@@ -325,13 +357,15 @@ def select_strikes(
     range_pct: float,
     strike_step: float,
     max_strikes: int | None = None,
+    *,
+    spot_envelope: tuple[float, float] | None = None,
 ) -> StrikeSelection:
     """Intersect candidate strike grid with exchange-valid strikes and adapt to native steps."""
     if spot <= 0 or not 0 < range_pct <= 1 or strike_step <= 0:
         raise ValueError("spot, range_pct (0, 1] and strike_step must be positive")
     if max_strikes is not None and max_strikes < 1:
         raise ValueError("max_strikes must be >= 1")
-    lo, hi = spot * (1 - range_pct) - _EPS, spot * (1 + range_pct) + _EPS
+    lo, hi = _window_bounds(spot, range_pct, spot_envelope=spot_envelope)
     window = sorted({float(s) for s in available if s > 0 and lo <= s <= hi})
     if not window:
         raise OptionChainFetchError(f"No strikes within ±{range_pct:.0%} of spot {spot:.2f}")
@@ -782,6 +816,7 @@ class ContractDiscoveryService:
         underlying_info: UnderlyingInfo | None = None,
         smart_chains: Sequence[OptionChainLike] | None = None,
         market_date: date | None = None,
+        spot_envelope: tuple[float, float] | None = None,
     ) -> ChainPlan:
         oc = self.settings.options_chain
         rp = oc.default_range_pct if range_pct is None else range_pct
@@ -839,11 +874,29 @@ class ContractDiscoveryService:
 
         max_strikes = max(1, self.max_total_contracts // (2 * len(expirations)))
         notices: list[str] = []
+        if spot_envelope is not None:
+            env_lo, env_hi = spot_envelope
+            widened_lo = env_lo > 0.0 and math.isfinite(env_lo) and env_lo < spot - 1e-6
+            widened_hi = env_hi > 0.0 and math.isfinite(env_hi) and env_hi > spot + 1e-6
+            if widened_lo or widened_hi:
+                lo_win, hi_win = _window_bounds(spot, rp, spot_envelope=spot_envelope)
+                ref_lo = min(spot, env_lo) if widened_lo else spot
+                ref_hi = max(spot, env_hi) if widened_hi else spot
+                notices.append(
+                    f"Historical spot envelope [${ref_lo:.2f}..${ref_hi:.2f}] expanded strike "
+                    f"window to [${max(0.01, lo_win):.2f}..${hi_win:.2f}] for backtest continuity."
+                )
         all_exchange_strikes = sorted(
             {s for strikes_list in per_exp_strikes.values() for s in strikes_list}
         )
         if strike_step is None:
-            step = choose_auto_strike_step(all_exchange_strikes, spot, rp, max_strikes=max_strikes)
+            step = choose_auto_strike_step(
+                all_exchange_strikes,
+                spot,
+                rp,
+                max_strikes=max_strikes,
+                spot_envelope=spot_envelope,
+            )
             notices.append(
                 f"Auto strike step selected ${step:g} for {resolved_underlying.symbol} "
                 f"spot ${spot:.2f}"
@@ -851,12 +904,19 @@ class ContractDiscoveryService:
         else:
             step = float(strike_step)
 
-        lo, hi = spot * (1 - rp) - _EPS, spot * (1 + rp) + _EPS
+        lo, hi = _window_bounds(spot, rp, spot_envelope=spot_envelope)
         specs: list[ExpirationSpec] = []
         for exp in expirations:
             exp_chain, exact_map = exact_by_exp[exp.ib_expiry]
             avail_for_exp = per_exp_strikes[exp.ib_expiry]
-            exp_sel = select_strikes(avail_for_exp, spot, rp, step, max_strikes)
+            exp_sel = select_strikes(
+                avail_for_exp,
+                spot,
+                rp,
+                step,
+                max_strikes,
+                spot_envelope=spot_envelope,
+            )
             exp_window_count = sum(1 for s in avail_for_exp if lo <= s <= hi)
             specs.append(
                 ExpirationSpec(
@@ -902,6 +962,7 @@ class ContractDiscoveryService:
                 spot,
                 rp,
                 candidate_steps=oc.allowed_strike_steps,
+                spot_envelope=spot_envelope,
             )
         )
         avail_ranges = tuple(

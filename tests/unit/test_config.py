@@ -86,6 +86,8 @@ def test_yaml_defaults_loaded(tmp_path: Path) -> None:
     assert s.watchlist.batch_timeout_retries == 2
     assert s.watchlist.batch_timeout_retry_cooldown_sec == 10.0
     assert s.options_chain.max_contracts_per_page == 80
+    assert s.options_chain.max_pages_per_refresh == 12
+    assert s.options_chain.allowed_range_pcts == (0.10, 0.15, 0.20, 0.25, 0.35, 0.50, 0.75, 1.00)
     assert s.options_chain.dte_min == 30
     assert s.options_chain.dte_max == 120
     assert s.options_chain.default_strike_step is None
@@ -364,6 +366,9 @@ def test_watchlist_settings_defaults_max_size_bounds_and_seed_cap(tmp_path: Path
     assert wl.batch_timeout_retry_cooldown_sec == 10.0
     assert OptionsChainSettings().prefetch_exact_strikes is False
     assert OptionsChainSettings().contract_details_timeout_sec == 15.0
+    assert OptionsChainSettings().max_pages_per_refresh == 12
+    assert 0.75 in OptionsChainSettings().allowed_range_pcts
+    assert 1.00 in OptionsChainSettings().allowed_range_pcts
     assert load_settings(tmp_path / "nope.yaml", tmp_path / "nope.env").watchlist == wl
 
     assert WatchlistSettings(batch_timeout_retries=0).batch_timeout_retries == 0

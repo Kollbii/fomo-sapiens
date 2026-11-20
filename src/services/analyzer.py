@@ -45,9 +45,15 @@ from src.broker.corridor import (
     CorridorSelection,
     select_wall_corridor,
 )
-from src.broker.fetcher import ChainFetchProgress, FetchResult, PagedOptionChainFetcher
+from src.broker.fetcher import (
+    ChainFetchProgress,
+    ExactContractSpec,
+    FetchResult,
+    PagedOptionChainFetcher,
+)
 from src.broker.flex import sanitize_client_notice
 from src.broker.live_legs import LiveLegQuoteService
+from src.core.calendar import et_date
 from src.core.config import Settings, get_settings
 from src.core.exceptions import (
     InvalidRequestError,
@@ -1113,6 +1119,129 @@ class AnalyzerService:
         )
         return eff_dte_min, eff_dte_max, include_short
 
+    @staticmethod
+    def _normalize_iso_expiry(raw: Any) -> str | None:
+        if raw is None:
+            return None
+        text = str(raw).strip()[:10]
+        if len(text) == 8 and text.isdigit():
+            iso = f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+        elif len(text) == 10 and text[4] == "-" and text[7] == "-":
+            iso = text
+        else:
+            return None
+        try:
+            datetime.strptime(iso, "%Y-%m-%d")
+        except ValueError:
+            return None
+        return iso
+
+    def _historical_spot_envelope(
+        self, symbol: str, market_date_iso: str
+    ) -> tuple[float, float] | None:
+        """Return `(min_spot, max_spot)` from non-partial archives with active expiries."""
+        try:
+            snaps = self.repo.list_snapshots(symbol)
+        except Exception as exc:
+            logger.debug("historical spot envelope lookup skipped for %s: %s", symbol, exc)
+            return None
+        spots: list[float] = []
+        for meta in snaps:
+            spot_val = meta.underlying_price
+            if meta.is_partial or spot_val <= 0 or not math.isfinite(spot_val):
+                continue
+            if meta.expirations:
+                if not any(str(exp) >= market_date_iso for exp in meta.expirations):
+                    continue
+            elif meta.market_date < market_date_iso:
+                continue
+            spots.append(float(meta.underlying_price))
+        if not spots:
+            return None
+        return (min(spots), max(spots))
+
+    @staticmethod
+    def _quoted_contract_keys_from_df(df: pl.DataFrame) -> set[tuple[str, float, str]]:
+        """Extract `(expiry, round(strike, 4), right)` keys that already carry usable quotes."""
+        if df.is_empty():
+            return set()
+        keys: set[tuple[str, float, str]] = set()
+        for expiry, strike, right, bid, ask, mid, last_px, mark_px in df.select(
+            ["expiry", "strike", "right", "bid", "ask", "mid", "last", "mark_price"]
+        ).iter_rows():
+            has_px = any(
+                px is not None and math.isfinite(float(px)) and float(px) > 0.0
+                for px in (bid, ask, mid, last_px, mark_px)
+            )
+            if not has_px:
+                continue
+            exp_s = str(expiry or "").strip()
+            right_u = str(right or "").strip().upper()
+            if exp_s and strike is not None and right_u in ("C", "P"):
+                keys.add((exp_s, round(float(strike), 4), right_u))
+        return keys
+
+    def _collect_unexpired_ledger_specs(
+        self,
+        symbol: str,
+        market_date_iso: str,
+        *,
+        exclude_keys: set[tuple[str, float, str]] | None = None,
+    ) -> list[ExactContractSpec]:
+        """Collect unexpired Trade Ledger OPT contracts (open, closed, or assigned) for `symbol`."""
+        ledger_obj = getattr(self, "ledger", None)
+        ledger_repo = getattr(ledger_obj, "repo", None)
+        if ledger_repo is None:
+            return []
+        excluded = exclude_keys or set()
+        spec_map: dict[tuple[str, float, str], ExactContractSpec] = {}
+        try:
+            frames = (
+                ledger_repo.load_executions(),
+                ledger_repo.load_positions(),
+            )
+        except (StorageSchemaError, OSError, ValueError) as exc:
+            logger.warning("ledger leg scan skipped for %s refresh: %s", symbol, exc)
+            return []
+
+        for df in frames:
+            if df.is_empty():
+                continue
+            filtered = df.filter(
+                (pl.col("underlying") == symbol) & (pl.col("asset_class") == "OPT")
+            )
+            if filtered.is_empty():
+                continue
+            for raw_exp, raw_strike, raw_right, raw_conid in filtered.select(
+                ["expiry", "strike", "right", "conid"]
+            ).iter_rows():
+                iso_exp = self._normalize_iso_expiry(raw_exp)
+                if iso_exp is None or iso_exp < market_date_iso:
+                    continue
+                if raw_strike is None:
+                    continue
+                strike_f = float(raw_strike)
+                if not math.isfinite(strike_f) or strike_f <= 0.0:
+                    continue
+                right_u = str(raw_right or "").strip().upper()
+                if right_u not in ("C", "P"):
+                    continue
+                literal_right: Literal["C", "P"] = "C" if right_u == "C" else "P"
+                conid = int(raw_conid) if raw_conid is not None and int(raw_conid) > 0 else 0
+                spec = ExactContractSpec(
+                    option_conid=conid,
+                    expiry=iso_exp,
+                    strike=strike_f,
+                    right=literal_right,
+                )
+                key = spec.key()
+                if key in excluded:
+                    continue
+                prev = spec_map.get(key)
+                if prev is None or (prev.option_conid <= 0 and spec.option_conid > 0):
+                    spec_map[key] = spec
+        return list(spec_map.values())
+
     async def refresh_ticker_locked(
         self,
         raw_ticker: str,
@@ -1137,6 +1266,10 @@ class AnalyzerService:
         """
         self._require_refresh_lock("refresh_ticker_locked")
         symbol = self.validate_ticker(raw_ticker)
+        now = self.fetcher.clock()
+        now_utc = now.replace(tzinfo=UTC) if now.tzinfo is None else now.astimezone(UTC)
+        today_et_iso = et_date(now_utc).isoformat()
+        spot_envelope = self._historical_spot_envelope(symbol, today_et_iso)
         fetch_res = await self.fetcher.fetch_option_chain(
             symbol,
             range_pct=range_pct,
@@ -1144,14 +1277,21 @@ class AnalyzerService:
             dte_min=dte_min,
             dte_max=dte_max,
             include_short_dte=include_short_dte,
+            spot_envelope=spot_envelope,
             progress=progress,
         )
         outcome = self._save_fetch_result(symbol, fetch_res, partial_reason=None)
         if on_saved is not None:
             on_saved(outcome)
+        already_quoted = self._quoted_contract_keys_from_df(outcome.enriched)
+        ledger_specs = self._collect_unexpired_ledger_specs(
+            symbol, today_et_iso, exclude_keys=already_quoted
+        )
         _, quote_notices = await self.paper_trades.quote_active_trades_for_refresh(
             symbol,
             underlying_conid=outcome.plan.underlying.conid,
+            extra_specs=ledger_specs,
+            already_quoted_keys=already_quoted,
         )
         outcome.notices.extend(quote_notices)
         return outcome

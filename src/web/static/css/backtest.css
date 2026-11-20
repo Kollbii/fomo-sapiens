@@ -325,7 +325,10 @@
 
 .backtest-paper-table-wrap {
   max-height: 260px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   background: var(--bg-elevated);
@@ -334,6 +337,11 @@
 .backtest-table.backtest-paper-table th,
 .backtest-table.backtest-paper-table td {
   padding: 4px 6px;
+}
+
+.backtest-table.backtest-paper-table th:last-child,
+.backtest-table.backtest-paper-table td:last-child {
+  padding-right: 14px;
 }
 
 .backtest-paper-table tbody tr:nth-child(even) {
@@ -579,7 +587,10 @@
 
 .backtest-table-wrap {
   max-height: 360px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
 }
@@ -606,6 +617,15 @@
 #backtest-steps-table th,
 #backtest-steps-table td {
   padding: 4px 6px;
+}
+
+.backtest-table th:last-child,
+.backtest-table tbody tr:not(.backtest-trade-detail-row) > td:last-child,
+#backtest-trades-table th:last-child,
+#backtest-trades-table tbody tr.backtest-trade-row > td:last-child,
+#backtest-steps-table th:last-child,
+#backtest-steps-table td:last-child {
+  padding-right: 14px;
 }
 
 .backtest-table th {

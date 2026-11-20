@@ -77,7 +77,10 @@ html[data-theme="terminal"] .dte-tab-btn[aria-pressed="true"] {
 .table-scroll {
   width: 100%;
   max-height: 560px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
 }
 
@@ -311,11 +314,19 @@ html[data-theme="terminal"] .dte-tab-btn[aria-pressed="true"] {
   text-transform: uppercase;
 }
 
+#chain-table thead tr:first-child th.chain-leg-col {
+  padding: 0 12px 0 6px;
+}
+
+#chain-table thead tr.table-filter-row th.chain-leg-col {
+  padding: 4px 12px 4px 6px;
+}
+
 #chain-table th.chain-leg-col,
 #chain-table td.chain-leg-col {
   text-align: center;
-  width: 52px;
-  padding: 2px 6px;
+  width: 58px;
+  padding: 2px 12px 2px 6px;
 }
 
 .chain-add-leg-btn {

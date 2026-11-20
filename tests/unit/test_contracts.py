@@ -750,3 +750,67 @@ def test_prefetch_exact_contracts_stops_remaining_expirations_on_first_timeout(
     fake_ib.contract_details_handler = _upstream_loss
     with pytest.raises(GatewayConnectionError, match=r"exact contract prefetch.*IBKR 2110"):
         run_coro(svc.build_plan("NVDA", range_pct=0.20, strike_step=5.0))
+
+
+def test_spot_envelope_expands_strikes_and_preserves_5_dollar_step_under_12_page_cap() -> None:
+    """When NVDA moves $200 -> $125, a historical envelope keeps $200/$205 at $5 steps."""
+    strikes_5 = [float(s) for s in range(50, 315, 5)]  # $5 grid up to $310
+    # At spot=$125 without envelope, +-50% stops at $187.50 -> misses $200/$205
+    no_env = select_strikes(strikes_5, spot=125.0, range_pct=0.50, strike_step=5.0)
+    assert 200.0 not in no_env.strikes
+    assert 205.0 not in no_env.strikes
+
+    # With historical spot envelope (125.0, 200.0), +-20% reaches [100..240] and keeps $200/$205.
+    with_env = select_strikes(
+        strikes_5,
+        spot=125.0,
+        range_pct=0.20,
+        strike_step=5.0,
+        max_strikes=60,
+        spot_envelope=(125.0, 200.0),
+    )
+    assert with_env.effective_step == pytest.approx(5.0)
+    assert 125.0 in with_env.strikes
+    assert 200.0 in with_env.strikes
+    assert 205.0 in with_env.strikes
+
+    # Under 12 pages * 80 = 960 contracts across 8 expiries -> max_strikes=60 -> auto picks $5.
+    chosen_step = choose_auto_strike_step(
+        strikes_5,
+        spot=125.0,
+        range_pct=0.50,
+        max_strikes=60,
+        spot_envelope=(125.0, 200.0),
+    )
+    assert chosen_step == pytest.approx(5.0)
+
+    # Full build_plan carries spot_envelope through and emits explanatory continuity notice.
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 20, 15, 30, 0, tzinfo=UTC)
+    mkt = date(2026, 11, 20)
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (35, 42, 49, 56, 63, 70, 77, 84)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes_5,
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: SimpleNamespace(
+        contract=c, bid=124.9, ask=125.1, last=125.0, close=124.8
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    svc = ContractDiscoveryService(client, Settings(), clock=lambda: now, sleep=noop_sleep)
+    assert svc.max_total_contracts == 960  # 12 pages * 80 contracts/page
+
+    plan = run_coro(
+        svc.build_plan("NVDA", range_pct=0.20, strike_step=None, spot_envelope=(125.0, 200.0))
+    )
+    assert plan.strikes.effective_step == pytest.approx(5.0)
+    assert 200.0 in plan.strikes.strikes
+    assert 205.0 in plan.strikes.strikes
+    assert 125.0 in plan.strikes.strikes
+    assert plan.total_contracts <= 960
+    assert any("historical spot envelope" in n.lower() for n in plan.notices)

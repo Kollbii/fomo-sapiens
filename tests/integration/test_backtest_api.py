@@ -597,7 +597,7 @@ def test_backtest_entry_filters_skipped_kpis_and_ui_controls(
                 assert 'id="backtest-tables-splitter"' in html
                 assert 'aria-expanded="false"' in html
                 assert 'class="backtest-paper-drawer" hidden' in html
-                assert "?v=20261120f" in html
+                assert "?v=20261120g" in html
                 assert 'id="backtest-wheel-controls"' in html
                 assert 'value="COVERED_CALL"' in html
                 assert 'value="WHEEL"' in html

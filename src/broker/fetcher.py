@@ -818,6 +818,7 @@ class PagedOptionChainFetcher:
         include_short_dte: bool = False,
         short_dte_min: int | None = None,
         short_dte_max: int | None = None,
+        spot_envelope: tuple[float, float] | None = None,
         progress: ChainFetchProgress | None = None,
     ) -> FetchResult:
         """Execute the full 5-stage pipeline (and optional sequential short-DTE pass).
@@ -857,6 +858,7 @@ class PagedOptionChainFetcher:
                     include_short_dte=include_short_dte,
                     eff_short_min=eff_short_min,
                     eff_short_max=eff_short_max,
+                    spot_envelope=spot_envelope,
                     prog=prog,
                     t0=t0,
                 )
@@ -926,6 +928,7 @@ class PagedOptionChainFetcher:
         include_short_dte: bool,
         eff_short_min: int,
         eff_short_max: int,
+        spot_envelope: tuple[float, float] | None = None,
         prog: ChainFetchProgress,
         t0: float,
     ) -> FetchResult:
@@ -936,6 +939,7 @@ class PagedOptionChainFetcher:
             strike_step=strike_step,
             dte_min=eff_dte_min,
             dte_max=eff_dte_max,
+            spot_envelope=spot_envelope,
         )
         prog.plan = plan
         candidates = self.build_candidate_contracts(plan)
@@ -983,6 +987,7 @@ class PagedOptionChainFetcher:
                     underlying_info=plan.underlying,
                     smart_chains=plan.smart_chains or None,
                     market_date=plan.market_date,
+                    spot_envelope=spot_envelope,
                 )
                 prog.short_plan = plan2
                 prog.short_dte_range = (pass2_min, pass2_max)

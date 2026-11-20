@@ -136,7 +136,10 @@
 .corridor-table-wrap {
   flex: 1 1 auto;
   min-height: 0;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   background: var(--bg-surface);
@@ -224,6 +227,11 @@
 
 .corridor-ladder-table tbody td.text-left {
   text-align: left;
+}
+
+.corridor-ladder-table thead tr.corridor-thead-cols th:last-child,
+.corridor-ladder-table tbody td:last-child {
+  padding-right: 12px;
 }
 
 .corridor-ladder-table tbody td.empty-row {

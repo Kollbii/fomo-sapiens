@@ -37,6 +37,8 @@
   gap: 10px;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .strategy-kpi-grid {
@@ -125,7 +127,10 @@
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   background: var(--bg-surface);
@@ -142,6 +147,11 @@
   padding: 4px 4px;
   border-bottom: 1px solid var(--border-subtle);
   vertical-align: middle;
+}
+
+.strategy-legs-table th:last-child,
+.strategy-legs-table td:last-child {
+  padding-right: 12px;
 }
 
 .strategy-legs-table .select-control {

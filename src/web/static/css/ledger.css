@@ -91,6 +91,8 @@
   gap: 10px;
   overflow-y: auto;
   overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-right: 4px;
 }
 
 .ledger-kpi-strip {
@@ -294,7 +296,10 @@
   flex: 1 1 auto;
   min-height: 0;
   width: 100%;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   background: var(--bg-surface);
@@ -339,6 +344,11 @@
 
 .ledger-table tbody td.text-left {
   text-align: left;
+}
+
+.ledger-table thead th:last-child,
+.ledger-table tbody tr:not(.ledger-timeline-row) > td:last-child {
+  padding-right: 14px;
 }
 
 .ledger-table tbody tr.ledger-data-row:nth-child(even) {
@@ -505,7 +515,7 @@
 }
 
 .ledger-timeline {
-  padding: 8px 12px 10px 32px;
+  padding: 8px 16px 10px 32px;
   display: flex;
   flex-direction: column;
   gap: 6px;

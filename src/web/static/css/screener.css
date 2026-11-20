@@ -139,7 +139,10 @@
   width: 100%;
   max-width: 100%;
   max-height: 640px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
 }
 
@@ -223,6 +226,12 @@
 
 .screener-table tbody td.text-left {
   text-align: left;
+}
+
+.screener-table thead tr:first-child th:last-child .th-sort-btn,
+.screener-table thead tr.screener-filter-row th:last-child,
+.screener-table tbody tr:not(.screener-detail-row) > td:last-child {
+  padding-right: 14px;
 }
 
 .screener-row {
@@ -393,6 +402,7 @@
 
 .screener-legs-wrap {
   overflow-x: auto;
+  padding-bottom: 4px;
 }
 
 .screener-legs-table {

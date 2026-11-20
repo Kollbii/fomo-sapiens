@@ -395,9 +395,10 @@ def test_fetch_exact_contracts_quotes_dedupes_and_skips_expired() -> None:
                 4815,
             )
         )
+    cap = fetcher.max_contracts_per_page * fetcher.max_pages_per_refresh
     too_many = [
         ExactContractSpec(option_conid=1000 + i, expiry=live_exp, strike=100.0 + i, right="C")
-        for i in range(401)
+        for i in range(cap + 1)
     ]
     with pytest.raises(PacingViolationError):
         run_coro(fetcher.fetch_exact_contracts("NVDA", too_many, underlying_conid=4815))
@@ -1198,3 +1199,42 @@ def test_stale_precached_conid_triggers_error_200_self_heal_and_requalifies() ->
     # Only the rejected (145.0, P) isn't cached, so only that 1 contract tries qualify and drops.
     assert qualify_batches == [[(145.0, "P", 0)]]
     assert len(res2.rows) == 5
+
+
+def test_fetch_option_chain_forwards_spot_envelope_to_both_passes() -> None:
+    fake_ib = FakeChainIB()
+    now = datetime(2026, 11, 20, 15, 30, 0, tzinfo=UTC)
+    mkt = date(2026, 11, 20)
+    exps = [(mkt + timedelta(days=d)).strftime("%Y%m%d") for d in (14, 35)]
+    strikes = [float(s) for s in range(95, 250, 5)]
+    fake_ib.chains_result = [
+        SimpleNamespace(
+            exchange="SMART",
+            tradingClass="NVDA",
+            multiplier="100",
+            expirations=exps,
+            strikes=strikes,
+        )
+    ]
+    fake_ib.ticker_factory = lambda c, _t: (
+        SimpleNamespace(contract=c, bid=124.9, ask=125.1, last=125.0, close=124.8)
+        if getattr(c, "secType", "") == "STK"
+        else _opt_ticker(c)
+    )
+    client = IBKRBrokerClient(Settings(), ib_factory=lambda: fake_ib)
+    fetcher = PagedOptionChainFetcher(client, clock=lambda: now, sleep=noop_sleep)
+
+    res = run_coro(
+        fetcher.fetch_option_chain(
+            "NVDA",
+            range_pct=0.20,
+            strike_step=5.0,
+            include_short_dte=True,
+            spot_envelope=(125.0, 200.0),
+        )
+    )
+    pass1_strikes = {r.strike for r in res.rows if r.dte == 35}
+    pass2_strikes = {r.strike for r in res.rows if r.dte == 14}
+    assert 125.0 in pass1_strikes and 205.0 in pass1_strikes
+    assert 125.0 in pass2_strikes and 205.0 in pass2_strikes
+    assert any("historical spot envelope" in n.lower() for n in res.notices)

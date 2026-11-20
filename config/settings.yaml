@@ -62,6 +62,8 @@ options_chain:
     - 0.25
     - 0.35
     - 0.50
+    - 0.75
+    - 1.00
   default_strike_step: null # Default strike stride: null = Auto exchange-native selection
   allowed_strike_steps:
     - 1.0
@@ -70,7 +72,7 @@ options_chain:
     - 10.0
     - 25.0
   max_contracts_per_page: 80
-  max_pages_per_refresh: 5 # Hard cap: 400 contracts max per refresh
+  max_pages_per_refresh: 12 # Hard cap: 960 contracts max per refresh pass
   page_collect_timeout_sec: 2.25
   page_poll_interval_sec: 0.25
   inter_page_cooldown_sec: 0.35
