@@ -16,6 +16,25 @@ export var PULL_PREFS_KEY = "ibkr_pull_prefs_v1";
 export var LEDGER_PREFS_KEY = "ibkr_ledger_prefs_v1";
 export var SCREENER_PREFS_KEY = "ibkr_screener_prefs_v1";
 export var WATCHLIST_SELECTION_KEY = "ibkr_watchlist_selection_v1";
+export var BACKTEST_SPLIT_KEY = "ibkr_backtest_split_v1";
+export var WORKSPACE_MODE_KEY = "ibkr_workspace_mode_v1";
+export var DEFAULT_WORKSPACE_MODE = "desk";
+export var WORKSPACE_PANEL_SETS = {
+  desk: ["best_option", "walls", "iv_smile", "anomalies", "greeks", "corridor", "strategy"],
+  portfolio: ["trade_ledger"],
+  backtest: ["backtest"],
+  all: [
+    "walls",
+    "iv_smile",
+    "anomalies",
+    "greeks",
+    "corridor",
+    "strategy",
+    "trade_ledger",
+    "backtest",
+    "best_option",
+  ],
+};
 export var DEFAULT_PANEL_VISIBILITY = {
   walls: true,
   iv_smile: false,
@@ -64,6 +83,7 @@ export var state = {
   snapshots: [],
   status: null,
   loading: false,
+  workspaceMode: DEFAULT_WORKSPACE_MODE,
   panelVisibility: cloneDefaultPanelVisibility(),
   corridorExpiry: "",
   corridorWindow: 10,
@@ -113,6 +133,9 @@ export var state = {
   backtestPaperTrades: [],
   backtestPaperActiveCount: 0,
   backtestPaperMaxActive: 120,
+  backtestPaperExpanded: false,
+  backtestPaperTickerFilter: "ALL",
+  backtestSplitPct: 62,
   backtestResult: null,
   backtestSelectedTradeId: "",
   backtestChartView: "EQUITY",
@@ -121,6 +144,21 @@ export var state = {
 };
 
 export var dom = {
+  controlBar: document.querySelector(".control-bar"),
+  workspaceTabs: document.getElementById("workspace-tabs"),
+  stickyContextBar: document.getElementById("sticky-context-bar"),
+  stickyLogo: document.getElementById("sticky-logo"),
+  stickyTicker: document.getElementById("sticky-ticker"),
+  stickySpot: document.getElementById("sticky-spot"),
+  stickyWalls: document.getElementById("sticky-walls"),
+  stickySnap: document.getElementById("sticky-snap"),
+  stickyWorkspaceTabs: document.getElementById("sticky-workspace-tabs"),
+  stickyRefreshBtn: document.getElementById("sticky-refresh-btn"),
+  stickyTopBtn: document.getElementById("sticky-top-btn"),
+  pullScopePicker: document.getElementById("pull-scope-picker"),
+  pullScopeToggle: document.getElementById("pull-scope-toggle"),
+  pullScopeSummary: document.getElementById("pull-scope-summary"),
+  pullScopePanel: document.getElementById("pull-scope-panel"),
   gatewayBadge: document.getElementById("gateway-badge"),
   mdTypeBadge: document.getElementById("md-type-badge"),
   greeksBadge: document.getElementById("greeks-source-badge"),
@@ -128,6 +166,7 @@ export var dom = {
   editorialBannerCopy: document.getElementById("editorial-banner-copy"),
   watchlistPicker: document.getElementById("watchlist-picker"),
   watchlistToggle: document.getElementById("watchlist-toggle"),
+  watchlistActiveLogo: document.getElementById("watchlist-active-logo"),
   watchlistActive: document.getElementById("watchlist-active"),
   watchlistCount: document.getElementById("watchlist-count"),
   watchlistPanel: document.getElementById("watchlist-panel"),
@@ -283,8 +322,14 @@ export var dom = {
   backtestImportLabBtn: document.getElementById("backtest-import-lab-btn"),
   backtestAddLegBtn: document.getElementById("backtest-add-leg-btn"),
   backtestLegsBody: document.getElementById("backtest-legs-body"),
+  backtestPaperStrip: document.getElementById("backtest-paper-strip"),
+  backtestPaperToggle: document.getElementById("backtest-paper-toggle"),
+  backtestPaperToggleLabel: document.getElementById("backtest-paper-toggle-label"),
+  backtestPaperTickerCount: document.getElementById("backtest-paper-ticker-count"),
+  backtestPaperDrawer: document.getElementById("backtest-paper-drawer"),
   backtestPaperSummary: document.getElementById("backtest-paper-summary"),
   backtestPaperFilter: document.getElementById("backtest-paper-filter"),
+  backtestPaperTickerFilter: document.getElementById("backtest-paper-ticker-filter"),
   backtestPaperSyncLedgerBtn: document.getElementById("backtest-paper-sync-ledger-btn"),
   backtestPaperRefreshBtn: document.getElementById("backtest-paper-refresh-btn"),
   backtestPaperList: document.getElementById("backtest-paper-list"),
@@ -294,6 +339,8 @@ export var dom = {
   backtestChartCaption: document.getElementById("backtest-chart-caption"),
   backtestChartViewGroup: document.getElementById("backtest-chart-view-group"),
   backtestChartEl: document.getElementById("backtest-chart"),
+  backtestTablesGrid: document.getElementById("backtest-tables-grid"),
+  backtestTablesSplitter: document.getElementById("backtest-tables-splitter"),
   backtestTradesMeta: document.getElementById("backtest-trades-meta"),
   backtestTradesBody: document.getElementById("backtest-trades-body"),
   backtestStepsTitle: document.getElementById("backtest-steps-title"),

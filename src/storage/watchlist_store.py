@@ -18,11 +18,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
-import shutil
 import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -35,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 from src.core.config import StorageSettings, WatchlistSettings, resolve_project_path
 from src.core.exceptions import InvalidTickerError, StorageUnavailableError, WatchlistCapError
 from src.core.security import TickerValidator
+from src.storage._atomic import atomic_copy_file, atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -286,35 +284,6 @@ class WatchlistStore:
         data = (json.dumps(model.model_dump(mode="json"), indent=2) + "\n").encode("utf-8")
         self.ensure_layout()
         if backup_corrupt and self.path.is_file():
-            self._atomic_copy(self.path, self.corrupt_path)
-        self._atomic_write_bytes(self.path, data)
+            atomic_copy_file(self.path, self.corrupt_path, fsync=True, ensure_parent=False)
+        atomic_write_bytes(self.path, data, fsync=True, ensure_parent=False)
         return normalized
-
-    @staticmethod
-    def _discard_tmp(tmp: Path) -> None:
-        # Never let cleanup failure mask the original exception (or a successful replace).
-        with contextlib.suppress(OSError):
-            tmp.unlink(missing_ok=True)
-
-    @classmethod
-    def _atomic_write_bytes(cls, path: Path, data: bytes) -> None:
-        tmp = path.with_name(f".{path.name}.tmp")
-        try:
-            with tmp.open("wb") as fh:
-                fh.write(data)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, path)
-        finally:
-            cls._discard_tmp(tmp)
-
-    @classmethod
-    def _atomic_copy(cls, src: Path, dest: Path) -> None:
-        tmp = dest.with_name(f".{dest.name}.tmp")
-        try:
-            shutil.copyfile(src, tmp)
-            with tmp.open("r+b") as fh:
-                os.fsync(fh.fileno())
-            os.replace(tmp, dest)
-        finally:
-            cls._discard_tmp(tmp)

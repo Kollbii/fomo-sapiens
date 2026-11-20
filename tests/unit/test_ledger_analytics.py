@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import polars as pl
@@ -10,12 +10,21 @@ import pytest
 
 from src.analytics.ledger import (
     AggregatedLeg,
+    CompiledLedgerData,
     LedgerAnalyticsReport,
     NormalizedExecution,
     build_ledger_report,
     classify_option_legs,
     cluster_option_episodes,
+    compile_ledger_data,
     compute_window_start,
+)
+from src.analytics.ledger.classifier import (
+    aggregate_legs,
+    format_legs_position_label,
+    format_legs_strike_summary,
+    format_step_summary,
+    format_utc_iso,
 )
 from src.storage.ledger_schema import (
     LEDGER_EXECUTION_COLUMNS,
@@ -2172,3 +2181,759 @@ def test_stale_gateway_snapshot_does_not_revert_later_partial_close() -> None:
     # Contracts active at T3 > T2 also remain visible even if absent from T2 Gateway snapshot
     assert by_key["OPT:AVGO:20261218:180:C"].quantity == pytest.approx(-1.0)
     assert by_key["STK:AVGO"].quantity == pytest.approx(50.0)
+
+
+def test_already_aggregated_fast_paths_and_format_utc_iso() -> None:
+    naive = datetime(2026, 11, 20, 9, 5, 7)
+    utc_dt = datetime(2026, 11, 20, 9, 5, 7, tzinfo=UTC)
+    plus_two = datetime(2026, 11, 20, 11, 5, 7, tzinfo=timezone(timedelta(hours=2)))
+    assert format_utc_iso(naive) == "2026-11-20T09:05:07Z"
+    assert format_utc_iso(utc_dt) == "2026-11-20T09:05:07Z"
+    assert format_utc_iso(plus_two) == "2026-11-20T09:05:07Z"
+
+    raw_legs = [
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=140.0,
+            right="P",
+            side="SLD",
+            quantity=1.0,
+            price=4.0,
+            cashflow_ex_fee=400.0,
+            fees=0.65,
+            multiplier=100,
+            conid=700001,
+            symbol="NVDA  261218P00140000",
+        ),
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=140.0,
+            right="P",
+            side="SLD",
+            quantity=1.0,
+            price=4.2,
+            cashflow_ex_fee=420.0,
+            fees=0.65,
+            multiplier=100,
+            conid=None,
+            symbol="NVDA  261218P00140000",
+        ),
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=135.0,
+            right="P",
+            side="BOT",
+            quantity=2.0,
+            price=2.1,
+            cashflow_ex_fee=-420.0,
+            fees=1.30,
+            multiplier=100,
+            conid=700002,
+            symbol="NVDA  261218P00135000",
+        ),
+    ]
+    old_legs = [
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261120",
+            strike=130.0,
+            right="P",
+            side="SLD",
+            quantity=2.0,
+            price=3.0,
+            cashflow_ex_fee=600.0,
+            fees=1.30,
+            multiplier=100,
+            conid=700003,
+            symbol="NVDA  261120P00130000",
+        ),
+    ]
+    distinct = aggregate_legs(raw_legs)
+    assert len(distinct) == 2
+    assert distinct[1].conid == 700001
+    assert distinct[1].quantity == pytest.approx(2.0)
+
+    assert classify_option_legs(raw_legs) == classify_option_legs(distinct, already_aggregated=True)
+    assert format_legs_strike_summary(raw_legs) == format_legs_strike_summary(
+        distinct, already_aggregated=True
+    )
+    assert format_legs_position_label(raw_legs) == format_legs_position_label(
+        distinct, already_aggregated=True
+    )
+    assert format_step_summary(
+        "ROLL",
+        raw_legs,
+        cashflow_ex_fee=120.0,
+        contracts=2.0,
+        roll_old_legs=old_legs,
+    ) == format_step_summary(
+        "ROLL",
+        distinct,
+        cashflow_ex_fee=120.0,
+        contracts=2.0,
+        roll_old_legs=aggregate_legs(old_legs),
+        already_aggregated=True,
+    )
+
+
+def test_compile_ledger_data_equivalence_and_as_of_fallback() -> None:
+    execs = _exec_df(
+        [
+            {
+                "exec_id": "comp-1",
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 5.0,
+                "proceeds": 500.0,
+                "commission": 1.0,
+                "open_close": "O",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "comp-2",
+                "underlying": "AVGO",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 6.0,
+                "proceeds": 600.0,
+                "commission": 1.0,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            {
+                "conid": 740001,
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "P",
+                "position": -1.0,
+                "avg_cost": 5.0,
+                "mark_price": 4.0,
+                "source": "FLEX_IMPORT",
+                "updated_at": _ts(5),
+            }
+        ]
+    )
+    compiled = compile_ledger_data(execs, pos)
+    assert isinstance(compiled, CompiledLedgerData)
+
+    later = AS_OF + timedelta(days=2)
+    views: tuple[Literal["realized", "open_mtm"], ...] = ("realized", "open_mtm")
+    for ticker_arg in ("ALL", "NVDA"):
+        for view_arg in views:
+            uncompiled = build_ledger_report(
+                execs,
+                pos,
+                window="ALL",
+                ticker=ticker_arg,
+                view=view_arg,
+                as_of=later,
+            )
+            fast = build_ledger_report(
+                execs,
+                pos,
+                window="ALL",
+                ticker=ticker_arg,
+                view=view_arg,
+                as_of=later,
+                compiled=compiled,
+            )
+            assert fast.model_dump() == uncompiled.model_dump()
+
+    # Safely ignores compiled cache when caller requests historical as_of < max_exec_dt
+    early_as_of = datetime.fromisoformat(_ts(2).replace("Z", "+00:00"))
+    expected_early = build_ledger_report(execs, pos, window="ALL", as_of=early_as_of)
+    actual_early = build_ledger_report(
+        execs, pos, window="ALL", as_of=early_as_of, compiled=compiled
+    )
+    assert actual_early.model_dump() == expected_early.model_dump()
+
+
+def test_put_spread_assignment_option_a_linkage_stock_steps_and_cache() -> None:
+    execs = _exec_df(
+        [
+            # Pre-existing buy-and-hold DCA shares (78 shares @ $198 avg, $19 total open fees)
+            {
+                "exec_id": "dca-1",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 50.0,
+                "price": 195.0,
+                "commission": 10.0,
+                "open_close": "O",
+                "executed_at": _ts(40),
+            },
+            {
+                "exec_id": "dca-2",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 28.0,
+                "price": 203.0,
+                "commission": 9.0,
+                "open_close": "O",
+                "executed_at": _ts(25),
+            },
+            # Open Dec04 $205/$200 Bull Put Spread (+$135 credit, $1.11 fees)
+            {
+                "exec_id": "bps-open-short",
+                "underlying": "NVDA",
+                "expiry": "20261204",
+                "strike": 205.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 5.75,
+                "commission": 0.56,
+                "open_close": "O",
+                "executed_at": _ts(15),
+            },
+            {
+                "exec_id": "bps-open-long",
+                "underlying": "NVDA",
+                "expiry": "20261204",
+                "strike": 200.0,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 4.40,
+                "commission": 0.55,
+                "open_close": "O",
+                "executed_at": _ts(15),
+            },
+            # Short $205P assigned (-$20,500 on 100 shs @ $205)
+            {
+                "exec_id": "bps-assign-opt",
+                "ib_order_id": "7094235917",
+                "underlying": "NVDA",
+                "expiry": "20261204",
+                "strike": 205.0,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 0.0,
+                "proceeds": 0.0,
+                "commission": 0.0,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(2),
+            },
+            {
+                "exec_id": "bps-assign-stk",
+                "ib_order_id": "7094235984",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 205.0,
+                "commission": 0.0,
+                "open_close": "O",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(2),
+            },
+            # Combo exit next day: sell $200P @ $58.96 + sell 100 shs @ $141.09
+            {
+                "exec_id": "bps-exit-opt",
+                "ib_order_id": "1667256579",
+                "underlying": "NVDA",
+                "expiry": "20261204",
+                "strike": 200.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 58.96,
+                "commission": 0.76,
+                "open_close": None,
+                "source": "GATEWAY_LIVE",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "bps-exit-stk",
+                "ib_order_id": "1667256579",
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "side": "SLD",
+                "quantity": 100.0,
+                "price": 141.09,
+                "commission": 1.29,
+                "open_close": None,
+                "source": "GATEWAY_LIVE",
+                "executed_at": _ts(1),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            {
+                "conid": 4815747,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 78.0,
+                "avg_cost": 198.85,
+                "mark_price": 145.98,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(0, hours_offset=-1.0),
+            }
+        ]
+    )
+    compiled = compile_ledger_data(execs, pos)
+
+    # include_stock_gain=False preserves pure option accounting and option-only 3 steps
+    rep_opt = build_ledger_report(
+        execs,
+        pos,
+        window="ALL",
+        ticker="NVDA",
+        include_stock_gain=False,
+        as_of=AS_OF,
+        compiled=compiled,
+    )
+    assert len(rep_opt.campaigns) == 1
+    c_opt = rep_opt.campaigns[0]
+    assert c_opt.realized_pnl_ex_fee == pytest.approx(6031.0)
+    assert c_opt.stock_realized_pnl_ex_fee == pytest.approx(0.0)
+    assert c_opt.fees == pytest.approx(1.87)
+    assert [s.action for s in c_opt.steps] == ["OPEN", "ASSIGN", "CLOSE"]
+
+    # include_stock_gain=True matches assigned 100sh lot (Option A), nets -$360.00, emits 4 steps
+    rep_stk = build_ledger_report(
+        execs,
+        pos,
+        window="ALL",
+        ticker="NVDA",
+        include_stock_gain=True,
+        as_of=AS_OF,
+        compiled=compiled,
+    )
+    assert len(rep_stk.campaigns) == 1  # No stray NVDA-STK row!
+    c_stk = rep_stk.campaigns[0]
+    assert c_stk.strategy_type == "BULL_PUT_SPREAD"
+    assert c_stk.status == "CLOSED"
+    assert c_stk.net_premium_ex_fee == pytest.approx(6031.0)
+    assert c_stk.realized_pnl_ex_fee == pytest.approx(6031.0)
+    assert c_stk.stock_realized_pnl_ex_fee == pytest.approx(-6391.0)
+    assert c_stk.fees == pytest.approx(3.16)
+    assert rep_stk.kpis.total_pnl_ex_fee == pytest.approx(-360.0)
+    assert rep_stk.kpis.win_rate_pct == pytest.approx(0.0)
+    assert [s.action for s in c_stk.steps] == ["OPEN", "ASSIGN", "CLOSE", "CLOSE"]
+    assert [s.step_index for s in c_stk.steps] == [1, 2, 3, 4]
+    assert c_stk.steps[3].asset_class == "STK"
+    assert c_stk.steps[3].roll_label == "STOCK SOLD"
+    assert c_stk.steps[3].contracts == pytest.approx(100.0)
+    assert c_stk.steps[3].cashflow_ex_fee == pytest.approx(14109.0)
+    assert c_stk.steps[3].realized_pnl_ex_fee == pytest.approx(-6391.0)
+    assert c_stk.steps[3].fees == pytest.approx(1.29)
+
+    # Re-calling with include_stock_gain=False verifies compiled cache was never mutated
+    rep_opt_again = build_ledger_report(
+        execs,
+        pos,
+        window="ALL",
+        ticker="NVDA",
+        include_stock_gain=False,
+        as_of=AS_OF,
+        compiled=compiled,
+    )
+    assert [s.action for s in rep_opt_again.campaigns[0].steps] == ["OPEN", "ASSIGN", "CLOSE"]
+
+    # Older 78 DCA shares remain intact in open_mtm with original basis & $19 open fees
+    rep_mtm = build_ledger_report(
+        execs,
+        pos,
+        window="ALL",
+        ticker="NVDA",
+        view="open_mtm",
+        include_stock_gain=True,
+        as_of=AS_OF,
+    )
+    assert len(rep_mtm.open_positions) == 1
+    stk_open = rep_mtm.open_positions[0]
+    assert stk_open.quantity == pytest.approx(78.0)
+    assert stk_open.cost_basis_ex_fee == pytest.approx(50 * 195.0 + 28 * 203.0)
+    assert stk_open.fees == pytest.approx(19.0)
+
+
+def test_separate_stock_liquidation_bear_call_assignment_and_wheel_precedence() -> None:
+    execs = _exec_df(
+        [
+            # 1) ORCL: Bull Put Spread assigned -> stock sold separately BEFORE long put closed
+            {
+                "exec_id": "orcl-o1",
+                "underlying": "ORCL",
+                "expiry": "20260724",
+                "strike": 182.5,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 9.16,
+                "commission": 0.71,
+                "open_close": "O",
+                "executed_at": _ts(20),
+            },
+            {
+                "exec_id": "orcl-o2",
+                "underlying": "ORCL",
+                "expiry": "20260724",
+                "strike": 180.0,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 8.07,
+                "commission": 0.69,
+                "open_close": "O",
+                "executed_at": _ts(20),
+            },
+            {
+                "exec_id": "orcl-a-opt",
+                "underlying": "ORCL",
+                "expiry": "20260724",
+                "strike": 182.5,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 0.0,
+                "proceeds": 0.0,
+                "commission": 0.0,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "orcl-a-stk",
+                "underlying": "ORCL",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 182.5,
+                "commission": 0.0,
+                "open_close": "O",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(10),
+            },
+            {
+                "exec_id": "orcl-c-stk",
+                "underlying": "ORCL",
+                "asset_class": "STK",
+                "side": "SLD",
+                "quantity": 100.0,
+                "price": 130.05,
+                "commission": 1.29,
+                "open_close": "C",
+                "executed_at": _ts(9),
+            },
+            {
+                "exec_id": "orcl-c-opt",
+                "underlying": "ORCL",
+                "expiry": "20260724",
+                "strike": 180.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 47.60,
+                "commission": 0.87,
+                "open_close": "C",
+                "executed_at": _ts(9, hours_offset=3.5),
+            },
+            # 2) Bear Call Spread assigned short shares @ $100 -> covered @ $103
+            {
+                "exec_id": "bcs-o1",
+                "underlying": "CRDO",
+                "expiry": "20261120",
+                "strike": 100.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 3.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(15),
+            },
+            {
+                "exec_id": "bcs-o2",
+                "underlying": "CRDO",
+                "expiry": "20261120",
+                "strike": 105.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 1.00,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(15),
+            },
+            {
+                "exec_id": "bcs-a-opt",
+                "underlying": "CRDO",
+                "expiry": "20261120",
+                "strike": 100.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 0.0,
+                "proceeds": 0.0,
+                "commission": 0.0,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(6),
+            },
+            {
+                "exec_id": "bcs-a-stk",
+                "underlying": "CRDO",
+                "asset_class": "STK",
+                "side": "SLD",
+                "quantity": 100.0,
+                "price": 100.0,
+                "commission": 0.0,
+                "open_close": "O",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(6),
+            },
+            {
+                "exec_id": "bcs-c-stk",
+                "underlying": "CRDO",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 103.0,
+                "commission": 1.00,
+                "open_close": "C",
+                "executed_at": _ts(5),
+            },
+            {
+                "exec_id": "bcs-c-opt",
+                "underlying": "CRDO",
+                "expiry": "20261120",
+                "strike": 105.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 1.20,
+                "commission": 0.65,
+                "open_close": "C",
+                "executed_at": _ts(5),
+            },
+            # 3) Wheel: Short Put @ $40 assigned, then CC @ $44 assigned -> Pass 1 keeps on CC
+            {
+                "exec_id": "whl-sp-open",
+                "underlying": "PLTR",
+                "expiry": "20261106",
+                "strike": 40.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 1.50,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(18),
+            },
+            {
+                "exec_id": "whl-sp-assign",
+                "underlying": "PLTR",
+                "expiry": "20261106",
+                "strike": 40.0,
+                "right": "P",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 0.0,
+                "proceeds": 0.0,
+                "commission": 0.0,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(12),
+            },
+            {
+                "exec_id": "whl-sp-stk",
+                "underlying": "PLTR",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 40.0,
+                "commission": 0.0,
+                "open_close": "O",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(12),
+            },
+            {
+                "exec_id": "whl-cc-open",
+                "underlying": "PLTR",
+                "expiry": "20261113",
+                "strike": 44.0,
+                "right": "C",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 0.90,
+                "commission": 0.65,
+                "open_close": "O",
+                "executed_at": _ts(11),
+            },
+            {
+                "exec_id": "whl-cc-assign",
+                "underlying": "PLTR",
+                "expiry": "20261113",
+                "strike": 44.0,
+                "right": "C",
+                "side": "BOT",
+                "quantity": 1.0,
+                "price": 0.0,
+                "proceeds": 0.0,
+                "commission": 0.0,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(4),
+            },
+            {
+                "exec_id": "whl-cc-stk",
+                "underlying": "PLTR",
+                "asset_class": "STK",
+                "side": "SLD",
+                "quantity": 100.0,
+                "price": 44.0,
+                "commission": 0.50,
+                "open_close": "C",
+                "event_code": "ASSIGNED",
+                "executed_at": _ts(4),
+            },
+        ]
+    )
+
+    rep = build_ledger_report(
+        execs, _empty_positions(), window="ALL", include_stock_gain=True, as_of=AS_OF
+    )
+    by_u = {c.underlying: c for c in rep.campaigns}
+    assert set(by_u) == {"ORCL", "CRDO", "PLTR"}
+
+    orcl = by_u["ORCL"]
+    assert orcl.realized_pnl_ex_fee == pytest.approx(4869.0)
+    assert orcl.stock_realized_pnl_ex_fee == pytest.approx(-5245.0)
+    assert orcl.fees == pytest.approx(3.56)
+    assert [s.action for s in orcl.steps] == ["OPEN", "ASSIGN", "CLOSE", "CLOSE"]
+    assert orcl.steps[2].asset_class == "STK"
+    assert orcl.steps[2].roll_label == "STOCK SOLD"
+
+    crdo = by_u["CRDO"]
+    assert crdo.strategy_type == "BEAR_CALL_SPREAD"
+    assert crdo.realized_pnl_ex_fee == pytest.approx(320.0)
+    assert crdo.stock_realized_pnl_ex_fee == pytest.approx(-300.0)
+    assert crdo.steps[-1].asset_class == "STK" or crdo.steps[-2].asset_class == "STK"
+    stk_step = next(s for s in crdo.steps if s.asset_class == "STK")
+    assert stk_step.roll_label == "STOCK COVERED"
+    assert stk_step.cashflow_ex_fee == pytest.approx(-10300.0)
+
+    pltr_camps = sorted(
+        (c for c in rep.campaigns if c.underlying == "PLTR"), key=lambda c: c.opened_at
+    )
+    assert len(pltr_camps) == 2
+    assert pltr_camps[0].strategy_type == "SHORT_PUT"
+    assert pltr_camps[0].stock_realized_pnl_ex_fee == pytest.approx(0.0)
+    assert pltr_camps[1].strategy_type == "COVERED_CALL"
+    assert pltr_camps[1].stock_realized_pnl_ex_fee == pytest.approx(400.0)
+
+
+def test_standalone_stock_lot_gateway_reconciliation_and_steps() -> None:
+    execs = _exec_df(
+        [
+            {
+                "exec_id": "stk-open-1",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 170.0,
+                "commission": 1.00,
+                "open_close": "O",
+                "executed_at": _ts(10),
+            },
+            # Simulate un-deduped duplicate buy in history while Gateway proves 20 shs remain
+            {
+                "exec_id": "stk-open-dup",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "side": "BOT",
+                "quantity": 100.0,
+                "price": 170.0,
+                "commission": 0.0,
+                "open_close": None,
+                "source": "GATEWAY_LIVE",
+                "executed_at": _ts(9),
+            },
+            {
+                "exec_id": "stk-sell-1",
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "side": "SLD",
+                "quantity": 80.0,
+                "price": 180.0,
+                "commission": 1.20,
+                "open_close": "C",
+                "executed_at": _ts(2),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            {
+                "conid": 313130367,
+                "underlying": "AVGO",
+                "asset_class": "STK",
+                "position": 20.0,
+                "avg_cost": 170.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            }
+        ]
+    )
+    rep = build_ledger_report(
+        execs, pos, window="ALL", ticker="AVGO", include_stock_gain=True, as_of=AS_OF
+    )
+    assert len(rep.campaigns) == 1
+    stk_row = rep.campaigns[0]
+    assert stk_row.campaign_id == "AVGO-STK"
+    assert stk_row.status == "OPEN"
+    assert stk_row.contracts_open == pytest.approx(20.0)
+    assert stk_row.current_summary == "AVGO 20 shs"
+    assert stk_row.net_premium_ex_fee == pytest.approx(0.0)
+    assert stk_row.stock_realized_pnl_ex_fee == pytest.approx(800.0)
+    assert len(stk_row.steps) == 1
+    assert stk_row.steps[0].asset_class == "STK"
+    assert stk_row.steps[0].roll_label == "STOCK SOLD"
+    assert stk_row.steps[0].contracts == pytest.approx(80.0)
+
+    # Absent from newer GATEWAY_LIVE STK snapshot -> reconciled to CLOSED (0 shs)
+    pos_flat = _pos_df(
+        [
+            {
+                "conid": 4815747,
+                "underlying": "NVDA",
+                "asset_class": "STK",
+                "position": 10.0,
+                "avg_cost": 140.0,
+                "source": "GATEWAY_LIVE",
+                "updated_at": _ts(1),
+            }
+        ]
+    )
+    rep_all = build_ledger_report(
+        execs, pos_flat, window="ALL", ticker="ALL", include_stock_gain=True, as_of=AS_OF
+    )
+    avgo_closed = next(c for c in rep_all.campaigns if c.campaign_id == "AVGO-STK")
+    assert avgo_closed.status == "CLOSED"
+    assert avgo_closed.contracts_open == pytest.approx(0.0)
+    assert avgo_closed.current_summary == "Closed"

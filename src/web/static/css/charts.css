@@ -38,7 +38,7 @@
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.06em;
+  letter-spacing: 0.05em;
   text-transform: uppercase;
   color: var(--text-muted);
 }
@@ -110,6 +110,17 @@
 
 .panel-card--span-12 {
   grid-column: span 12;
+}
+
+html[data-workspace-mode="desk"] #best-option-card {
+  order: -1;
+}
+
+html[data-workspace-mode="portfolio"] .kpi-strip,
+html[data-workspace-mode="portfolio"] .chain-panel,
+html[data-workspace-mode="backtest"] .kpi-strip,
+html[data-workspace-mode="backtest"] .chain-panel {
+  display: none;
 }
 
 .panel-card.is-snapping-drag {
@@ -190,6 +201,11 @@
   border-color: var(--border-strong);
   color: var(--text-primary);
   background: var(--bg-hover);
+}
+
+.panel-span-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
 }
 
 .btn-icon-copy {

@@ -10,8 +10,11 @@ import {
   extractApiErrorMessage,
   fmtMoney,
   fmtNum,
+  formatStrikeShort,
+  readJsonPref,
   showBanner,
   themeVars,
+  writeJsonPref,
 } from "./helpers.js";
 import {
   baseLayout,
@@ -114,56 +117,34 @@ function formatCompactExpiry(rawExp) {
   return s;
 }
 
-function formatStrikeBadge(strikeVal) {
-  if (strikeVal === null || strikeVal === undefined || Number.isNaN(Number(strikeVal))) {
-    return "";
-  }
-  var n = Number(strikeVal);
-  return Math.abs(n - Math.round(n)) < 1e-6 ? "$" + Math.round(n) : "$" + n.toFixed(2);
-}
-
 export function restoreLedgerPreferences() {
-  try {
-    var raw = window.localStorage.getItem(LEDGER_PREFS_KEY);
-    if (raw) {
-      var parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object") {
-        if (VALID_WINDOWS.indexOf(parsed.window) !== -1) state.ledgerWindow = parsed.window;
-        if (VALID_VIEWS.indexOf(parsed.view) !== -1) state.ledgerView = parsed.view;
-        if (VALID_GROUPS.indexOf(parsed.groupBy) !== -1) state.ledgerGroupBy = parsed.groupBy;
-        if (typeof parsed.ticker === "string" && parsed.ticker.trim()) {
-          state.ledgerTicker = parsed.ticker.trim().toUpperCase();
-        }
-        if (typeof parsed.includeStockGain === "boolean") {
-          state.ledgerIncludeStockGain = parsed.includeStockGain;
-        }
-        if (VALID_SYNC_MODES.indexOf(parsed.syncMode) !== -1) {
-          state.ledgerSyncMode = parsed.syncMode;
-        }
-      }
+  var parsed = readJsonPref(LEDGER_PREFS_KEY, null);
+  if (parsed && typeof parsed === "object") {
+    if (VALID_WINDOWS.indexOf(parsed.window) !== -1) state.ledgerWindow = parsed.window;
+    if (VALID_VIEWS.indexOf(parsed.view) !== -1) state.ledgerView = parsed.view;
+    if (VALID_GROUPS.indexOf(parsed.groupBy) !== -1) state.ledgerGroupBy = parsed.groupBy;
+    if (typeof parsed.ticker === "string" && parsed.ticker.trim()) {
+      state.ledgerTicker = parsed.ticker.trim().toUpperCase();
     }
-  } catch (_err) {
-    /* ignore storage restrictions */
+    if (typeof parsed.includeStockGain === "boolean") {
+      state.ledgerIncludeStockGain = parsed.includeStockGain;
+    }
+    if (VALID_SYNC_MODES.indexOf(parsed.syncMode) !== -1) {
+      state.ledgerSyncMode = parsed.syncMode;
+    }
   }
   syncLedgerControlStates(null);
 }
 
 export function saveLedgerPreferences() {
-  try {
-    window.localStorage.setItem(
-      LEDGER_PREFS_KEY,
-      JSON.stringify({
-        window: state.ledgerWindow,
-        view: state.ledgerView,
-        groupBy: state.ledgerGroupBy,
-        ticker: state.ledgerTicker,
-        includeStockGain: state.ledgerIncludeStockGain,
-        syncMode: state.ledgerSyncMode,
-      })
-    );
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(LEDGER_PREFS_KEY, {
+    window: state.ledgerWindow,
+    view: state.ledgerView,
+    groupBy: state.ledgerGroupBy,
+    ticker: state.ledgerTicker,
+    includeStockGain: state.ledgerIncludeStockGain,
+    syncMode: state.ledgerSyncMode,
+  });
 }
 
 // ------------------------------------------------------------------ Controls & Status
@@ -881,7 +862,7 @@ function buildOpenPositionChartLabel(op) {
       " " +
       formatCompactExpiry(op.expiry) +
       " " +
-      formatStrikeBadge(op.strike) +
+      formatStrikeShort(op.strike, "") +
       (op.right || "") +
       " (" +
       fmtSignedQty(op.quantity) +
@@ -1242,6 +1223,9 @@ function buildTimelineStepHtml(step) {
         : step.action === "ASSIGN" || step.action === "EXERCISE"
           ? "ledger-pill--assigned"
           : "ledger-pill--open";
+  var qtyRaw = Number(step.contracts || 0);
+  var qtyDecimals = Math.abs(qtyRaw - Math.round(qtyRaw)) < 1e-6 ? 0 : 2;
+  var qtyUnit = step.asset_class === "STK" ? " shs" : "x";
   return (
     '<div class="ledger-timeline-step">' +
     '<span class="ledger-timeline-step-idx">#' +
@@ -1261,8 +1245,8 @@ function buildTimelineStepHtml(step) {
     escapeHtml(step.strike_summary || step.summary || "\u2014") +
     "</span>" +
     '<span class="ledger-timeline-step-num">' +
-    escapeHtml(fmtNum(step.contracts, 0)) +
-    "x</span>" +
+    escapeHtml(fmtNum(qtyRaw, qtyDecimals) + qtyUnit) +
+    "</span>" +
     '<span class="ledger-timeline-step-num ' +
     pnlToneClass(step.cashflow_ex_fee) +
     '">' +
@@ -1282,16 +1266,25 @@ function buildTimelineStepHtml(step) {
 
 function buildCampaignTimelineRowHtml(camp) {
   var steps = camp.steps || [];
+  var emptyCopy =
+    camp.strategy_type === "STOCK_LOT"
+      ? "No stock execution steps in this window."
+      : "No individual option roll steps in this window.";
   var stepsHtml = steps.length
     ? steps.map(buildTimelineStepHtml).join("")
-    : '<div class="ledger-timeline-empty">No individual option roll steps in this window.</div>';
+    : '<div class="ledger-timeline-empty">' + emptyCopy + "</div>";
+  var timelinePrefix =
+    camp.strategy_type === "STOCK_LOT"
+      ? "Stock Execution Timeline \u2022 "
+      : "Roll Chain Timeline \u2022 ";
   return (
     '<tr class="ledger-timeline-row" data-campaign-detail="' +
     escapeHtml(camp.campaign_id) +
     '">' +
     '<td colspan="9">' +
     '<div class="ledger-timeline">' +
-    '<div class="ledger-timeline-title">Roll Chain Timeline \u2022 ' +
+    '<div class="ledger-timeline-title">' +
+    timelinePrefix +
     escapeHtml(camp.underlying) +
     " \u2022 " +
     escapeHtml(formatStrategyLabel(camp.strategy_type)) +
@@ -1386,7 +1379,11 @@ function renderCampaignsTable(report, status) {
       escapeHtml(c.campaign_id) +
       '" aria-expanded="' +
       (expanded ? "true" : "false") +
-      '" aria-label="Toggle roll chain timeline"' +
+      '" aria-label="' +
+      (c.strategy_type === "STOCK_LOT"
+        ? "Toggle stock execution timeline"
+        : "Toggle roll chain timeline") +
+      '"' +
       (hasSteps ? "" : " disabled") +
       ">" +
       (expanded ? "\u25BC" : "\u25B6") +
@@ -1603,7 +1600,7 @@ function renderOpenMtmTable(report, status) {
       op.asset_class === "OPT" && op.expiry
         ? formatCompactExpiry(op.expiry) +
           " " +
-          formatStrikeBadge(op.strike) +
+          formatStrikeShort(op.strike, "") +
           (op.right || "")
         : op.asset_class;
     var opReplayHtml = "";

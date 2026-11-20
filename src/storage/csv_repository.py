@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import shutil
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +17,13 @@ from pydantic import ValidationError
 from src.core.config import PROJECT_ROOT, StorageSettings
 from src.core.exceptions import SnapshotNotFoundError, StorageSchemaError
 from src.core.security import TickerValidator
+from src.storage._atomic import (
+    StatSig,
+    atomic_copy_file,
+    atomic_write_bytes,
+    atomic_write_csv,
+    path_stat_sig,
+)
 from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     COLUMNS,
@@ -47,16 +52,14 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
-def _atomic_copy(src: Path, dest: Path) -> None:
-    tmp = dest.with_name(f".{dest.name}.tmp")
-    shutil.copyfile(src, tmp)
-    os.replace(tmp, dest)
+def _clone_snapshot_meta(meta: SnapshotMeta) -> SnapshotMeta:
+    """Return a fast mutation-isolated copy of `SnapshotMeta` without recursive deepcopy."""
+    updates: dict[str, Any] = {"expirations": list(meta.expirations)}
+    if meta.available_strike_steps is not None:
+        updates["available_strike_steps"] = list(meta.available_strike_steps)
+    if meta.available_range_pcts is not None:
+        updates["available_range_pcts"] = list(meta.available_range_pcts)
+    return meta.model_copy(update=updates)
 
 
 @dataclass(frozen=True)
@@ -100,6 +103,9 @@ class CSVRepository:
         self.latest_dir = self._resolve(self.storage.latest_dir)
         self.index_path = self._resolve(self.storage.metadata_index_file)
         self._lock = threading.RLock()
+        self._index_cache_sig: StatSig | None = None
+        self._index_cache_data: dict[str, Any] | None = None
+        self._index_cache_metas: dict[str, tuple[SnapshotMeta, ...]] | None = None
 
     def ensure_layout(self) -> None:
         """Create the Mode 1 storage directories (idempotent; never touches existing files)."""
@@ -218,13 +224,10 @@ class CSVRepository:
                 raise StorageSchemaError(f"Snapshot already exists (immutable): {snapshot_id}")
             latest = self.latest_path(symbol)
             update_latest = partial_reason is None or not latest.is_file()
-            target.parent.mkdir(parents=True, exist_ok=True)
             self.latest_dir.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.tmp")
-            df.write_csv(tmp)
-            os.replace(tmp, target)
+            atomic_write_csv(df, target)
             if update_latest:
-                _atomic_copy(target, latest)
+                atomic_copy_file(target, latest, ensure_parent=False)
             self._index_add(symbol, meta, latest_snapshot_id=snapshot_id if update_latest else None)
         logger.info(
             "snapshot saved id=%s contracts=%d partial=%s latest_updated=%s",
@@ -277,10 +280,41 @@ class CSVRepository:
     def list_snapshots(self, ticker: str) -> list[SnapshotMeta]:
         """Snapshot metadata for `ticker`, newest first (index is rebuilt if needed)."""
         symbol = TickerValidator.validate(ticker)
-        entry = self.load_index().get("tickers", {}).get(symbol)
+        index = self.load_index()
+        with self._lock:
+            cached_metas = (
+                self._index_cache_metas
+                if index is self._index_cache_data and self._index_cache_metas is not None
+                else None
+            )
+        if cached_metas is not None:
+            return [_clone_snapshot_meta(m) for m in cached_metas.get(symbol, ())]
+        entry = index.get("tickers", {}).get(symbol)
         if not entry:
             return []
         return [SnapshotMeta.model_validate(s) for s in entry["snapshots"]]
+
+    def get_snapshot_meta(self, ticker: str, snapshot_id: str) -> SnapshotMeta | None:
+        """Return metadata for a single archived `snapshot_id`, or None if absent."""
+        symbol = TickerValidator.validate(ticker)
+        index = self.load_index()
+        with self._lock:
+            cached_metas = (
+                self._index_cache_metas
+                if index is self._index_cache_data and self._index_cache_metas is not None
+                else None
+            )
+        if cached_metas is not None:
+            for meta in cached_metas.get(symbol, ()):
+                if meta.snapshot_id == snapshot_id:
+                    return _clone_snapshot_meta(meta)
+            return None
+        entry = index.get("tickers", {}).get(symbol)
+        snaps = entry.get("snapshots") if isinstance(entry, dict) else None
+        for snap in snaps or ():
+            if snap.get("snapshot_id") == snapshot_id:
+                return SnapshotMeta.model_validate(snap)
+        return None
 
     def latest_snapshots(
         self,
@@ -293,8 +327,23 @@ class CSVRepository:
         `include_partial=False` skips snapshots flagged `partial` and returns the newest complete
         one (tickers with only partial snapshots are omitted); use it for freshness checks.
         """
-        index_tickers = self.load_index().get("tickers", {})
+        index = self.load_index()
+        with self._lock:
+            cached_metas = (
+                self._index_cache_metas
+                if index is self._index_cache_data and self._index_cache_metas is not None
+                else None
+            )
         out: dict[str, SnapshotMeta] = {}
+        if cached_metas is not None:
+            for raw in tickers:
+                symbol = TickerValidator.validate(raw)
+                for meta in cached_metas.get(symbol, ()):  # index is newest-first
+                    if include_partial or not meta.is_partial:
+                        out[symbol] = _clone_snapshot_meta(meta)
+                        break
+            return out
+        index_tickers = index.get("tickers", {})
         for raw in tickers:
             symbol = TickerValidator.validate(raw)
             entry = index_tickers.get(symbol)
@@ -370,10 +419,29 @@ class CSVRepository:
             prior_close_only_count=quality.prior_close_only_count,
         )
 
-    def _write_index(self, tickers: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    def _index_stat_sig(self) -> StatSig | None:
+        return path_stat_sig(self.index_path)
+
+    def _invalidate_index_cache(self) -> None:
+        self._index_cache_sig = None
+        self._index_cache_data = None
+        self._index_cache_metas = None
+
+    def _write_index(
+        self,
+        tickers: dict[str, dict[str, Any]],
+        *,
+        cached_metas: dict[str, tuple[SnapshotMeta, ...]] | None = None,
+    ) -> dict[str, Any]:
         index: dict[str, Any] = {"updated_at_utc": _utc_now_iso(), "tickers": tickers}
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(self.index_path, json.dumps(index, indent=2).encode("utf-8"))
+        atomic_write_bytes(self.index_path, json.dumps(index, indent=2).encode("utf-8"))
+        with self._lock:
+            if cached_metas is not None and (sig := self._index_stat_sig()) is not None:
+                self._index_cache_sig = sig
+                self._index_cache_data = index
+                self._index_cache_metas = cached_metas
+            else:
+                self._invalidate_index_cache()
         return index
 
     def _ticker_entry(
@@ -405,43 +473,68 @@ class CSVRepository:
         latest_snapshot_id: str | None = None,
     ) -> None:
         try:
-            tickers = self._read_index_file()["tickers"]
+            raw = self._read_index_file()
         except StorageSchemaError:
             rebuilt = self.rebuild_index()  # already includes the freshly written snapshot
-            entry = rebuilt["tickers"].get(symbol)
+            rebuilt_tickers = dict(rebuilt["tickers"])
+            entry = rebuilt_tickers.get(symbol)
             if entry is not None:
                 # Restore the caller-supplied fields a CSV rescan cannot recover (range/step,
                 # spot_source, partial flag): store exactly what the normal path would.
-                entry["snapshots"] = [
-                    meta.model_dump() if snap["snapshot_id"] == meta.snapshot_id else snap
-                    for snap in entry["snapshots"]
-                ]
-                self._write_index(rebuilt["tickers"])
+                rebuilt_tickers[symbol] = {
+                    **entry,
+                    "snapshots": [
+                        meta.model_dump() if snap["snapshot_id"] == meta.snapshot_id else snap
+                        for snap in entry["snapshots"]
+                    ],
+                }
+                self._write_index(rebuilt_tickers)
             return
-        existing = [
-            SnapshotMeta.model_validate(s) for s in tickers.get(symbol, {}).get("snapshots", [])
-        ]
-        existing = [m for m in existing if m.snapshot_id != meta.snapshot_id]
-        tickers[symbol] = self._ticker_entry(
-            symbol, [*existing, meta], latest_snapshot_id=latest_snapshot_id
+        tickers = dict(raw["tickers"])
+        base_cached_metas: dict[str, tuple[SnapshotMeta, ...]] | None = None
+        if raw is self._index_cache_data and self._index_cache_metas is not None:
+            existing = list(self._index_cache_metas.get(symbol, ()))
+            base_cached_metas = dict(self._index_cache_metas)
+        else:
+            existing = [
+                SnapshotMeta.model_validate(s) for s in tickers.get(symbol, {}).get("snapshots", [])
+            ]
+        ordered = sorted(
+            [*(m for m in existing if m.snapshot_id != meta.snapshot_id), meta],
+            key=lambda m: m.snapshot_id,
+            reverse=True,
         )
-        self._write_index(tickers)
+        tickers[symbol] = self._ticker_entry(symbol, ordered, latest_snapshot_id=latest_snapshot_id)
+        if base_cached_metas is not None:
+            base_cached_metas[symbol] = tuple(ordered)
+        self._write_index(tickers, cached_metas=base_cached_metas)
 
     def _read_index_file(self) -> dict[str, Any]:
-        if not self.index_path.is_file():
-            if not self.snapshots_dir.is_dir():
-                return {"tickers": {}}  # nothing archived yet
-            raise StorageSchemaError("snapshot index missing")
-        try:
-            data = json.loads(self.index_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not isinstance(data.get("tickers"), dict):
-                raise ValueError("bad structure")
-            for entry in data["tickers"].values():
-                for s in entry["snapshots"]:
-                    SnapshotMeta.model_validate(s)
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            raise StorageSchemaError(f"snapshot index corrupt: {exc}") from exc
-        return data
+        with self._lock:
+            sig = self._index_stat_sig()
+            if sig is None:
+                self._invalidate_index_cache()
+                if not self.snapshots_dir.is_dir():
+                    return {"tickers": {}}  # nothing archived yet
+                raise StorageSchemaError("snapshot index missing")
+            if sig == self._index_cache_sig and self._index_cache_data is not None:
+                return self._index_cache_data
+            try:
+                data = json.loads(self.index_path.read_text(encoding="utf-8"))
+                if not isinstance(data, dict) or not isinstance(data.get("tickers"), dict):
+                    raise ValueError("bad structure")
+                metas_by_ticker: dict[str, tuple[SnapshotMeta, ...]] = {}
+                for sym, entry in data["tickers"].items():
+                    metas_by_ticker[sym] = tuple(
+                        SnapshotMeta.model_validate(s) for s in entry["snapshots"]
+                    )
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                self._invalidate_index_cache()
+                raise StorageSchemaError(f"snapshot index corrupt: {exc}") from exc
+            self._index_cache_sig = sig
+            self._index_cache_data = data
+            self._index_cache_metas = metas_by_ticker
+            return data
 
     def load_index(self) -> dict[str, Any]:
         """Return the index, rebuilding it from disk when missing or corrupt."""
@@ -455,6 +548,7 @@ class CSVRepository:
         """Scan `snapshots/*/*.csv`, skip corrupt files, and atomically rewrite the index."""
         with self._lock:
             tickers: dict[str, dict[str, Any]] = {}
+            cached_metas: dict[str, tuple[SnapshotMeta, ...]] = {}
             if self.snapshots_dir.is_dir():
                 for ticker_dir in sorted(p for p in self.snapshots_dir.iterdir() if p.is_dir()):
                     try:
@@ -482,5 +576,7 @@ class CSVRepository:
                             self._meta_from_frame(df, csv_path, None, None, infer_missing=True)
                         )
                     if metas:
-                        tickers[symbol] = self._ticker_entry(symbol, metas)
-            return self._write_index(tickers)
+                        ordered = sorted(metas, key=lambda m: m.snapshot_id, reverse=True)
+                        tickers[symbol] = self._ticker_entry(symbol, ordered)
+                        cached_metas[symbol] = tuple(ordered)
+            return self._write_index(tickers, cached_metas=cached_metas)

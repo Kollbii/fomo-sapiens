@@ -857,3 +857,86 @@ def test_sync_gateway_only_carries_existing_marks_and_preserves_stk_when_exclude
     assert by_und["AAPL"]["source"] == "FLEX_ACTIVITY_365"
     assert by_und["AAPL"]["position"] == pytest.approx(100.0)
     assert by_und["AAPL"]["mark_price"] == pytest.approx(220.0)
+
+
+def test_import_ledger_file_uses_sync_state_total_executions_without_trailing_csv_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = LedgerRepository("data/ledger", root=tmp_path)
+    cfg = Settings(ledger=LedgerSettings())
+    broker = IBKRBrokerClient(cfg, ib_factory=lambda: _FakeServiceIB(offline=True))
+    svc = LedgerService(settings=cfg, repo=repo, broker_client=broker)
+
+    events: list[str] = []
+    orig_save = repo.save_sync_state
+    orig_load = repo.load_executions
+
+    def _spy_save(*, last_sync_at: str | None = None, last_sync_mode: str | None = None) -> Any:
+        res = orig_save(last_sync_at=last_sync_at, last_sync_mode=last_sync_mode)
+        events.append("save_sync_state")
+        return res
+
+    def _spy_load() -> Any:
+        events.append("load_executions")
+        return orig_load()
+
+    monkeypatch.setattr(repo, "save_sync_state", _spy_save)
+    monkeypatch.setattr(repo, "load_executions", _spy_load)
+
+    csv_payload = (
+        b"Symbol,AssetCategory,Quantity,TradePrice,Proceeds,IBCommission,DateTime,TransactionID\n"
+        b"NVDA,STK,10,120.0,-1200.0,-1.0,20261112;153000,tx-1001\n"
+    )
+    resp = svc.import_ledger_file("trades.csv", csv_payload)
+    assert resp.executions_inserted == 1
+    assert resp.total_executions == 1
+    assert "save_sync_state" in events
+    save_idx = events.index("save_sync_state")
+    assert "load_executions" not in events[save_idx + 1 :]
+
+
+def test_ledger_service_caches_compiled_data_across_filters_and_invalidates_on_import(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = LedgerRepository("data/ledger", root=tmp_path)
+    cfg = Settings(ledger=LedgerSettings())
+    broker = IBKRBrokerClient(cfg, ib_factory=lambda: _FakeServiceIB(offline=True))
+    svc = LedgerService(settings=cfg, repo=repo, broker_client=broker)
+
+    csv_payload = (
+        b"Symbol,AssetCategory,Quantity,TradePrice,Proceeds,IBCommission,DateTime,TransactionID\n"
+        b"NVDA  261218P00120000,OPT,-1,4.50,450.0,-1.0,20261112;153000,tx-opt-1\n"
+    )
+    svc.import_ledger_file("trades1.csv", csv_payload)
+
+    from src.analytics.ledger import compile_ledger_data
+
+    compile_calls = 0
+    orig_compile = compile_ledger_data
+
+    def _counting_compile(*args: Any, **kwargs: Any) -> Any:
+        nonlocal compile_calls
+        compile_calls += 1
+        return orig_compile(*args, **kwargs)
+
+    monkeypatch.setattr("src.services.ledger.compile_ledger_data", _counting_compile)
+
+    r1 = svc.get_ledger_dashboard(window="ALL", ticker="ALL", group_by="campaigns", view="realized")
+    r2 = svc.get_ledger_dashboard(
+        window="1M", ticker="NVDA", group_by="strategy", view="open_mtm", include_stock_gain=True
+    )
+    r3 = svc.build_full_open_report()
+    assert compile_calls == 1
+    assert r1.report.kpis.net_premium_ex_fee == pytest.approx(450.0)
+    assert r2.report.ticker == "NVDA"
+    assert len(r3.open_positions) == 1
+
+    # Importing new executions invalidates the stat-keyed compiled ledger cache
+    csv_more = (
+        b"Symbol,AssetCategory,Quantity,TradePrice,Proceeds,IBCommission,DateTime,TransactionID\n"
+        b"AVGO  261218P00180000,OPT,-1,6.00,600.0,-1.0,20261113;153000,tx-opt-2\n"
+    )
+    svc.import_ledger_file("trades2.csv", csv_more)
+    r4 = svc.get_ledger_dashboard(window="ALL", ticker="ALL")
+    assert compile_calls == 2
+    assert r4.report.kpis.net_premium_ex_fee == pytest.approx(1050.0)

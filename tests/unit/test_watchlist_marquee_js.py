@@ -299,6 +299,7 @@ function makeEl(tag, id) {
 
 const wlPicker = makeEl("div", "watchlist-picker");
 const wlToggle = makeEl("button", "watchlist-toggle");
+const wlActiveLogo = makeEl("span", "watchlist-active-logo");
 const wlActive = makeEl("span", "watchlist-active");
 const wlCount = makeEl("span", "watchlist-count");
 const wlPanel = makeEl("div", "watchlist-panel");
@@ -333,6 +334,8 @@ wlPanel.appendChild(wlNotice);
 wlPanel.appendChild(wlEmpty);
 wlPanel.appendChild(wlRows);
 wlPanel.appendChild(wlFooter);
+wlToggle.appendChild(wlActiveLogo);
+wlToggle.appendChild(wlActive);
 wlPicker.appendChild(wlToggle);
 wlPicker.appendChild(wlPanel);
 bodyEl.appendChild(wlPicker);
@@ -1202,6 +1205,66 @@ def test_scrolled_container_and_edge_auto_scroll() -> None:
         assert.equal(Boolean(state.watchlistUnchecked.T4), false);
         assert.equal(Boolean(state.watchlistUnchecked.T8), true);
         assert.equal(Boolean(state.watchlistUnchecked.T0), false);
+
+        console.log(JSON.stringify({ ok: true }));
+        """
+    )
+    assert result["ok"] is True
+
+
+def test_watchlist_logos_render_fallback_and_preserve_click_and_active_highlight() -> None:
+    result = _run_node_scenario(
+        """
+        const helpers = await import(modUrl("helpers.js"));
+        const { state } = await bootWatchlist(["NVDA", "AVGO", "SPCX"], {});
+
+        // 1. Toggle logo synced for initial active ticker
+        assert.equal(wlActiveLogo.getAttribute("data-logo-ticker"), "NVDA");
+        const toggleImg = wlActiveLogo.querySelector(".wl-logo__img");
+        assert.ok(toggleImg);
+        assert.equal(toggleImg.draggable, false);
+        assert.equal(toggleImg.src, "/api/logo/NVDA");
+
+        // 2. Each row places `.wl-logo` inside `[data-wl-view]` before `.wl-row__sym-text`
+        const nvdaView = viewFor("NVDA");
+        const nvdaLogo = nvdaView.querySelector(".wl-logo");
+        const nvdaSymText = nvdaView.querySelector(".wl-row__sym-text");
+        assert.ok(nvdaLogo);
+        assert.ok(nvdaSymText);
+        assert.equal(nvdaSymText.textContent, "NVDA");
+        assert.equal(nvdaView.children[0], nvdaLogo);
+        assert.equal(nvdaView.children[1], nvdaSymText);
+        const nvdaImg = nvdaLogo.querySelector(".wl-logo__img");
+        assert.equal(nvdaImg.draggable, false);
+        assert.equal(nvdaImg.src, "/api/logo/NVDA");
+
+        // Image onload shows image; onerror removes img, preserves monogram, and caches miss
+        nvdaImg.onload();
+        assert.equal(nvdaLogo.classList.contains("has-img"), true);
+
+        const spcxLogo = viewFor("SPCX").querySelector(".wl-logo");
+        const spcxImg = spcxLogo.querySelector(".wl-logo__img");
+        const spcxFallback = spcxLogo.querySelector(".wl-logo__fallback");
+        assert.equal(spcxFallback.textContent, "SP");
+        spcxImg.onerror();
+        assert.equal(spcxLogo.classList.contains("has-img"), false);
+        assert.equal(spcxLogo.querySelector(".wl-logo__img"), null);
+
+        // Rebuild badge for SPCX -> cached failure skips creating another <img>
+        const rebuiltSpcx = helpers.buildLogoBadge("SPCX");
+        assert.equal(rebuiltSpcx.querySelector(".wl-logo__img"), null);
+        assert.equal(rebuiltSpcx.querySelector(".wl-logo__fallback").textContent, "SP");
+
+        // 3. Clicking the logo element inside `[data-wl-view="AVGO"]` loads AVGO snapshot
+        wlPanel.hidden = false;
+        const avgoLogo = viewFor("AVGO").querySelector(".wl-logo");
+        avgoLogo.dispatchEvent({ type: "click" });
+        await new Promise((r) => setTimeout(r, 0));
+        assert.equal(state.ticker, "AVGO");
+        assert.equal(wlPanel.hidden, true);
+        assert.equal(wlActiveLogo.getAttribute("data-logo-ticker"), "AVGO");
+        assert.equal(rowFor("AVGO").classList.contains("is-active"), true);
+        assert.equal(rowFor("NVDA").classList.contains("is-active"), false);
 
         console.log(JSON.stringify({ ok: true }));
         """

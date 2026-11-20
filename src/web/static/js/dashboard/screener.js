@@ -3,12 +3,16 @@
 
 import { SCREENER_PREFS_KEY, dom, state } from "./state.js";
 import {
+  PRESET_STRATEGY_LABELS,
   extractApiErrorMessage,
   fmtInt,
   fmtMoney,
   fmtNum,
+  formatStrategyShortLabel,
   parseDashboardDteWindow,
+  readJsonPref,
   showBanner,
+  writeJsonPref,
 } from "./helpers.js";
 import { apiJson, fetchStatus, loadChain } from "./network.js";
 import { snapshotEtParts } from "./snapshots.js";
@@ -17,7 +21,7 @@ import {
   renderStrategyLegsTable,
   setActiveStrategyPresetUI,
 } from "./strategy_lab.js";
-import { applyPanelVisibility } from "./panels.js";
+import { applyPanelVisibility, ensurePanelVisible, isPanelVisible } from "./panels.js";
 import { stopCorridorStream, syncCorridorWithStrategy } from "./corridor.js";
 
 // ------------------------------------------------------------------ Constants
@@ -27,15 +31,6 @@ var LIVE_MAX_ROWS = 120;
 var REALLOC_DEBOUNCE_MS = 300;
 var RESUME_DELAY_MS = 600;
 var BANNER_META = { ticker: "SCREENER", phase: "SCREENER" };
-
-var KIND_LABELS = {
-  BULL_PUT_SPREAD: "Bull Put",
-  BEAR_CALL_SPREAD: "Bear Call",
-  BULL_CALL_SPREAD: "Bull Call",
-  BEAR_PUT_SPREAD: "Bear Put",
-  DIAGONAL_SPREAD: "Diagonal",
-  IRON_CONDOR: "Iron Condor",
-};
 
 var STATUS_LABELS = {
   filtered: "FILTERED",
@@ -106,11 +101,6 @@ function numOrNull(v) {
   return Number.isNaN(n) ? null : n;
 }
 
-function kindLabel(kind) {
-  if (!kind) return DASH;
-  return KIND_LABELS[kind] || String(kind).replace(/_/g, " ");
-}
-
 function signedMoney(val) {
   var n = numOrNull(val);
   if (n === null) return DASH;
@@ -159,10 +149,10 @@ var COLUMNS = [
     def: true,
     left: true,
     sort: function (r) {
-      return r.strategy_kind ? kindLabel(r.strategy_kind) : null;
+      return r.strategy_kind ? formatStrategyShortLabel(r.strategy_kind) : null;
     },
     text: function (r) {
-      return kindLabel(r.strategy_kind);
+      return formatStrategyShortLabel(r.strategy_kind);
     },
   },
   {
@@ -406,54 +396,44 @@ function defaultPrefs() {
 
 function readPrefs() {
   var prefs = defaultPrefs();
-  try {
-    var raw = window.localStorage.getItem(SCREENER_PREFS_KEY);
-    if (!raw) return prefs;
-    var p = JSON.parse(raw);
-    if (!p || typeof p !== "object") return prefs;
-    if (p.mode === "best" || p.mode === "selected" || p.mode === "all") prefs.mode = p.mode;
-    if (typeof p.strategy === "string" && KIND_LABELS[p.strategy]) prefs.strategy = p.strategy;
-    if (typeof p.dte === "string" && /^(\d+|\d+:\d+)$/.test(p.dte)) prefs.dte = p.dte;
-    ["minCredit", "minRor", "minPop"].forEach(function (k) {
-      if (typeof p[k] === "string" && (p[k] === "" || !Number.isNaN(Number(p[k])))) prefs[k] = p[k];
+  var p = readJsonPref(SCREENER_PREFS_KEY, null);
+  if (!p || typeof p !== "object") return prefs;
+  if (p.mode === "best" || p.mode === "selected" || p.mode === "all") prefs.mode = p.mode;
+  if (typeof p.strategy === "string" && PRESET_STRATEGY_LABELS[p.strategy]) prefs.strategy = p.strategy;
+  if (typeof p.dte === "string" && /^(\d+|\d+:\d+)$/.test(p.dte)) prefs.dte = p.dte;
+  ["minCredit", "minRor", "minPop"].forEach(function (k) {
+    if (typeof p[k] === "string" && (p[k] === "" || !Number.isNaN(Number(p[k])))) prefs[k] = p[k];
+  });
+  if (typeof p.live === "boolean") prefs.live = p.live;
+  if (typeof p.showStatus === "boolean") prefs.showStatus = p.showStatus;
+  if (p.columns && typeof p.columns === "object") {
+    COLUMNS.forEach(function (c) {
+      if (typeof p.columns[c.key] === "boolean") prefs.columns[c.key] = p.columns[c.key];
     });
-    if (typeof p.live === "boolean") prefs.live = p.live;
-    if (typeof p.showStatus === "boolean") prefs.showStatus = p.showStatus;
-    if (p.columns && typeof p.columns === "object") {
-      COLUMNS.forEach(function (c) {
-        if (typeof p.columns[c.key] === "boolean") prefs.columns[c.key] = p.columns[c.key];
+  }
+  if (
+    p.sort &&
+    COLUMN_BY_KEY[p.sort.key] &&
+    (p.sort.dir === "asc" || p.sort.dir === "desc")
+  ) {
+    prefs.sort = { key: p.sort.key, dir: p.sort.dir };
+  }
+  if (p.filters && typeof p.filters === "object") {
+    COLUMNS.forEach(function (c) {
+      var f = p.filters[c.key];
+      if (!f || typeof f !== "object") return;
+      var clean = {};
+      ["q", "min", "max", "v"].forEach(function (k) {
+        if (typeof f[k] === "string" && f[k] !== "") clean[k] = f[k];
       });
-    }
-    if (
-      p.sort &&
-      COLUMN_BY_KEY[p.sort.key] &&
-      (p.sort.dir === "asc" || p.sort.dir === "desc")
-    ) {
-      prefs.sort = { key: p.sort.key, dir: p.sort.dir };
-    }
-    if (p.filters && typeof p.filters === "object") {
-      COLUMNS.forEach(function (c) {
-        var f = p.filters[c.key];
-        if (!f || typeof f !== "object") return;
-        var clean = {};
-        ["q", "min", "max", "v"].forEach(function (k) {
-          if (typeof f[k] === "string" && f[k] !== "") clean[k] = f[k];
-        });
-        if (Object.keys(clean).length) prefs.filters[c.key] = clean;
-      });
-    }
-  } catch (_err) {
-    return defaultPrefs();
+      if (Object.keys(clean).length) prefs.filters[c.key] = clean;
+    });
   }
   return prefs;
 }
 
 function writePrefs() {
-  try {
-    window.localStorage.setItem(SCREENER_PREFS_KEY, JSON.stringify(S.prefs));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(SCREENER_PREFS_KEY, S.prefs);
 }
 
 function visibleColumns() {
@@ -471,8 +451,7 @@ function h(tag, cls, text) {
 }
 
 function cardVisible() {
-  var vis = state.panelVisibility;
-  return vis && typeof vis[PANEL_ID] === "boolean" ? vis[PANEL_ID] : true;
+  return isPanelVisible(PANEL_ID);
 }
 
 function liveWanted() {
@@ -751,7 +730,7 @@ function buildStatusRow(base, ncols) {
   td.appendChild(h("span", "screener-ticker", base.ticker));
   td.appendChild(h("span", "screener-status-tag", STATUS_LABELS[base.status] || base.status));
   var reason = base.status_reason || "";
-  if (base.strategy_kind) reason = kindLabel(base.strategy_kind) + (reason ? ": " + reason : "");
+  if (base.strategy_kind) reason = formatStrategyShortLabel(base.strategy_kind) + (reason ? ": " + reason : "");
   if (reason) td.appendChild(h("span", "screener-status-reason", reason));
   var p = asOfParts(base);
   if (p && base.status !== "no_data") {
@@ -879,7 +858,7 @@ function buildDetailRow(eff, base, ncols) {
       "screener-detail-title",
       eff.ticker +
         " · " +
-        kindLabel(eff.strategy_kind) +
+        formatStrategyShortLabel(eff.strategy_kind) +
         " · snapshot " +
         (eff.snapshot_id || DASH) +
         (asOf ? " (" + asOf.dayShort + " " + asOf.time + ")" : "")
@@ -1495,10 +1474,7 @@ async function openInStrategyLab(rowId) {
     await loadChain(base.ticker, base.snapshot_id || "");
   }
   if (!state.chainData) return;
-  if (!state.panelVisibility.strategy) {
-    var nextVis = Object.assign({}, state.panelVisibility, { strategy: true });
-    applyPanelVisibility(nextVis, { persist: true });
-  }
+  ensurePanelVisible("strategy");
   await waitForStrategyIdle(8000);
   if (dom.strategyQtyInput) dom.strategyQtyInput.value = "1";
   if (dom.strategyDaysSlider) dom.strategyDaysSlider.value = "0";

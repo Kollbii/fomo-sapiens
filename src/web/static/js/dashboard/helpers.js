@@ -181,13 +181,13 @@ export function themeVars() {
     bg: cssVar("--plotly-bg", isTerminal ? "#11161F" : "#FFFFFF"),
     grid: cssVar("--plotly-grid", isTerminal ? "#1E2636" : "#E8E4DA"),
     ink: cssVar("--plotly-ink", isTerminal ? "#EAECEF" : "#111111"),
-    muted: cssVar("--text-muted", isTerminal ? "#6C7687" : "#727272"),
+    muted: cssVar("--text-muted", isTerminal ? "#8B97AA" : "#5C5C5C"),
     call: cssVar("--accent-call", isTerminal ? "#10B981" : "#0F6E4F"),
-    put: cssVar("--accent-put", isTerminal ? "#EF4444" : "#A82020"),
+    put: cssVar("--accent-put", isTerminal ? "#F25555" : "#A82020"),
     legBuy: cssVar("--corridor-leg-buy", isTerminal ? "#F59E0B" : "#B45309"),
     legSell: cssVar("--corridor-leg-sell", isTerminal ? "#FB923C" : "#EA580C"),
-    anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#C2410C"),
-    warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#B45309"),
+    anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#B83B0A"),
+    warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#9A4306"),
     fontMono: cssVar("--font-mono", "monospace"),
     dtePalette: isTerminal
       ? ["#38BDF8", "#10B981", "#F59E0B", "#A78BFA", "#F472B6"]
@@ -225,6 +225,32 @@ export function writePref(key, value) {
   }
 }
 
+export function removePref(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+export function readJsonPref(key, fallback) {
+  try {
+    var raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+export function writeJsonPref(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
 export function isStrategyAutoPopulateEnabled() {
   if (dom.strategyAutoPopulate) {
     return Boolean(dom.strategyAutoPopulate.checked);
@@ -238,14 +264,8 @@ export function syncStrategyAutoPopulateUI() {
 }
 
 function readPullPrefsMap() {
-  try {
-    var raw = window.localStorage.getItem(PULL_PREFS_KEY);
-    if (!raw) return {};
-    var parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (_err) {
-    return {};
-  }
+  var parsed = readJsonPref(PULL_PREFS_KEY, null);
+  return parsed && typeof parsed === "object" ? parsed : {};
 }
 
 export function readTickerPullPrefs(ticker) {
@@ -267,11 +287,7 @@ export function writeTickerPullPrefs(ticker) {
       ? Boolean(dom.includeShortDteToggle.checked)
       : defaultIncludeShortDte(),
   };
-  try {
-    window.localStorage.setItem(PULL_PREFS_KEY, JSON.stringify(map));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(PULL_PREFS_KEY, map);
 }
 
 function selectHasEnabledOption(selectEl, targetVal) {
@@ -314,6 +330,7 @@ export function applyTickerPullPrefsToControls(ticker) {
       dom.includeShortDteToggle.checked = defaultIncludeShortDte();
     }
   }
+  syncPullScopeSummary();
   return applied;
 }
 
@@ -635,6 +652,24 @@ export function buildActivePullScopeText() {
   return "Step " + stepTxt + " | " + rangeTxt + " | " + dteWin.label + shortSuffix;
 }
 
+export function syncPullScopeSummary() {
+  if (!dom.pullScopeSummary) return;
+  var stepTxt =
+    dom.stepSelect && dom.stepSelect.value === "auto"
+      ? "Auto"
+      : dom.stepSelect
+        ? formatStepShort(Number(dom.stepSelect.value))
+        : "Auto";
+  var rangeTxt = dom.rangeSelect ? formatRangeShort(Number(dom.rangeSelect.value || 0.2)) : "\u00B120%";
+  var dteWin = parseDashboardDteWindow(dom.dteMaxSelect ? dom.dteMaxSelect.value : "120");
+  var shortSuffix =
+    !dteWin.isShortIncluded && dom.includeShortDteToggle && dom.includeShortDteToggle.checked
+      ? " (+0\u201329d)"
+      : "";
+  dom.pullScopeSummary.textContent =
+    stepTxt + " \u2022 " + rangeTxt + " \u2022 " + dteWin.label + shortSuffix;
+}
+
 export function formatExpiryIso(rawExpiry) {
   var s = String(rawExpiry || "").trim();
   if (/^\d{8}$/.test(s)) {
@@ -643,15 +678,30 @@ export function formatExpiryIso(rawExpiry) {
   return s;
 }
 
-export function formatStrikeShort(val) {
+export function formatStrikeShort(val, emptyFallback) {
   if (val === null || val === undefined || Number.isNaN(Number(val))) {
-    return "—";
+    return emptyFallback !== undefined ? emptyFallback : "\u2014";
   }
   var n = Number(val);
   if (Math.abs(n - Math.round(n)) < 1e-6) {
     return "$" + Math.round(n).toString();
   }
   return "$" + n.toFixed(2);
+}
+
+export var PRESET_STRATEGY_LABELS = {
+  BULL_PUT_SPREAD: "Bull Put",
+  BEAR_CALL_SPREAD: "Bear Call",
+  BULL_CALL_SPREAD: "Bull Call",
+  BEAR_PUT_SPREAD: "Bear Put",
+  DIAGONAL_SPREAD: "Diagonal",
+  IRON_CONDOR: "Iron Condor",
+};
+
+export function formatStrategyShortLabel(kind) {
+  if (!kind) return "\u2014";
+  if (kind === "CUSTOM") return "Custom";
+  return PRESET_STRATEGY_LABELS[kind] || String(kind).replace(/_/g, " ");
 }
 
 export function fmtNum(val, decimals) {
@@ -813,6 +863,7 @@ export function resetControlCapabilities() {
   if (dom.stepSelect && !dom.stepSelect.value) {
     dom.stepSelect.value = "auto";
   }
+  syncPullScopeSummary();
 }
 
 export function syncControlCapabilities(caps) {
@@ -822,6 +873,7 @@ export function syncControlCapabilities(caps) {
   }
   applySelectCapabilityList(dom.rangeSelect, caps.available_range_pcts, formatRangeShort);
   applySelectCapabilityList(dom.stepSelect, caps.available_strike_steps, formatStepShort);
+  syncPullScopeSummary();
 }
 
 function syncSelectToNumeric(selectEl, targetVal, labelFn) {
@@ -868,6 +920,7 @@ export function syncControlsFromMeta(meta, options) {
   } else {
     applyTickerPullPrefsToControls(tickerKey);
   }
+  syncPullScopeSummary();
   // Keep #strike-step-select on Auto unless the user explicitly selected a manual numeric step.
 }
 
@@ -1005,10 +1058,95 @@ export function showBanner(kind, message, meta) {
   }, 750);
 }
 
+var LOGO_FALLBACK_PALETTE = [
+  "#1D4ED8",
+  "#0F6E4F",
+  "#B45309",
+  "#6D28D9",
+  "#0E7490",
+  "#9A3412",
+  "#374151",
+  "#991B1B",
+];
+var failedLogos = {};
+
+export function logoMonogramColor(sym) {
+  var s = String(sym || "").toUpperCase();
+  var hash = 0;
+  for (var i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return LOGO_FALLBACK_PALETTE[hash % LOGO_FALLBACK_PALETTE.length];
+}
+
+export function populateLogoBadge(wrap, sym) {
+  if (!wrap) return wrap;
+  var ticker = String(sym || "").trim().toUpperCase();
+  wrap.innerHTML = "";
+  wrap.classList.remove("has-img");
+  wrap.setAttribute("data-logo-ticker", ticker);
+
+  var fb = document.createElement("span");
+  fb.className = "wl-logo__fallback";
+  fb.textContent = ticker.slice(0, 2);
+  fb.style.backgroundColor = logoMonogramColor(ticker);
+  wrap.appendChild(fb);
+
+  if (!ticker || failedLogos[ticker]) {
+    return wrap;
+  }
+
+  var img = document.createElement("img");
+  img.className = "wl-logo__img";
+  img.alt = "";
+  img.width = 18;
+  img.height = 18;
+  img.loading = "lazy";
+  img.decoding = "async";
+  img.draggable = false;
+  img.setAttribute("draggable", "false");
+  img.onload = function () {
+    wrap.classList.add("has-img");
+  };
+  img.onerror = function () {
+    failedLogos[ticker] = true;
+    wrap.classList.remove("has-img");
+    if (img.parentNode === wrap) {
+      wrap.removeChild(img);
+    }
+  };
+  img.src = "/api/logo/" + encodeURIComponent(ticker);
+  if (img.complete && Number(img.naturalWidth) > 0) {
+    wrap.classList.add("has-img");
+  }
+  wrap.appendChild(img);
+  return wrap;
+}
+
+export function buildLogoBadge(sym) {
+  var wrap = document.createElement("span");
+  wrap.className = "wl-logo";
+  wrap.setAttribute("aria-hidden", "true");
+  return populateLogoBadge(wrap, sym);
+}
+
+export function syncActiveTickerLogo(ticker) {
+  var sym = String(ticker || "").trim().toUpperCase();
+  [dom.watchlistActiveLogo, dom.stickyLogo].forEach(function (el) {
+    if (!el) return;
+    if (el.getAttribute("data-logo-ticker") === sym) return;
+    populateLogoBadge(el, sym);
+  });
+}
+
 export function setActiveTickerUI(ticker) {
   if (dom.watchlistActive) {
     dom.watchlistActive.textContent = ticker;
   }
+  if (dom.stickyTicker) {
+    dom.stickyTicker.textContent = ticker;
+  }
+  syncActiveTickerLogo(ticker);
   if (dom.watchlistRows) {
     var rows = dom.watchlistRows.querySelectorAll("[data-wl-row]");
     for (var i = 0; i < rows.length; i++) {

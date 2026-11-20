@@ -87,12 +87,37 @@
   }
   .backtest-tables-grid {
     grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .backtest-tables-splitter {
+    display: none;
+  }
+  .control-group--network {
+    border-left: 0;
+    padding-left: 0;
+  }
+  .sticky-context-walls,
+  .sticky-context-snap {
+    display: none;
   }
 }
 
 @media (max-width: 680px) {
   .dashboard-shell {
     padding: 10px 10px 24px;
+  }
+  .workspace-scope-legend,
+  .sticky-context-tabs {
+    display: none;
+  }
+  .pull-scope-picker__panel {
+    right: auto;
+    left: 0;
+    min-width: 0;
+    width: calc(100vw - 24px);
+  }
+  .sticky-context-inner {
+    padding: 6px 10px;
   }
   .kpi-strip,
   .corridor-kpi-strip,

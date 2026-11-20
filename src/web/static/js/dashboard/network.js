@@ -317,6 +317,10 @@ export async function refreshFromIBKR() {
     dom.refreshBtn.disabled = true;
     dom.refreshBtn.textContent = "REFRESHING...";
   }
+  if (dom.stickyRefreshBtn) {
+    dom.stickyRefreshBtn.disabled = true;
+    dom.stickyRefreshBtn.textContent = "REFRESHING...";
+  }
 
   var rangeVal = dom.rangeSelect ? Number(dom.rangeSelect.value) : 0.2;
   var stepRaw = dom.stepSelect ? dom.stepSelect.value : "auto";
@@ -457,6 +461,10 @@ export async function refreshFromIBKR() {
     if (dom.refreshBtn) {
       dom.refreshBtn.disabled = Boolean(state.watchlistBatchBusy);
       dom.refreshBtn.textContent = "REFRESH FROM IBKR";
+    }
+    if (dom.stickyRefreshBtn) {
+      dom.stickyRefreshBtn.disabled = Boolean(state.watchlistBatchBusy);
+      dom.stickyRefreshBtn.textContent = "REFRESH";
     }
     // Lock holder finished: lets the Best Option screener auto-resume its live stream.
     document.dispatchEvent(new Event("ibkr:lock-released"));

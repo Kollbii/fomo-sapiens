@@ -20,7 +20,14 @@ def test_every_agent_renders_for_both_platforms() -> None:
     agents = sync_agents.load_agents()
     names = {a.name for a in agents}
     assert {"broker-storage-eng", "quant-analytics-eng", "ui-frontend-eng"} <= names
-    assert {"doc-sync-auditor", "qa-git-runner", "safety-reviewer"} <= names
+    assert {
+        "doc-sync-auditor",
+        "qa-git-runner",
+        "safety-reviewer",
+        "ux-ui-reviewer",
+        "refactoring-specialist",
+        "performance-optimizer",
+    } <= names
     rendered = sync_agents.render_all()
     assert len(rendered) == 2 * len(agents) + 1  # + .gemini/settings.json
     for path, content in rendered.items():
@@ -32,7 +39,13 @@ def test_every_agent_renders_for_both_platforms() -> None:
 
 def test_read_only_agents_have_no_mutation_tools() -> None:
     by_name = {a.name: a for a in sync_agents.load_agents()}
-    for name in ("safety-reviewer", "qa-git-runner"):
+    for name in (
+        "safety-reviewer",
+        "ux-ui-reviewer",
+        "refactoring-specialist",
+        "performance-optimizer",
+        "qa-git-runner",
+    ):
         assert not {"edit", "write"} & set(by_name[name].tools), name
 
 
@@ -65,6 +78,7 @@ def test_gemini_thinking_overrides_follow_profiles() -> None:
     settings = json.loads(sync_agents.render_gemini_settings(agents, models, {"ui": {"x": 1}}))
     assert settings["ui"] == {"x": 1}  # unrelated user settings preserved
     assert set(models["gemini_models"].values()) >= {
+        "gemini-4-neon",
         "gemini-4-argon",
         "gemini-4-hydrogen",
         "gemini-3.8-flash",

@@ -284,9 +284,68 @@ def test_index_bootstrap_uses_store_watchlist(tmp_path: Path) -> None:
 
     html = run_virtual_loop(_scenario())
     assert '"AAPL"' in html
+    assert 'id="watchlist-active-logo"' in html
     for sym in SEED:
         assert f'"{sym}"' in html
     assert svc.watchlist.cached_tickers()[-1] == "AAPL"
+
+
+def test_logo_route_caches_serves_headers_and_handles_missing_and_invalid(tmp_path: Path) -> None:
+    from src.services.logos import UpstreamFetchResult
+
+    app, svc, _batch = _app(tmp_path)
+    svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">'
+        b'<rect width="16" height="16"/></svg>'
+    )
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
+    calls: list[str] = []
+    mode = {"nvda": "svg"}
+
+    def _fetcher(symbol: str) -> UpstreamFetchResult:
+        calls.append(symbol)
+        if symbol == "NVDA":
+            if mode["nvda"] == "png":
+                return UpstreamFetchResult(status="ok", data=png, ext="png")
+            return UpstreamFetchResult(status="ok", data=svg, ext="svg")
+        if symbol == "SPCX":
+            return UpstreamFetchResult(status="not_found")
+        return UpstreamFetchResult(status="error")
+
+    svc.logos.fetcher = _fetcher
+    svc.logos.runner = _inline
+
+    async def _scenario() -> None:
+        async with _client(app) as client:
+            r1 = await client.get("/api/logo/nvda")
+            assert r1.status_code == 200
+            assert r1.headers["content-type"].startswith("image/svg+xml")
+            assert r1.headers["x-content-type-options"] == "nosniff"
+            assert r1.headers["content-security-policy"] == "sandbox"
+            assert r1.content == svg
+
+            # Second request served from local cache
+            r2 = await client.get("/api/logo/NVDA")
+            assert r2.status_code == 200
+            assert calls == ["NVDA"]
+
+            # Forced refresh updates file
+            mode["nvda"] = "png"
+            r3 = await client.get("/api/logo/NVDA", params={"refresh": "true"})
+            assert r3.status_code == 200
+            assert r3.headers["content-type"].startswith("image/png")
+            assert r3.content == png
+
+            # Missing / offline -> 404
+            r_miss = await client.get("/api/logo/SPCX")
+            assert r_miss.status_code == 404
+
+            # Invalid ticker -> 422
+            r_bad = await client.get("/api/logo/BAD$TICKER")
+            assert r_bad.status_code == 422
+            assert r_bad.json()["error_code"] == "INVALID_TICKER"
+
+    run_virtual_loop(_scenario())
 
 
 # ------------------------------------------------------------------ shutdown order

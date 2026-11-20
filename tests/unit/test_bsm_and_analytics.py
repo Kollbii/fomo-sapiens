@@ -522,3 +522,76 @@ def test_short_and_zero_dte_bsm_walls_anomalies_and_term_profiles() -> None:
     assert [e.dte for e in profiles.expiries] == [0, 14]
     assert profiles.expiries[0].atm_strike == 100.0
     assert profiles.expiries[0].atm_iv == pytest.approx(0.45, abs=1e-4)
+
+
+def test_compute_walls_single_pass_edge_cases() -> None:
+    with pytest.raises(ValueError, match="top_n"):
+        compute_walls(_to_df([_make_row(conid=900)]), top_n=0)
+
+    # Multi-DTE ordering (dte asc, expiry asc), duplicate strike aggregation,
+    # and zero-activity expiry preserved in by_dte.
+    rows = [
+        _make_row(
+            conid=901,
+            dte=45,
+            expiry="2026-12-31",
+            right="C",
+            strike=120.0,
+            open_interest=0,
+            volume=0,
+        ),
+        _make_row(
+            conid=902,
+            dte=37,
+            expiry="2026-12-18",
+            right="C",
+            strike=110.0,
+            open_interest=500,
+            volume=50,
+        ),
+        _make_row(
+            conid=903,
+            dte=37,
+            expiry="2026-12-11",
+            right="C",
+            strike=105.0,
+            open_interest=300,
+            volume=40,
+        ),
+        _make_row(
+            conid=904,
+            dte=37,
+            expiry="2026-12-11",
+            right="C",
+            strike=105.0,
+            open_interest=400,
+            volume=60,
+        ),
+    ]
+    report = compute_walls(_to_df(rows), top_n=2)
+    assert [(w.dte, w.expiry) for w in report.by_dte] == [
+        (37, "2026-12-11"),
+        (37, "2026-12-18"),
+        (45, "2026-12-31"),
+    ]
+    assert report.aggregate_primary_call_wall is not None
+    assert report.aggregate_primary_call_wall.strike == 105.0
+    assert report.aggregate_primary_call_wall.open_interest == 700
+    assert report.aggregate_primary_call_wall.volume == 100
+    assert report.by_dte[2].primary_call_wall is None
+    assert report.by_dte[2].primary_put_wall is None
+    assert report.by_dte[2].top_call_walls == []
+    assert report.by_dte[2].top_put_walls == []
+
+    zero_spot = compute_walls(
+        _to_df(
+            [
+                {
+                    **_make_row(conid=905, right="C", strike=105.0, open_interest=100),
+                    "underlying_price": 0.0,
+                }
+            ]
+        )
+    )
+    assert zero_spot.aggregate_primary_call_wall is not None
+    assert zero_spot.aggregate_primary_call_wall.distance_from_spot_pct == 0.0

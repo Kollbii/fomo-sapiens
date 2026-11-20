@@ -24,7 +24,7 @@ You own the HTTP adapter and the browser. `src/web/` may import only `src.core` 
 `src/services/` (owned by `broker-storage-eng`) and math/socket logic never enters `src/web/`.
 
 ## 1. Navigating Large Files (mandatory token rule)
-Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (21 ES modules, incl. `watchlist.js`, `screener.js`; `main.js` entry) and `src/web/static/css/*.css` (12 files split per dashboard row). Open only the module for the panel you touch; `index.html` (~1450 lines) is still large.
+Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (22 ES modules, incl. `watchlist.js`, `screener.js`, `workspace.js`; `main.js` entry) and `src/web/static/css/*.css` (12 files split per dashboard row). Open only the module for the panel you touch; `index.html` (~1575 lines) is still large.
 - Find: search (`rg -n`, `grep -rn`, or PowerShell `Select-String`) for `"function renderStrategyPayoffChart"` inside `src/web/static/js/dashboard/`.
 - Then read a bounded range (e.g. 120 lines) around the hit. Same for CSS selectors and element ids.
 - New cross-module function: `export` it and add it to the importer's `import { ... }` list;
@@ -37,10 +37,13 @@ Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (21 ES modul
 - Corridor live quotes and `/api/ledger/mtm` marks overlay in-memory caches only; Mode 1 chain CSVs and `data/ledger/*.csv` archives are never mutated silently.
 - Boot must succeed with the Gateway closed (Offline Cache Mode), including `LedgerService.ensure_layout()` and `PaperTradeStore.ensure_layout()`.
 
-## 3. Frontend Rules
-- Themes: `data-theme="print"` (NYT newsprint `#FBF9F5`, black serif, `3px double` rules) and `data-theme="terminal"` (`#0B0D10`, ivory serif, emerald/rose/amber). Persist in `localStorage`; re-skin every Plotly chart on toggle without refetching.
-- Colors/fonts only via CSS custom properties defined in `tokens.css` (row styles live in the matching `css/*.css` file, incl. `ledger.css`, `snapshot_picker.css`, `backtest.css`); numbers use `--font-mono` + `font-variant-numeric: tabular-nums`.
-- Keep `#editorial-banner-slot` structural; keep `.panel-toggle-pill` as the only panel-toggle style (`9` panels including visible-by-default `Trade Ledger`, `Backtest` and `Best Option`).
+## 3. Frontend Rules & Golden UI/UX Checklist
+- **Themes & Tokens:** `data-theme="print"` (NYT newsprint `#FBF9F5`, black serif, `3px double` rules) and `data-theme="terminal"` (`#0A0D12`, ivory serif, crisp Cyan `#38BDF8` `--accent-primary` CTA, emerald/red calls/puts, Amber `#F59E0B` `--accent-warn` strictly for warnings/delayed). Persist in `localStorage`; re-skin every Plotly chart on toggle without refetching.
+- **Colors & Design System Hygiene:** Colors, shadows, and overlays ONLY via CSS custom properties defined identically for both themes in `tokens.css` (row styles live in `css/*.css`). Zero hardcoded hex, `rgb()`, `rgba()`, or `hsl()` values outside `tokens.css`.
+- **Canonical Components:** Card headers MUST use `<header class="panel-header">` + `.panel-title-stack` + `.panel-controls` (no dead `.panel-head` classes); buttons use `.btn` / `.btn-primary` / `.btn-sm` / `.btn-xs` / `.btn--network` (plus `.wl-btn-small` in watchlist footer); badges use defined `.badge--*` variants; workspace tabs use `.workspace-tab` and panel switches use `.panel-toggle-pill` exclusively (`9` panels across `Discover & Desk`, `Portfolio`, `Backtest`, and `All Panels` workspaces).
+- **Typography Discipline (Pure Two-Voice Editorial Terminal) & Accessibility:** `--font-editorial` (`Newsreader`) for headlines/titles; `--font-mono` (`JetBrains Mono`) + `font-variant-numeric: tabular-nums` uniformly for ALL UI chrome (buttons, labels, pills, tabs), prose/notices (`12px`), and tabular financial data (`>= 10px` badge floor). Never introduce `--font-sans` outside `.wl-logo__fallback` monogram avatars (avoid 3-font toolbar collisions). Clear WCAG 2.1 AA (`>= 4.5:1`) contrast and `:focus-visible` `2px solid var(--accent-focus)` outlines on every interactive control.
+- **Progressive Disclosure & Plain Language:** Favor Overview -> Filter -> Details; explain domain flags/errors in plain English with technical tracebacks tucked in `<details>` or tooltips; make Network (IBKR/Flex) vs. Local-Cache actions unmistakable.
+- Keep `#editorial-banner-slot` structural.
 - Network to IBKR/Flex only on explicit user click/toggle (Refresh, Corridor, the opt-in Best Option `Live` checkbox, `[Sync Flex / Gateway]`, `[Refresh Open MTM]`). Strategy Lab auto-build, Backtest simulation / Paper Trade registration, stop & Trade Ledger sync (`POST /api/backtest/paper-trades/sync-ledger`, plus Replay triggers from Trade Ledger), and Trade Ledger filter/window/view/group queries (`GET /api/ledger`) stay cache/local-only; active paper-trade legs are quoted strictly as post-refresh follow-up inside manual Refresh (no background daemon); keep `Realized & Credits` strictly separated from `Open & Unrealized MTM` (with `ibkr_ledger_prefs_v1`).
 - Plotly: `Plotly.react` for updates; `if (!el.data) el.innerHTML = ""`; `Plotly.purge(el)` before placeholders; no HTML entities (`&bull;`, `&mdash;`) in JS strings — use `\u2022` / `\u2014`.
 - After any CSS/JS edit, bump the `?v=` cache-busters in `base.html` (stylesheet loop) and `index.html` (`dashboard/main.js`).
@@ -48,7 +51,7 @@ Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (21 ES modul
 
 ## 4. Testing
 - Backend: `httpx`/`TestClient` against offline CSV fixtures in `tmp_path`; mock the broker client. Cover the happy path, `422`, `404`, and `503` for every new route.
-- Frontend has no full browser test suite: after JS edits run `make js-check` (`tests/unit/test_js_check.py` covers `scripts/js_check.py`) plus the Node.js ES-module unit suites (`tests/unit/test_corridor_strategy_sync_js.py`, `tests/unit/test_watchlist_marquee_js.py`), optionally run `node --input-type=module` smoke checks on pure helpers in `src/web/static/js/dashboard/helpers.js`, and describe a manual verification path in `notes:`.
+- Frontend verification: after HTML/CSS/JS edits run `make js-check` (`tests/unit/test_js_check.py`), `pytest tests/unit/test_ui_integrity.py tests/unit/test_docs_consistency.py`, plus the Node.js ES-module unit suites (`tests/unit/test_corridor_strategy_sync_js.py`, `tests/unit/test_watchlist_marquee_js.py`, `tests/unit/test_backtest_ui_js.py`, `tests/unit/test_workspace_ui_js.py`), optionally run `node --input-type=module` smoke checks on pure helpers in `src/web/static/js/dashboard/helpers.js`, and describe a manual verification path in `notes:`. Before committing CSS/HTML/JS work, route through `ux-ui-reviewer`.
 - Offline end-to-end smoke coverage lives in `tests/integration/test_offline_fixture_smoke.py` (golden CSV in `tests/fixtures/snapshots/`); extend it when adding page-level features.
 
 ## Scope (Context Diet)
@@ -65,6 +68,9 @@ Frontend code is split by panel: `src/web/static/js/dashboard/*.js` (21 ES modul
 - `tests/unit/test_js_check.py`
 - `tests/unit/test_corridor_strategy_sync_js.py`
 - `tests/unit/test_watchlist_marquee_js.py`
+- `tests/unit/test_backtest_ui_js.py`
+- `tests/unit/test_workspace_ui_js.py`
+- `tests/unit/test_ui_integrity.py`
 
 **Reads (context diet — nothing else on startup):**
 - docs/UI_UX_GUIDELINES.md (the UI contract — tokens, layout rows, behavioral rules; always)

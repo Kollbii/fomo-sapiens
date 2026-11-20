@@ -173,6 +173,7 @@ export function renderChainBadges(meta) {
     if (counts.NONE) parts.push("NONE:" + counts.NONE);
     dom.greeksBadge.textContent = "GREEKS: " + (parts.length ? parts.join(" / ") : "—");
   }
+  syncStickyContextBar(state.chainData);
 }
 
 // ------------------------------------------------------------------ KPI Strip
@@ -184,12 +185,44 @@ function setKpi(cardEl, valueText, subText) {
   if (subEl) subEl.textContent = subText;
 }
 
+export function syncStickyContextBar(data) {
+  if (dom.stickyTicker) {
+    dom.stickyTicker.textContent = state.ticker || "NVDA";
+  }
+  if (!data || !data.meta) {
+    if (dom.stickySpot) dom.stickySpot.textContent = "\u2014";
+    if (dom.stickyWalls) dom.stickyWalls.textContent = "CW \u2014 | PW \u2014";
+    if (dom.stickySnap) dom.stickySnap.textContent = "NO CACHE";
+    return;
+  }
+  var meta = data.meta;
+  var walls = data.walls || {};
+  if (dom.stickySpot) {
+    dom.stickySpot.textContent = fmtMoney(meta.underlying_price);
+  }
+  if (dom.stickyWalls) {
+    var cw = walls.aggregate_primary_call_wall;
+    var pw = walls.aggregate_primary_put_wall;
+    var cwText = cw ? "$" + fmtNum(cw.strike, cw.strike % 1 ? 2 : 0) : "\u2014";
+    var pwText = pw ? "$" + fmtNum(pw.strike, pw.strike % 1 ? 2 : 0) : "\u2014";
+    dom.stickyWalls.textContent = "CW " + cwText + " | PW " + pwText;
+  }
+  if (dom.stickySnap) {
+    var mdTag =
+      meta.market_data_type !== null && meta.market_data_type !== undefined
+        ? " \u2022 T" + meta.market_data_type
+        : "";
+    dom.stickySnap.textContent = String(meta.market_date || "CACHE") + mdTag;
+  }
+}
+
 export function renderKpis(data) {
   if (!data) {
     setKpi(dom.kpiSpot, "—", "No cached snapshot for " + state.ticker);
     setKpi(dom.kpiCallWall, "—", "Click REFRESH FROM IBKR");
     setKpi(dom.kpiPutWall, "—", "Click REFRESH FROM IBKR");
     setKpi(dom.kpiAnomalies, "—", "0 flagged contracts");
+    syncStickyContextBar(null);
     return;
   }
 
@@ -255,4 +288,5 @@ export function renderKpis(data) {
       anomalies.high_zscore_count +
       " High Z-score"
   );
+  syncStickyContextBar(data);
 }

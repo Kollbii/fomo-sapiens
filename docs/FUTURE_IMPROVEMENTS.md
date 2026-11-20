@@ -70,3 +70,15 @@
 - **Status:** `[PLANNED — POPULATES RESERVED #editorial-banner-slot]`
 - **Specification:**
   - Deterministic rule-based synthesis engine (`src/analytics/narrative.py`) that populates the reserved `#editorial-banner-slot` in `index.html` with a 2-paragraph journalistic summary of the current ticker's Primary Call/Put Walls, dominant DTE volume concentration, and highest Z-score strike anomalies.
+
+---
+
+## 7. Frontend UX & Navigation Modernization Roadmap (Phases 2 & 3)
+- **Status:** `[PARTIALLY IMPLEMENTED — PHASE 2 WORKSPACE TABS, STICKY BAR & PULL-SCOPE POPOVER DONE; PHASE 3 PLANNED]`
+- **Context:** Following the Golden UI/UX Standards pass (Phase 0 & Phase 1: canonical components, zero hardcoded CSS colors, WCAG 2.1 AA contrast, Pure Two-Voice typography, Terminal Cyan primary accent, and `ux-ui-reviewer` gate):
+  - **Phase 2 — Focused Workspace Navigation & Row 3 Declutter (`[IMPLEMENTED]`):**
+    - Workspace Mode Tabs (`#workspace-tabs`: `Discover & Desk` default showing `#best-option-card` first + Trade Desk; `Portfolio` for Trade Ledger; `Backtest` for Backtester; `All Panels` classic full scroll) paired with `#sticky-context-bar` on scroll.
+    - Moved advanced pull-scope controls (`Range %`, `Strike Step`, `0–29d Backtest`, local `DTE` window) into `#pull-scope-picker` popover beside `[REFRESH FROM IBKR]` with summary telemetry and `.btn--network` / `.scope-tag` visual indicators.
+  - **Phase 3 — Backtest Polish & Power-User Ergonomics (`[PLANNED]`):**
+    - Plain-English Backtest quality/trade flag pills with explanatory hover tooltips and a collapsible Advanced Portfolio Rules drawer for secondary backtest settings.
+    - Keyboard command palette (`Ctrl+K` / `/`) for quick ticker switching and panel navigation, plus subtle non-blocking action toast feedback when adding `+Leg` contracts or sending positions to Backtest Replay.

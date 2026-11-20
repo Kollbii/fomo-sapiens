@@ -64,6 +64,7 @@ from src.services.corridor import (
 )
 from src.services.error_messages import GENERIC_ERROR_MESSAGE, describe_error
 from src.services.ledger import LedgerService
+from src.services.logos import LogoService
 from src.services.paper_trades import PaperTradeService
 from src.services.schemas import (
     ChainAnalyticsResponse,
@@ -88,6 +89,7 @@ from src.services.screener_live import ScreenerLiveService, screener_stop_notice
 from src.services.watchlist import WatchlistService
 from src.storage.csv_repository import CSVRepository
 from src.storage.ledger_repository import LedgerRepository
+from src.storage.logo_store import LogoStore, resolve_logo_cache_dir
 from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     OPTION_CHAIN_POLARS_SCHEMA,
@@ -189,6 +191,7 @@ class AnalyzerService:
         ledger_service: LedgerService | None = None,
         paper_trades: PaperTradeService | None = None,
         watchlist_service: WatchlistService | None = None,
+        logo_service: LogoService | None = None,
     ) -> None:
         self.settings = settings or get_settings()
         self.repo = repo or CSVRepository(self.settings.storage)
@@ -242,6 +245,9 @@ class AnalyzerService:
             ),
             self.repo,
             clock=self.fetcher.clock,
+        )
+        self.logos = logo_service or LogoService(
+            LogoStore(resolve_logo_cache_dir(self.settings.storage, root=self.repo.root))
         )
         self._ticker_capabilities: dict[str, tuple[list[float], list[float], int]] = {}
         self.corridor_cache = CorridorQuoteCache()
@@ -450,6 +456,7 @@ class AnalyzerService:
         self.ledger.ensure_layout()
         self.paper_trades.ensure_layout()
         self.watchlist.ensure_layout()
+        self.logos.ensure_layout()
         if hasattr(self.ledger, "repo") and self.ledger.repo.load_positions().height > 0:
             self._safe_sync_paper_trades_from_ledger("startup")
 
@@ -731,10 +738,7 @@ class AnalyzerService:
         df, explicit_filter = self._isolate_dashboard_dte(df, dte_min=dte_min, dte_max=dte_max)
         if explicit_filter and df.height == 0:
             raise SnapshotNotFoundError(f"No contracts found in requested DTE range for {symbol}")
-        snap_meta = next(
-            (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
-            None,
-        )
+        snap_meta = self.repo.get_snapshot_meta(symbol, loaded_snap_id)
         has_meta_quality = (
             snap_meta is not None
             and df.height == snap_meta.contract_count

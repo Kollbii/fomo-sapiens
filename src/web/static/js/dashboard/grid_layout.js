@@ -1,26 +1,21 @@
 /* IBKR Options Analyzer dashboard — Snap-to-grid panel resizing and Plotly resize scheduling. */
 
+import {
+  readJsonPref,
+  writeJsonPref,
+} from "./helpers.js";
+
 var SNAP_COLS = [4, 6, 8, 12];
 var SNAP_HEIGHTS = [290, 350, 410, 470, 530, 590, 650, 720, 800, 880, 960, 1080];
 var GRID_LAYOUT_KEY = "ibkr_chart_grid_layout_v1";
 
 function readGridLayoutPrefs() {
-  try {
-    var raw = window.localStorage.getItem(GRID_LAYOUT_KEY);
-    if (!raw) return {};
-    var parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (_err) {
-    return {};
-  }
+  var parsed = readJsonPref(GRID_LAYOUT_KEY, null);
+  return parsed && typeof parsed === "object" ? parsed : {};
 }
 
 function writeGridLayoutPrefs(layoutMap) {
-  try {
-    window.localStorage.setItem(GRID_LAYOUT_KEY, JSON.stringify(layoutMap));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(GRID_LAYOUT_KEY, layoutMap);
 }
 
 function nearestSnapValue(value, candidates) {

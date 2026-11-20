@@ -8,7 +8,7 @@ import json
 import logging
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 import pytest
@@ -38,12 +38,20 @@ from tests.support.aio import run_virtual_loop
 
 SECRET = "token=SUPERSECRET at C:\\Users\\someone\\stack.py line 42"
 
+_T = TypeVar("_T")
+
+
+async def _inline(func: Callable[[], _T]) -> _T:
+    return func()
+
 
 def _app(tmp_path: Path) -> tuple[FastAPI, AnalyzerService]:
     settings = Settings(storage=StorageSettings())
     repo = CSVRepository(settings.storage, root=tmp_path)
     app = create_app(settings=settings, repo=repo)
     svc: AnalyzerService = app.state.service
+    svc.watchlist.runner = _inline
+    svc.screener.runner = _inline
     return app, svc
 
 
@@ -124,7 +132,7 @@ def _run(app: FastAPI, scenario: Callable[[httpx.AsyncClient], Awaitable[Any]]) 
         async with _client(app) as client:
             return await scenario(client)
 
-    return asyncio.run(_go())
+    return run_virtual_loop(_go())
 
 
 # ------------------------------------------------------------------ run
@@ -259,7 +267,7 @@ def test_stream_client_disconnect_closes_stream(tmp_path: Path) -> None:
         assert "event: frame" in str(await body.__anext__())
         await body.aclose()
 
-    asyncio.run(_scenario())
+    run_virtual_loop(_scenario())
     assert stream.closed == 1
 
 
@@ -497,5 +505,5 @@ def test_sse_response_closes_stream_when_send_is_cancelled(tmp_path: Path) -> No
         with contextlib.suppress(BaseException):
             await resp({"type": "http", "asgi": {"spec_version": "2.3"}}, _receive, _send)
 
-    asyncio.run(_scenario())
+    run_virtual_loop(_scenario())
     assert stream.closed >= 1

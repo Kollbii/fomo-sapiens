@@ -14,14 +14,6 @@ import {
   apiJson,
 } from "./network.js";
 
-export function toIsoExpiry(rawExpiry) {
-  var s = String(rawExpiry || "").trim();
-  if (/^\d{8}$/.test(s)) {
-    return s.slice(0, 4) + "-" + s.slice(4, 6) + "-" + s.slice(6, 8);
-  }
-  return s;
-}
-
 export function setBacktestNotice(tone, msg) {
   if (!dom.backtestWarnings) return;
   if (!msg) {
@@ -38,7 +30,7 @@ function defaultLegFromChain() {
   if (state.chainData && state.chainData.contracts && state.chainData.contracts.length) {
     var midIdx = Math.floor(state.chainData.contracts.length / 2);
     var sample = state.chainData.contracts[midIdx] || state.chainData.contracts[0];
-    exp = toIsoExpiry(sample.expiry);
+    exp = formatExpiryIso(sample.expiry);
     strike = Number(sample.strike) || 100;
   }
   return { side: "SELL", right: "P", expiry: exp, strike: strike, qty: 1 };
@@ -68,7 +60,7 @@ export function renderCustomLegsEditor() {
       '<option value="C"' + (leg.right === "C" ? " selected" : "") + ">Call</option>" +
       "</select></td>" +
       '<td><input class="input-control" type="text" placeholder="YYYY-MM-DD" data-bt-leg-field="expiry" value="' +
-      escapeHtml(toIsoExpiry(leg.expiry)) +
+      escapeHtml(formatExpiryIso(leg.expiry)) +
       '" aria-label="Leg Expiry" /></td>' +
       '<td><input class="input-control" type="number" step="0.5" min="0.01" data-bt-leg-field="strike" value="' +
       escapeHtml(leg.strike) +
@@ -96,7 +88,7 @@ export function readCustomLegsFromUI() {
     var expEl = row.querySelector('[data-bt-leg-field="expiry"]');
     var strikeEl = row.querySelector('[data-bt-leg-field="strike"]');
     var qtyEl = row.querySelector('[data-bt-leg-field="qty"]');
-    var expiry = toIsoExpiry(expEl ? expEl.value : "");
+    var expiry = formatExpiryIso(expEl ? expEl.value : "");
     var strike = Number(strikeEl ? strikeEl.value : 0);
     var qty = parseInt(qtyEl ? qtyEl.value : "1", 10) || 1;
     out.push({
@@ -137,7 +129,7 @@ export function copyStrategyLabLegsToBacktest() {
     return {
       side: leg.side === "BUY" ? "BUY" : "SELL",
       right: leg.right === "C" ? "C" : "P",
-      expiry: toIsoExpiry(leg.expiry),
+      expiry: formatExpiryIso(leg.expiry),
       strike: Number(leg.strike),
       qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
     };
@@ -194,6 +186,79 @@ function populatePaperTradeSelect(trades) {
   }
 }
 
+export function setPaperTradesExpanded(expanded) {
+  var next = Boolean(expanded);
+  state.backtestPaperExpanded = next;
+  if (dom.backtestPaperDrawer) {
+    dom.backtestPaperDrawer.hidden = !next;
+  }
+  if (dom.backtestPaperToggle) {
+    dom.backtestPaperToggle.setAttribute("aria-expanded", next ? "true" : "false");
+  }
+  if (dom.backtestPaperToggleLabel) {
+    dom.backtestPaperToggleLabel.textContent = next ? "Hide" : "Show";
+  }
+  if (dom.backtestPaperStrip) {
+    dom.backtestPaperStrip.classList.toggle("is-expanded", next);
+  }
+}
+
+export function togglePaperTradesDrawer() {
+  setPaperTradesExpanded(!state.backtestPaperExpanded);
+}
+
+export function filterPaperTradesByTicker(trades, filterVal, activeTicker) {
+  if (!Array.isArray(trades)) return [];
+  var val = String(filterVal || "ALL").trim().toUpperCase();
+  if (!val || val === "ALL") return trades.slice();
+  var target = val === "CURRENT" ? String(activeTicker || "").trim().toUpperCase() : val;
+  if (!target) return [];
+  return trades.filter(function (pt) {
+    return String((pt && pt.ticker) || "").trim().toUpperCase() === target;
+  });
+}
+
+function syncPaperTickerFilterOptions(trades) {
+  var sel = dom.backtestPaperTickerFilter;
+  if (!sel) return;
+  var activeSym = String(state.ticker || "").trim().toUpperCase();
+  var seen = {};
+  var tickers = [];
+  for (var i = 0; i < trades.length; i++) {
+    var sym = String((trades[i] && trades[i].ticker) || "").trim().toUpperCase();
+    if (sym && !seen[sym]) {
+      seen[sym] = true;
+      tickers.push(sym);
+    }
+  }
+  tickers.sort();
+
+  var wanted = String(state.backtestPaperTickerFilter || "ALL").trim().toUpperCase();
+  if (wanted !== "ALL" && wanted !== "CURRENT" && !seen[wanted]) {
+    wanted = "ALL";
+    state.backtestPaperTickerFilter = "ALL";
+  }
+
+  sel.innerHTML = "";
+  var allOpt = document.createElement("option");
+  allOpt.value = "ALL";
+  allOpt.textContent = "All Tickers";
+  sel.appendChild(allOpt);
+
+  var curOpt = document.createElement("option");
+  curOpt.value = "CURRENT";
+  curOpt.textContent = activeSym ? "Active (" + activeSym + ")" : "Active Ticker";
+  sel.appendChild(curOpt);
+
+  for (var j = 0; j < tickers.length; j++) {
+    var opt = document.createElement("option");
+    opt.value = tickers[j];
+    opt.textContent = tickers[j];
+    sel.appendChild(opt);
+  }
+  sel.value = wanted;
+}
+
 export function renderPaperTradesList() {
   var trades = Array.isArray(state.backtestPaperTrades) ? state.backtestPaperTrades : [];
   populatePaperTradeSelect(trades);
@@ -204,15 +269,41 @@ export function renderPaperTradesList() {
       (state.backtestPaperMaxActive || 120) +
       " active";
   }
+  var activeSym = String(state.ticker || "").trim().toUpperCase();
+  if (dom.backtestPaperTickerCount) {
+    var activeCount = activeSym
+      ? trades.filter(function (pt) {
+          return String((pt && pt.ticker) || "").trim().toUpperCase() === activeSym;
+        }).length
+      : 0;
+    if (activeCount > 0) {
+      dom.backtestPaperTickerCount.hidden = false;
+      dom.backtestPaperTickerCount.textContent = activeCount + " for " + activeSym;
+    } else {
+      dom.backtestPaperTickerCount.hidden = true;
+      dom.backtestPaperTickerCount.textContent = "";
+    }
+  }
+  syncPaperTickerFilterOptions(trades);
   if (!dom.backtestPaperList) return;
   if (!trades.length) {
     dom.backtestPaperList.innerHTML =
       '<div class="backtest-paper-hint">No matching paper trades saved yet. Use <strong>Save Paper Trade</strong> above to track a position.</div>';
     return;
   }
-  var html = "";
-  for (var i = 0; i < trades.length; i++) {
-    var pt = trades[i];
+  var visibleTrades = filterPaperTradesByTicker(
+    trades,
+    state.backtestPaperTickerFilter,
+    state.ticker
+  );
+  if (!visibleTrades.length) {
+    dom.backtestPaperList.innerHTML =
+      '<div class="backtest-paper-hint">No paper trades match the current ticker filter.</div>';
+    return;
+  }
+  var rowsHtml = "";
+  for (var i = 0; i < visibleTrades.length; i++) {
+    var pt = visibleTrades[i];
     var cashStr =
       pt.entry_net_cash >= 0
         ? "+$" + Number(pt.entry_net_cash).toFixed(2) + " cr"
@@ -223,30 +314,70 @@ export function renderPaperTradesList() {
         ? '<span class="backtest-source-badge backtest-source-badge--ledger">LEDGER</span>'
         : "";
     var stratLabel = pt.ledger_strategy_label || pt.strategy_kind;
-    html +=
-      '<div class="backtest-paper-row" data-paper-id="' +
+    var legsText = formatLegsCompact(pt.legs);
+    rowsHtml +=
+      '<tr data-paper-id="' +
       escapeHtml(pt.id) +
       '">' +
-      '<div class="backtest-paper-meta">' +
-      "<strong>" + escapeHtml(pt.id) + "</strong>" +
-      '<span class="backtest-status backtest-status--' + escapeHtml(pt.status) + '">' +
-      escapeHtml(pt.status) +
-      "</span>" +
+      '<td class="text-left"><strong>' +
+      escapeHtml(pt.id) +
+      "</strong>" +
       sourceBadge +
-      "<span>" + escapeHtml(pt.ticker) + " \u2022 " + escapeHtml(stratLabel) + "</span>" +
-      "<span>" + escapeHtml(formatLegsCompact(pt.legs)) + "</span>" +
-      "<span>x" + escapeHtml(pt.qty) + " \u2022 " + cashStr + "</span>" +
-      "<span>Exp " + escapeHtml(pt.expiry || "\u2014") + "</span>" +
-      "</div>" +
-      '<div class="backtest-paper-actions">' +
-      '<button type="button" class="btn btn-sm" data-paper-replay="' + escapeHtml(pt.id) + '">Replay</button>' +
+      "</td>" +
+      '<td class="text-left"><span class="backtest-status backtest-status--' +
+      escapeHtml(pt.status) +
+      '">' +
+      escapeHtml(pt.status) +
+      "</span></td>" +
+      '<td class="text-left"><strong>' +
+      escapeHtml(pt.ticker) +
+      "</strong></td>" +
+      '<td class="text-left">' +
+      escapeHtml(stratLabel) +
+      "</td>" +
+      '<td class="text-left backtest-paper-legs-cell" title="' +
+      escapeHtml(legsText) +
+      '">' +
+      escapeHtml(legsText) +
+      "</td>" +
+      "<td>x" +
+      escapeHtml(pt.qty) +
+      " \u2022 " +
+      escapeHtml(cashStr) +
+      "</td>" +
+      '<td class="text-left">' +
+      escapeHtml(pt.expiry || "\u2014") +
+      "</td>" +
+      '<td class="backtest-paper-actions-cell"><div class="backtest-paper-actions-group">' +
+      '<button type="button" class="btn btn-sm" data-paper-replay="' +
+      escapeHtml(pt.id) +
+      '">Replay</button>' +
       (canStop
-        ? '<button type="button" class="btn btn-sm" data-paper-stop="' + escapeHtml(pt.id) + '">Stop</button>'
+        ? '<button type="button" class="btn btn-sm" data-paper-stop="' +
+          escapeHtml(pt.id) +
+          '">Stop</button>'
         : "") +
-      "</div>" +
-      "</div>";
+      "</div></td>" +
+      "</tr>";
   }
-  dom.backtestPaperList.innerHTML = html;
+  dom.backtestPaperList.innerHTML =
+    '<div class="backtest-paper-table-wrap">' +
+    '<table class="backtest-table backtest-paper-table">' +
+    "<thead><tr>" +
+    '<th class="text-left">Trade</th>' +
+    '<th class="text-left">Status</th>' +
+    '<th class="text-left">Ticker</th>' +
+    '<th class="text-left">Strategy</th>' +
+    '<th class="text-left">Legs</th>' +
+    "<th>Qty / Entry</th>" +
+    '<th class="text-left">Expiry</th>' +
+    "<th>Actions</th>" +
+    "</tr></thead>" +
+    "<tbody>" +
+    rowsHtml +
+    "</tbody>" +
+    "</table>" +
+    "</div>";
 }
 
 export async function syncPaperTradesFromLedger() {
@@ -346,7 +477,7 @@ async function resolveLegsForPaperTrade(snapshotId) {
         return {
           side: leg.side === "BUY" ? "BUY" : "SELL",
           right: leg.right === "C" ? "C" : "P",
-          expiry: toIsoExpiry(leg.expiry),
+          expiry: formatExpiryIso(leg.expiry),
           strike: Number(leg.strike),
           qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
         };
@@ -385,7 +516,7 @@ async function resolveLegsForPaperTrade(snapshotId) {
           return {
             side: leg.side,
             right: leg.right,
-            expiry: toIsoExpiry(leg.expiry),
+            expiry: formatExpiryIso(leg.expiry),
             strike: Number(leg.strike),
             qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
           };

@@ -12,7 +12,10 @@ import {
   formatExpiryIso,
   matchesDteFilterValue,
   parseDashboardDteWindow,
+  readJsonPref,
+  removePref,
   snapDteValueToExpiries,
+  writeJsonPref,
 } from "./helpers.js";
 import {
   appendDteBucketOptions,
@@ -193,33 +196,22 @@ function computeContractVolOi(cRow) {
 }
 
 export function readTableSortPref() {
-  try {
-    var raw = window.localStorage.getItem(TABLE_SORT_KEY);
-    if (raw) {
-      var parsed = JSON.parse(raw);
-      if (
-        parsed &&
-        TABLE_COLUMN_BY_KEY[parsed.col] &&
-        (parsed.dir === "asc" || parsed.dir === "desc")
-      ) {
-        return { col: parsed.col, dir: parsed.dir };
-      }
-    }
-  } catch (_err) {
-    /* ignore storage failure */
+  var parsed = readJsonPref(TABLE_SORT_KEY, null);
+  if (
+    parsed &&
+    TABLE_COLUMN_BY_KEY[parsed.col] &&
+    (parsed.dir === "asc" || parsed.dir === "desc")
+  ) {
+    return { col: parsed.col, dir: parsed.dir };
   }
   return { col: null, dir: null };
 }
 
 export function writeTableSortPref(sortObj) {
-  try {
-    if (sortObj && sortObj.col && sortObj.dir) {
-      window.localStorage.setItem(TABLE_SORT_KEY, JSON.stringify(sortObj));
-    } else {
-      window.localStorage.removeItem(TABLE_SORT_KEY);
-    }
-  } catch (_err) {
-    /* ignore storage failure */
+  if (sortObj && sortObj.col && sortObj.dir) {
+    writeJsonPref(TABLE_SORT_KEY, sortObj);
+  } else {
+    removePref(TABLE_SORT_KEY);
   }
 }
 

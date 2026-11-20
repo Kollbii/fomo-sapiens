@@ -123,12 +123,14 @@ def normalize_expiry_yyyymmdd(raw: Any) -> str | None:
     if not text:
         return None
     head = text.split(";")[0].split(" ")[0].strip()
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", head):
-        parsed = date.fromisoformat(head)
-        return parsed.strftime("%Y%m%d")
-    if re.fullmatch(r"\d{8}", head):
-        parsed = datetime.strptime(head, "%Y%m%d").date()
-        return parsed.strftime("%Y%m%d")
+    if len(head) == 8 and head.isascii() and head.isdigit():
+        date(int(head[:4]), int(head[4:6]), int(head[6:8]))
+        return head
+    if len(head) == 10 and head[4] == "-" and head[7] == "-" and head.isascii():
+        compact = head[:4] + head[5:7] + head[8:10]
+        if compact.isdigit():
+            date(int(compact[:4]), int(compact[4:6]), int(compact[6:8]))
+            return compact
     raise ValueError(f"expected YYYYMMDD or YYYY-MM-DD expiry, got {raw!r}")
 
 

@@ -59,7 +59,7 @@
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+  box-shadow: var(--shadow-popover);
   font-family: var(--font-mono);
   font-size: 12px;
 }
@@ -146,7 +146,7 @@
 .snap-picker__day-btn:focus-visible,
 .snap-picker__opt:focus-visible,
 .snap-picker__toggle:focus-visible {
-  outline: 1px solid var(--accent-primary);
+  outline: 2px solid var(--accent-focus);
   outline-offset: -1px;
 }
 

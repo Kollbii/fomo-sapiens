@@ -29,6 +29,7 @@
 # model ids pass through unchanged, and thinkingConfig is injected explicitly per agent via
 # `.gemini/settings.json` overrides, so no CLI-side model-family detection is needed.
 gemini_models:
+  neon: &gemini_neon gemini-4-neon            # "Neon 4" orchestrator / deep-audit option
   argon: &gemini_argon gemini-4-argon         # "Argon 4" frontier reasoning baseline
   hydrogen: &gemini_hydrogen gemini-4-hydrogen  # Fast frontier-grade Gemini 4 workhorse
   flash: &gemini_flash gemini-3.8-flash       # Legacy fallback if Hydrogen quota is constrained
@@ -49,7 +50,7 @@ profiles:
     gemini:
       model: *gemini_argon
       temperature: 1.0
-      thinking_config: { thinkingLevel: HIGH }     # alt: *gemini_hydrogen with thinkingLevel: XHIGH
+      thinking_config: { thinkingLevel: HIGH }     # alt: *gemini_neon (HIGH) or *gemini_hydrogen (XHIGH)
       max_turns: 40
       timeout_mins: 20
 

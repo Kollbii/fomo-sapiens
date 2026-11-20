@@ -6,12 +6,12 @@ import {
 } from "./state.js";
 import {
   extractApiErrorMessage,
+  formatExpiryIso,
   showBanner,
   themeVars,
 } from "./helpers.js";
 import {
-  applyPanelVisibility,
-  isPanelVisible,
+  ensurePanelVisible,
 } from "./panels.js";
 import {
   apiJson,
@@ -28,13 +28,16 @@ import {
   readCustomLegsFromUI,
   removeCustomBacktestLeg,
   renderCustomLegsEditor,
+  renderPaperTradesList,
   saveCurrentPaperTrade,
   setBacktestNotice,
+  setPaperTradesExpanded,
   stopPaperTrade,
   syncPaperTradesFromLedger,
-  toIsoExpiry,
+  togglePaperTradesDrawer,
 } from "./backtest_paper.js";
 import {
+  initBacktestTablesSplitter,
   renderBacktestResult,
   renderTradeLog,
   toggleBacktestTradeExpand,
@@ -159,6 +162,7 @@ export async function backtestOnSnapshotsLoaded(ticker) {
     state.backtestEntriesTicker = sym;
     renderEntrySelectOptions(state.backtestEntries);
   }
+  renderPaperTradesList();
 }
 
 function findPaperTradeById(tradeId) {
@@ -206,7 +210,7 @@ function serializeLegsForRequest() {
     return {
       side: leg.side,
       right: leg.right,
-      expiry: toIsoExpiry(leg.expiry),
+      expiry: formatExpiryIso(leg.expiry),
       strike: Number(leg.strike),
       qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
     };
@@ -366,11 +370,8 @@ function findMatchedLedgerPaperTrade(trades, campaignId, positionKey, ticker) {
 
 async function activateAndReplayPaperTrade(matched) {
   if (!matched) return;
-  if (!isPanelVisible("backtest")) {
-    var nextVis = Object.assign({}, state.panelVisibility);
-    nextVis.backtest = true;
-    applyPanelVisibility(nextVis, { persist: true });
-  }
+  setPaperTradesExpanded(false);
+  ensurePanelVisible("backtest");
   var filterVal = dom.backtestPaperFilter ? dom.backtestPaperFilter.value : "ACTIVE";
   var inVisibleList = (state.backtestPaperTrades || []).some(function (t) {
     return t.id === matched.id;
@@ -479,6 +480,7 @@ async function replayPaperTradeFromList(pid) {
     await activateAndReplayPaperTrade(matched);
     return;
   }
+  setPaperTradesExpanded(false);
   state.backtestMode = "SINGLE_TRADE";
   state.backtestSource = "PAPER_TRADE";
   syncBacktestControlVisibility();
@@ -550,6 +552,15 @@ export function bindBacktestEvents() {
     });
   }
   if (dom.backtestPaperSelect) dom.backtestPaperSelect.addEventListener("change", syncSelectedPaperTradeQty);
+  if (dom.backtestPaperToggle) {
+    dom.backtestPaperToggle.addEventListener("click", togglePaperTradesDrawer);
+  }
+  if (dom.backtestPaperTickerFilter) {
+    dom.backtestPaperTickerFilter.addEventListener("change", function () {
+      state.backtestPaperTickerFilter = dom.backtestPaperTickerFilter.value || "ALL";
+      renderPaperTradesList();
+    });
+  }
   if (dom.backtestPaperFilter) {
     dom.backtestPaperFilter.addEventListener("change", function () {
       reloadPaperTradesAndSyncQty(loadPaperTrades);
@@ -611,9 +622,11 @@ export function bindBacktestEvents() {
       renderBacktestChart(state.backtestResult, themeVars());
     });
   }
+  initBacktestTablesSplitter();
 }
 
 export function initBacktestPanel() {
+  setPaperTradesExpanded(false);
   renderCustomLegsEditor();
   syncBacktestControlVisibility();
   renderBacktestEmptyPlaceholder();

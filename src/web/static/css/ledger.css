@@ -51,6 +51,11 @@
   transition: background-color 0.12s ease, color 0.12s ease;
 }
 
+.ledger-seg-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: -2px;
+}
+
 .ledger-seg-btn:last-child {
   border-right: 0;
 }
@@ -120,7 +125,7 @@
 
 .ledger-kpi-label {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -310,6 +315,11 @@
   color: var(--accent-focus);
 }
 
+.ledger-expand-btn:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 1px;
+}
+
 .ledger-expand-btn:disabled {
   opacity: 0.35;
   cursor: default;
@@ -456,7 +466,7 @@
 
 .ledger-timeline-step {
   display: grid;
-  grid-template-columns: 32px 128px 132px minmax(140px, 1fr) 54px 86px 86px 70px;
+  grid-template-columns: 32px 128px 132px minmax(140px, 1fr) 72px 96px 96px 70px;
   gap: 8px;
   align-items: center;
   padding: 4px 8px;
@@ -483,13 +493,16 @@
 
 .ledger-timeline-empty {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12px;
+  line-height: 1.5;
   color: var(--text-muted);
 }
 
 .ledger-table-empty {
   padding: 18px 12px;
   text-align: left;
+  font-family: var(--font-mono);
+  font-size: 12px;
   color: var(--text-muted);
   white-space: normal;
   line-height: 1.5;

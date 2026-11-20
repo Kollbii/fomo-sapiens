@@ -6,11 +6,13 @@ import {
   state,
 } from "./state.js";
 import {
+  buildLogoBadge,
   buildRefreshDtePayload,
   extractApiErrorMessage,
-  readPref,
+  readJsonPref,
   showBanner,
-  writePref,
+  syncActiveTickerLogo,
+  writeJsonPref,
 } from "./helpers.js";
 import {
   apiJson,
@@ -225,14 +227,10 @@ function effectiveSelectedCount() {
 
 function readSelection() {
   var out = {};
-  try {
-    var parsed = JSON.parse(readPref(WATCHLIST_SELECTION_KEY, "{}"));
-    var list = parsed && Array.isArray(parsed.unchecked) ? parsed.unchecked : [];
-    for (var i = 0; i < list.length; i++) {
-      if (typeof list[i] === "string") out[list[i]] = true;
-    }
-  } catch (_err) {
-    /* ignore corrupt prefs */
+  var parsed = readJsonPref(WATCHLIST_SELECTION_KEY, null);
+  var list = parsed && Array.isArray(parsed.unchecked) ? parsed.unchecked : [];
+  for (var i = 0; i < list.length; i++) {
+    if (typeof list[i] === "string") out[list[i]] = true;
   }
   return out;
 }
@@ -244,7 +242,7 @@ function writeSelection() {
     if (state.watchlistUnchecked[sym]) pruned[sym] = true;
   }
   state.watchlistUnchecked = pruned;
-  writePref(WATCHLIST_SELECTION_KEY, JSON.stringify({ unchecked: Object.keys(pruned) }));
+  writeJsonPref(WATCHLIST_SELECTION_KEY, { unchecked: Object.keys(pruned) });
 }
 
 function markerFor(sym) {
@@ -310,7 +308,11 @@ function buildRow(sym) {
   symBtn.className = "wl-row__sym";
   symBtn.setAttribute("data-wl-view", sym);
   symBtn.title = "View saved " + sym + " snapshot (no IBKR call)";
-  symBtn.textContent = sym;
+  symBtn.appendChild(buildLogoBadge(sym));
+  var symText = document.createElement("span");
+  symText.className = "wl-row__sym-text";
+  symText.textContent = sym;
+  symBtn.appendChild(symText);
 
   var status = document.createElement("span");
   status.className = "wl-row__status";
@@ -416,6 +418,10 @@ function syncControls() {
   if (dom.refreshBtn) {
     dom.refreshBtn.disabled = busy || Boolean(state.loading);
     dom.refreshBtn.title = busy ? "Disabled while a watchlist batch load is running" : "";
+  }
+  if (dom.stickyRefreshBtn) {
+    dom.stickyRefreshBtn.disabled = busy || Boolean(state.loading);
+    dom.stickyRefreshBtn.title = busy ? "Disabled while a watchlist batch load is running" : "";
   }
   if (dom.watchlistNotice) {
     dom.watchlistNotice.hidden = !state.watchlistNotice;
@@ -1514,6 +1520,7 @@ export function wireWatchlist() {
 
 export async function initWatchlist() {
   state.watchlistUnchecked = readSelection();
+  syncActiveTickerLogo(state.ticker);
   renderRows();
   await refreshWatchlist();
   await attachCurrentBatch();
