@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import datetime
-from typing import Literal
+from datetime import UTC, datetime
+from typing import Any, Literal
 
 from src.analytics.ledger.models import LedgerStrategyType, RollAction
 from src.storage.ledger_schema import (
@@ -210,23 +210,50 @@ def cluster_option_episodes(
     return merged
 
 
+def format_utc_iso(dt: datetime) -> str:
+    """Format a datetime as UTC `YYYY-MM-DDTHH:MM:SSZ` without strftime overhead."""
+    utc_dt = (
+        dt
+        if dt.tzinfo is UTC
+        else (dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC))
+    )
+    return (
+        f"{utc_dt.year:04d}-{utc_dt.month:02d}-{utc_dt.day:02d}"
+        f"T{utc_dt.hour:02d}:{utc_dt.minute:02d}:{utc_dt.second:02d}Z"
+    )
+
+
 def aggregate_legs(legs: Sequence[AggregatedLeg]) -> list[AggregatedLeg]:
     """Collapse partial fills on the same `(contract_key, side)` into distinct legs."""
-    grouped: dict[tuple[OptionContractKey, LedgerSide], list[AggregatedLeg]] = defaultdict(list)
+    if not legs:
+        return []
+    grouped: dict[tuple[OptionContractKey, LedgerSide], list[Any]] = {}
     for leg in legs:
-        grouped[(leg.contract_key, leg.side)].append(leg)
+        key = (leg.contract_key, leg.side)
+        acc = grouped.get(key)
+        if acc is None:
+            grouped[key] = [
+                leg,
+                leg.quantity,
+                leg.cashflow_ex_fee,
+                leg.fees,
+                leg.conid,
+                leg.price * leg.quantity,
+            ]
+        else:
+            acc[1] += leg.quantity
+            acc[2] += leg.cashflow_ex_fee
+            acc[3] += leg.fees
+            if acc[4] is None and leg.conid is not None:
+                acc[4] = leg.conid
+            acc[5] += leg.price * leg.quantity
 
     merged: list[AggregatedLeg] = []
-    for items in grouped.values():
-        first = items[0]
-        total_qty = sum(item.quantity for item in items)
-        total_cash = sum(item.cashflow_ex_fee for item in items)
-        total_fees = sum(item.fees for item in items)
-        conid = next((item.conid for item in items if item.conid is not None), None)
+    for first, total_qty, total_cash, total_fees, conid, price_qty_sum in grouped.values():
         if total_qty > 1e-9 and first.multiplier > 0 and abs(total_cash) > 1e-12:
             avg_price = abs(total_cash) / (total_qty * first.multiplier)
         elif total_qty > 1e-9:
-            avg_price = sum(item.price * item.quantity for item in items) / total_qty
+            avg_price = price_qty_sum / total_qty
         else:
             avg_price = first.price
         merged.append(
@@ -254,9 +281,10 @@ def classify_option_legs(
     legs: Sequence[AggregatedLeg],
     *,
     available_stk_shares: float = 0.0,
+    already_aggregated: bool = False,
 ) -> LedgerStrategyType:
     """Classify an option leg-group into a canonical `LedgerStrategyType`."""
-    distinct = aggregate_legs(legs)
+    distinct = legs if already_aggregated else aggregate_legs(legs)
     n_legs = len(distinct)
     if n_legs == 0:
         return "CUSTOM_COMBO"
@@ -372,9 +400,13 @@ def format_strike(strike: float) -> str:
     return f"${strike:g}"
 
 
-def format_legs_strike_summary(legs: Sequence[AggregatedLeg]) -> str:
+def format_legs_strike_summary(
+    legs: Sequence[AggregatedLeg],
+    *,
+    already_aggregated: bool = False,
+) -> str:
     """Build a compact strike summary string across 1..N option legs."""
-    distinct = aggregate_legs(legs)
+    distinct = legs if already_aggregated else aggregate_legs(legs)
     if not distinct:
         return "-"
     if len(distinct) == 1:
@@ -404,14 +436,18 @@ def format_legs_strike_summary(legs: Sequence[AggregatedLeg]) -> str:
     return "-".join(parts)
 
 
-def format_legs_position_label(legs: Sequence[AggregatedLeg]) -> str:
+def format_legs_position_label(
+    legs: Sequence[AggregatedLeg],
+    *,
+    already_aggregated: bool = False,
+) -> str:
     """Format concise expiry + strike summary (e.g. `Dec20 $135C` or `Dec20 $135/$130P`)."""
-    distinct = aggregate_legs(legs)
+    distinct = legs if already_aggregated else aggregate_legs(legs)
     if not distinct:
         return "-"
     expiries = sorted({leg.expiry for leg in distinct})
     exp_label = "/".join(format_expiry_short(e) for e in expiries)
-    strike_label = format_legs_strike_summary(distinct)
+    strike_label = format_legs_strike_summary(distinct, already_aggregated=True)
     return f"{exp_label} {strike_label}".strip()
 
 
@@ -422,11 +458,17 @@ def format_step_summary(
     cashflow_ex_fee: float,
     contracts: float,
     roll_old_legs: Sequence[AggregatedLeg] | None = None,
+    already_aggregated: bool = False,
 ) -> str:
     """Build a human-readable summary string for a `RollStep`."""
-    distinct = aggregate_legs(legs)
-    pos_label = format_legs_position_label(distinct)
-    strike_label = format_legs_strike_summary(distinct)
+    distinct = legs if already_aggregated else aggregate_legs(legs)
+    strike_label = format_legs_strike_summary(distinct, already_aggregated=True)
+    if not distinct:
+        pos_label = "-"
+    else:
+        expiries = sorted({leg.expiry for leg in distinct})
+        exp_label = "/".join(format_expiry_short(e) for e in expiries)
+        pos_label = f"{exp_label} {strike_label}".strip()
     mult = distinct[0].multiplier if distinct else 100
     per_contract_price = (
         abs(cashflow_ex_fee) / (contracts * mult)
@@ -435,7 +477,9 @@ def format_step_summary(
     )
 
     if action == "ROLL" and roll_old_legs:
-        old_strikes = format_legs_strike_summary(roll_old_legs)
+        old_strikes = format_legs_strike_summary(
+            roll_old_legs, already_aggregated=already_aggregated
+        )
         net_per_share = (
             cashflow_ex_fee / (contracts * mult) if contracts > 1e-9 and mult > 0 else 0.0
         )

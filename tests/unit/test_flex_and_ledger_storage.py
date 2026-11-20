@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import http.client
+import json
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import pytest
 from pydantic import ValidationError
 
@@ -25,6 +27,7 @@ from src.storage.ledger_schema import (
     LEDGER_POSITION_POLARS_SCHEMA,
     LedgerExecutionRow,
     LedgerPositionRow,
+    normalize_expiry_yyyymmdd,
 )
 from tests.support.aio import noop_sleep, run_coro
 
@@ -934,3 +937,95 @@ def test_ledger_repository_self_heals_synthetic_lifecycle_duplicates(tmp_path: P
     msft_row = df_final.filter(df_final["underlying"] == "MSFT").row(0, named=True)
     assert msft_row["exec_id"] == "trade-ex-77001"
     assert msft_row["realized_pnl_ib"] == pytest.approx(210.0)
+
+
+def test_normalize_expiry_yyyymmdd_fast_validation() -> None:
+    assert normalize_expiry_yyyymmdd("20261218") == "20261218"
+    assert normalize_expiry_yyyymmdd("2026-12-18;16:00") == "20261218"
+    for bad in ("20260230", "2026-02-30", "20261301", "٢٠٢٦١٢١٨", "not-a-date"):
+        with pytest.raises(ValueError):
+            normalize_expiry_yyyymmdd(bad)
+
+
+def test_ledger_repository_stat_cache_and_invalidation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = LedgerRepository(tmp_path / "ledger")
+    ex_row = LedgerExecutionRow(
+        exec_id="exec-cache-1",
+        symbol="NVDA  261218P00120000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261218",
+        strike=120.0,
+        right="P",
+        side="SLD",
+        quantity=1.0,
+        price=4.50,
+        proceeds=450.0,
+        commission=1.0,
+        executed_at="2026-11-12T15:30:00Z",
+        source="FLEX_IMPORT",
+    )
+    pos_row = LedgerPositionRow(
+        conid=700101,
+        symbol="NVDA  261218P00120000",
+        underlying="NVDA",
+        asset_class="OPT",
+        expiry="20261218",
+        strike=120.0,
+        right="P",
+        position=-1.0,
+        avg_cost=4.50,
+        mark_price=4.20,
+        source="FLEX_IMPORT",
+        updated_at="2026-11-12T16:00:00Z",
+    )
+    repo.upsert_executions([ex_row])
+    repo.replace_positions([pos_row])
+    repo.save_sync_state(last_sync_at="2026-11-12T16:00:00Z", last_sync_mode="full")
+
+    # Warm caches, then ensure repeat reads avoid CSV parsing and JSON decoding
+    assert repo.load_executions().height == 1
+    assert repo.load_positions().height == 1
+    assert repo.load_sync_state()["total_executions"] == 1
+
+    orig_read_csv = pl.read_csv
+    orig_json_loads = json.loads
+
+    def _fail_csv(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unexpected CSV read on cache hit")
+
+    def _fail_json(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("unexpected JSON decode on cache hit")
+
+    monkeypatch.setattr(pl, "read_csv", _fail_csv)
+    monkeypatch.setattr(json, "loads", _fail_json)
+
+    assert repo.load_executions().height == 1
+    assert repo.load_positions().height == 1
+    st = repo.load_sync_state()
+    assert st["total_executions"] == 1
+    # Mutating caller-visible dicts must not taint the cached sync state
+    st["source_counts"]["TAMPER"] = 99
+    assert "TAMPER" not in repo.load_sync_state()["source_counts"]
+
+    # External edit / corruption / unlink must invalidate cleanly
+    monkeypatch.setattr(pl, "read_csv", orig_read_csv)
+    monkeypatch.setattr(json, "loads", orig_json_loads)
+
+    raw_sync = json.loads(repo.sync_state_path.read_text(encoding="utf-8"))
+    raw_sync["last_sync_mode"] = "monthly"
+    repo.sync_state_path.write_text(json.dumps(raw_sync), encoding="utf-8")
+    assert repo.load_sync_state()["last_sync_mode"] == "monthly"
+
+    repo.executions_path.write_text("bad_col\n1\n", encoding="utf-8")
+    with pytest.raises(StorageSchemaError):
+        repo.load_executions()
+
+    repo.executions_path.unlink()
+    repo.positions_path.unlink()
+    repo.sync_state_path.unlink()
+    assert repo.load_executions().height == 0
+    assert repo.load_positions().height == 0
+    assert repo.load_sync_state()["total_executions"] == 0

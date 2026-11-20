@@ -19,6 +19,7 @@ from src.analytics.ledger.classifier import (
     format_legs_position_label,
     format_legs_strike_summary,
     format_step_summary,
+    format_utc_iso,
 )
 from src.analytics.ledger.models import CampaignStatus, LedgerStrategyType, RollAction, RollStep
 from src.storage.ledger_schema import LedgerEventCode, LedgerSide
@@ -678,7 +679,9 @@ def build_underlying_ledger(
 
         open_legs = aggregate_legs(new_open_legs_raw)
         open_strategy: LedgerStrategyType | None = (
-            classify_option_legs(open_legs, available_stk_shares=available_shares)
+            classify_option_legs(
+                open_legs, available_stk_shares=available_shares, already_aggregated=True
+            )
             if open_legs
             else None
         )
@@ -733,17 +736,21 @@ def build_underlying_ledger(
                     cashflow_ex_fee=step_cash,
                     contracts=roll_contracts,
                     roll_old_legs=closed_legs,
+                    already_aggregated=True,
                 )
                 exp_val = max(leg.expiry for leg in open_legs)
+                ts_iso = format_utc_iso(ep_max_dt)
                 camp.steps.append(
                     RollStep(
                         step_index=len(camp.steps) + 1,
-                        executed_at=ep_max_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        executed_at=ts_iso,
                         action="ROLL",
                         roll_label=roll_label,
                         summary=summary,
                         expiry=exp_val,
-                        strike_summary=format_legs_strike_summary(open_legs),
+                        strike_summary=format_legs_strike_summary(
+                            open_legs, already_aggregated=True
+                        ),
                         contracts=roll_contracts,
                         cashflow_ex_fee=step_cash,
                         realized_pnl_ex_fee=step_realized,
@@ -751,10 +758,12 @@ def build_underlying_ledger(
                         ib_order_id=ep_ib_order_id,
                     )
                 )
-                camp.last_activity_at = ep_max_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+                camp.last_activity_at = ts_iso
                 camp.last_activity_at_dt = ep_max_dt
                 camp.active_legs = _legs_from_open_lots(lots_by_campaign[camp.campaign_id])
-                camp.current_summary = format_legs_position_label(camp.active_legs or open_legs)
+                camp.current_summary = format_legs_position_label(
+                    camp.active_legs or open_legs, already_aggregated=True
+                )
                 camp.contracts_total = max(
                     camp.contracts_total,
                     _campaign_open_contracts(lots_by_campaign[camp.campaign_id]),
@@ -789,8 +798,8 @@ def build_underlying_ledger(
                         else ("EXERCISE" if "EXERCISED" in event_codes else "CLOSE")
                     )
                 )
-                ts_iso = ep_max_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-                pos_lbl = format_legs_position_label(closed_legs)
+                ts_iso = format_utc_iso(ep_max_dt)
+                pos_lbl = format_legs_position_label(closed_legs, already_aggregated=True)
                 step = RollStep(
                     step_index=1,
                     executed_at=ts_iso,
@@ -800,9 +809,10 @@ def build_underlying_ledger(
                         closed_legs,
                         cashflow_ex_fee=step_cash,
                         contracts=closed_contracts,
+                        already_aggregated=True,
                     ),
                     expiry=max(leg.expiry for leg in closed_legs),
-                    strike_summary=format_legs_strike_summary(closed_legs),
+                    strike_summary=format_legs_strike_summary(closed_legs, already_aggregated=True),
                     contracts=closed_contracts,
                     cashflow_ex_fee=step_cash,
                     realized_pnl_ex_fee=step_realized,
@@ -842,7 +852,7 @@ def build_underlying_ledger(
             else:
                 action = "TRIM" if open_after > _EPS else "CLOSE"
 
-            ts_iso = ep_max_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ts_iso = format_utc_iso(ep_max_dt)
             camp.steps.append(
                 RollStep(
                     step_index=len(camp.steps) + 1,
@@ -853,9 +863,10 @@ def build_underlying_ledger(
                         closed_legs,
                         cashflow_ex_fee=step_cash,
                         contracts=closed_contracts,
+                        already_aggregated=True,
                     ),
                     expiry=max(leg.expiry for leg in closed_legs),
-                    strike_summary=format_legs_strike_summary(closed_legs),
+                    strike_summary=format_legs_strike_summary(closed_legs, already_aggregated=True),
                     contracts=closed_contracts,
                     cashflow_ex_fee=step_cash,
                     realized_pnl_ex_fee=step_realized,
@@ -868,9 +879,13 @@ def build_underlying_ledger(
             remaining_active = _legs_from_open_lots(lots_by_campaign[cid])
             camp.active_legs = remaining_active
             if remaining_active:
-                camp.current_summary = format_legs_position_label(remaining_active)
+                camp.current_summary = format_legs_position_label(
+                    remaining_active, already_aggregated=True
+                )
             else:
-                camp.current_summary = format_legs_position_label(closed_legs)
+                camp.current_summary = format_legs_position_label(
+                    closed_legs, already_aggregated=True
+                )
 
             if action in ("ASSIGN", "EXERCISE"):
                 for cleg in closed_legs:
@@ -908,7 +923,7 @@ def build_underlying_ledger(
             open_contracts = max(leg.quantity for leg in open_legs)
             open_cash = sum(leg.cashflow_ex_fee for leg in open_legs)
             open_fees = sum(leg.fees for leg in open_legs)
-            ts_iso = ep_max_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+            ts_iso = format_utc_iso(ep_max_dt)
 
             # 3a. Search for 1-day roll candidate.
             best_camp: CampaignRecord | None = None
@@ -954,6 +969,7 @@ def build_underlying_ledger(
                     cashflow_ex_fee=pending.cashflow + open_cash,
                     contracts=open_contracts,
                     roll_old_legs=pending.closed_legs,
+                    already_aggregated=True,
                 )
                 best_camp.steps.append(
                     RollStep(
@@ -963,7 +979,9 @@ def build_underlying_ledger(
                         roll_label=roll_label,
                         summary=summary,
                         expiry=max(leg.expiry for leg in open_legs),
-                        strike_summary=format_legs_strike_summary(open_legs),
+                        strike_summary=format_legs_strike_summary(
+                            open_legs, already_aggregated=True
+                        ),
                         contracts=open_contracts,
                         cashflow_ex_fee=open_cash,
                         realized_pnl_ex_fee=0.0,
@@ -977,7 +995,8 @@ def build_underlying_ledger(
                     lots_by_campaign[best_camp.campaign_id]
                 )
                 best_camp.current_summary = format_legs_position_label(
-                    best_camp.active_legs or open_legs
+                    best_camp.active_legs or open_legs,
+                    already_aggregated=True,
                 )
                 best_camp.contracts_total = max(
                     best_camp.contracts_total,
@@ -1017,9 +1036,12 @@ def build_underlying_ledger(
                             open_legs,
                             cashflow_ex_fee=open_cash,
                             contracts=open_contracts,
+                            already_aggregated=True,
                         ),
                         expiry=max(leg.expiry for leg in open_legs),
-                        strike_summary=format_legs_strike_summary(open_legs),
+                        strike_summary=format_legs_strike_summary(
+                            open_legs, already_aggregated=True
+                        ),
                         contracts=open_contracts,
                         cashflow_ex_fee=open_cash,
                         realized_pnl_ex_fee=0.0,
@@ -1030,7 +1052,9 @@ def build_underlying_ledger(
                 add_camp.last_activity_at = ts_iso
                 add_camp.last_activity_at_dt = ep_max_dt
                 add_camp.active_legs = _legs_from_open_lots(lots_by_campaign[add_camp.campaign_id])
-                add_camp.current_summary = format_legs_position_label(add_camp.active_legs)
+                add_camp.current_summary = format_legs_position_label(
+                    add_camp.active_legs, already_aggregated=True
+                )
                 add_camp.contracts_total += open_contracts
                 add_camp.last_roll_candidate_close = None
                 continue
@@ -1038,7 +1062,7 @@ def build_underlying_ledger(
             # 3c. New campaign OPEN.
             camp_seq += 1
             new_cid = f"{underlying}-{camp_seq:04d}"
-            pos_lbl = format_legs_position_label(open_legs)
+            pos_lbl = format_legs_position_label(open_legs, already_aggregated=True)
             for lot in new_open_lots:
                 lot.campaign_id = new_cid
                 lots_by_campaign[new_cid].append(lot)
@@ -1067,9 +1091,12 @@ def build_underlying_ledger(
                             open_legs,
                             cashflow_ex_fee=open_cash,
                             contracts=open_contracts,
+                            already_aggregated=True,
                         ),
                         expiry=max(leg.expiry for leg in open_legs),
-                        strike_summary=format_legs_strike_summary(open_legs),
+                        strike_summary=format_legs_strike_summary(
+                            open_legs, already_aggregated=True
+                        ),
                         contracts=open_contracts,
                         cashflow_ex_fee=open_cash,
                         realized_pnl_ex_fee=0.0,

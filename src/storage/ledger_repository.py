@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import stat
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -29,6 +30,18 @@ from src.storage.ledger_schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+_StatSig = tuple[int, int, int, int]
+
+
+def _path_stat_sig(path: Path) -> _StatSig | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
 
 
 def _utc_now_iso() -> str:
@@ -142,6 +155,12 @@ class LedgerRepository:
         self.positions_path = self.ledger_dir / "open_positions.csv"
         self.sync_state_path = self.ledger_dir / "sync_state.json"
         self._lock = threading.RLock()
+        self._exec_cache_sig: _StatSig | None = None
+        self._exec_cache_df: pl.DataFrame | None = None
+        self._pos_cache_sig: _StatSig | None = None
+        self._pos_cache_df: pl.DataFrame | None = None
+        self._sync_cache_sig: tuple[_StatSig | None, _StatSig | None, _StatSig | None] | None = None
+        self._sync_cache_data: dict[str, Any] | None = None
 
     def ensure_layout(self) -> None:
         """Create `ledger_dir` and `ledger_dir/imports` idempotently."""
@@ -183,26 +202,64 @@ class LedgerRepository:
     def load_executions(self) -> pl.DataFrame:
         """Load `executions.csv`, returning an empty schema-typed DataFrame if absent."""
         with self._lock:
-            return self._read_typed_csv(
-                self.executions_path,
-                columns=LEDGER_EXECUTION_COLUMNS,
-                non_nullable=LEDGER_EXECUTION_NON_NULLABLE,
-                schema=LEDGER_EXECUTION_POLARS_SCHEMA,
-            )
+            sig = _path_stat_sig(self.executions_path)
+            if sig is None:
+                self._exec_cache_sig = None
+                self._exec_cache_df = None
+                return pl.DataFrame(schema=LEDGER_EXECUTION_POLARS_SCHEMA)
+            if sig == self._exec_cache_sig and self._exec_cache_df is not None:
+                return self._exec_cache_df.clone()
+            try:
+                df = self._read_typed_csv(
+                    self.executions_path,
+                    columns=LEDGER_EXECUTION_COLUMNS,
+                    non_nullable=LEDGER_EXECUTION_NON_NULLABLE,
+                    schema=LEDGER_EXECUTION_POLARS_SCHEMA,
+                )
+            except Exception:
+                self._exec_cache_sig = None
+                self._exec_cache_df = None
+                raise
+            self._exec_cache_sig = sig
+            self._exec_cache_df = df
+            return df.clone()
 
     def load_positions(self) -> pl.DataFrame:
         """Load `open_positions.csv`, returning an empty schema-typed DataFrame if absent."""
         with self._lock:
-            return self._read_typed_csv(
-                self.positions_path,
-                columns=LEDGER_POSITION_COLUMNS,
-                non_nullable=LEDGER_POSITION_NON_NULLABLE,
-                schema=LEDGER_POSITION_POLARS_SCHEMA,
-            )
+            sig = _path_stat_sig(self.positions_path)
+            if sig is None:
+                self._pos_cache_sig = None
+                self._pos_cache_df = None
+                return pl.DataFrame(schema=LEDGER_POSITION_POLARS_SCHEMA)
+            if sig == self._pos_cache_sig and self._pos_cache_df is not None:
+                return self._pos_cache_df.clone()
+            try:
+                df = self._read_typed_csv(
+                    self.positions_path,
+                    columns=LEDGER_POSITION_COLUMNS,
+                    non_nullable=LEDGER_POSITION_NON_NULLABLE,
+                    schema=LEDGER_POSITION_POLARS_SCHEMA,
+                )
+            except Exception:
+                self._pos_cache_sig = None
+                self._pos_cache_df = None
+                raise
+            self._pos_cache_sig = sig
+            self._pos_cache_df = df
+            return df.clone()
 
     def has_existing_history(self) -> bool:
         """Return True if `executions.csv` already stores at least one execution row."""
         return self.load_executions().height > 0
+
+    def cache_token(self) -> tuple[_StatSig | None, _StatSig | None]:
+        """Return current stat signatures for `(executions.csv, open_positions.csv)`."""
+        with self._lock:
+            return (
+                _path_stat_sig(self.executions_path),
+                _path_stat_sig(self.positions_path),
+            )
 
     # ------------------------------------------------------------------ write
     def upsert_executions(
@@ -339,6 +396,11 @@ class LedgerRepository:
                 schema=LEDGER_EXECUTION_POLARS_SCHEMA,
             )
             _atomic_write_csv(out_df, self.executions_path)
+            sig = _path_stat_sig(self.executions_path)
+            self._exec_cache_sig = sig
+            self._exec_cache_df = out_df if sig is not None else None
+            self._sync_cache_sig = None
+            self._sync_cache_data = None
             return (len(inserted_ids), len(updated_ids))
 
     def replace_positions(self, rows: Sequence[LedgerPositionRow | Mapping[str, Any]]) -> int:
@@ -373,6 +435,11 @@ class LedgerRepository:
                 else pl.DataFrame(schema=LEDGER_POSITION_POLARS_SCHEMA)
             )
             _atomic_write_csv(df, self.positions_path)
+            sig = _path_stat_sig(self.positions_path)
+            self._pos_cache_sig = sig
+            self._pos_cache_df = df if sig is not None else None
+            self._sync_cache_sig = None
+            self._sync_cache_data = None
         return len(ordered)
 
     # ------------------------------------------------------------------ sync state
@@ -385,10 +452,21 @@ class LedgerRepository:
     def load_sync_state(self) -> dict[str, Any]:
         """Load `sync_state.json` or return computed defaults when missing/corrupt."""
         with self._lock:
+            combined_sig = (
+                _path_stat_sig(self.executions_path),
+                _path_stat_sig(self.positions_path),
+                _path_stat_sig(self.sync_state_path),
+            )
+            if combined_sig == self._sync_cache_sig and self._sync_cache_data is not None:
+                return {
+                    **self._sync_cache_data,
+                    "source_counts": dict(self._sync_cache_data.get("source_counts", {})),
+                }
             exec_df = self.load_executions()
             pos_df = self.load_positions()
             source_counts = self._compute_source_counts(exec_df)
             recommended: Literal["full", "monthly"] = "monthly" if exec_df.height > 0 else "full"
+            data: dict[str, Any] | None = None
             if self.sync_state_path.is_file():
                 try:
                     raw = json.loads(self.sync_state_path.read_text(encoding="utf-8"))
@@ -398,15 +476,26 @@ class LedgerRepository:
                     data["total_executions"] = exec_df.height
                     data["open_positions_count"] = pos_df.height
                     data["recommended_incremental_mode"] = recommended
-                    return data
                 except (ValueError, ValidationError, OSError) as exc:
                     logger.warning("ledger sync_state.json corrupt (%s); using computed state", exc)
-            return LedgerSyncState(
-                source_counts=source_counts,
-                total_executions=exec_df.height,
-                open_positions_count=pos_df.height,
-                recommended_incremental_mode=recommended,
-            ).model_dump()
+            if data is None:
+                data = LedgerSyncState(
+                    source_counts=source_counts,
+                    total_executions=exec_df.height,
+                    open_positions_count=pos_df.height,
+                    recommended_incremental_mode=recommended,
+                ).model_dump()
+            final_sig = (
+                _path_stat_sig(self.executions_path),
+                _path_stat_sig(self.positions_path),
+                _path_stat_sig(self.sync_state_path),
+            )
+            self._sync_cache_sig = final_sig
+            self._sync_cache_data = {
+                **data,
+                "source_counts": dict(data.get("source_counts", {})),
+            }
+            return data
 
     def save_sync_state(
         self,
@@ -434,4 +523,13 @@ class LedgerRepository:
                 self.sync_state_path,
                 json.dumps(payload, indent=2).encode("utf-8"),
             )
+            self._sync_cache_sig = (
+                _path_stat_sig(self.executions_path),
+                _path_stat_sig(self.positions_path),
+                _path_stat_sig(self.sync_state_path),
+            )
+            self._sync_cache_data = {
+                **payload,
+                "source_counts": dict(payload["source_counts"]),
+            }
             return payload

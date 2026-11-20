@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from src.analytics.ledger import (
+    CompiledLedgerData,
     LedgerAnalyticsReport,
     LedgerGroupBy,
     LedgerView,
     LedgerWindow,
     build_ledger_report,
+    compile_ledger_data,
 )
 from src.broker.client import IBKRBrokerClient, SleepFn
 from src.broker.flex import (
@@ -186,6 +189,36 @@ class LedgerService:
         self._refresh_owner_getter = refresh_owner_getter
         self._on_ledger_changed = on_ledger_changed
         self._live_marks: dict[int, float] = {}
+        self._compiled_lock = threading.RLock()
+        self._compiled_cache_key: (
+            tuple[tuple[int, int, int, int] | None, tuple[int, int, int, int] | None, float] | None
+        ) = None
+        self._compiled_cache_data: CompiledLedgerData | None = None
+
+    def _load_compiled(self, as_of: datetime) -> tuple[Any, Any, CompiledLedgerData | None]:
+        as_of_utc = as_of.replace(tzinfo=UTC) if as_of.tzinfo is None else as_of.astimezone(UTC)
+        gap = self.settings.ledger.roll_max_gap_hours
+        token = self.repo.cache_token()
+        cache_key = (token[0], token[1], gap)
+        with self._compiled_lock:
+            compiled = (
+                self._compiled_cache_data
+                if cache_key == self._compiled_cache_key and self._compiled_cache_data is not None
+                else None
+            )
+        executions_df = self.repo.load_executions()
+        positions_df = self.repo.load_positions()
+        if compiled is None:
+            fresh = compile_ledger_data(executions_df, positions_df, roll_max_gap_hours=gap)
+            if self.repo.cache_token() == token:
+                with self._compiled_lock:
+                    self._compiled_cache_key = cache_key
+                    self._compiled_cache_data = fresh
+            compiled = fresh
+        usable = (
+            compiled if compiled.max_exec_dt is None or as_of_utc >= compiled.max_exec_dt else None
+        )
+        return executions_df, positions_df, usable
 
     def _notify_ledger_changed(self) -> None:
         if self._on_ledger_changed is None:
@@ -268,8 +301,8 @@ class LedgerService:
         raw_ticker = ticker.strip().upper()
         ticker_norm = "ALL" if raw_ticker in ("", "ALL") else TickerValidator.validate(raw_ticker)
 
-        executions_df = self.repo.load_executions()
-        positions_df = self.repo.load_positions()
+        as_of = self.now_fn()
+        executions_df, positions_df, compiled = self._load_compiled(as_of)
         report = build_ledger_report(
             executions_df,
             positions_df,
@@ -280,15 +313,18 @@ class LedgerService:
             include_stock_gain=include_stock_gain,
             roll_max_gap_hours=self.settings.ledger.roll_max_gap_hours,
             live_marks=dict(self._live_marks),
-            as_of=self.now_fn(),
+            as_of=as_of,
+            compiled=compiled,
         )
         return LedgerDashboardResponse(report=report, status=self.get_ledger_status())
 
     def build_full_open_report(self) -> LedgerAnalyticsReport:
         """Build an unfiltered `open_mtm` report across all tickers and campaigns."""
+        as_of = self.now_fn()
+        executions_df, positions_df, compiled = self._load_compiled(as_of)
         return build_ledger_report(
-            self.repo.load_executions(),
-            self.repo.load_positions(),
+            executions_df,
+            positions_df,
             window="ALL",
             ticker="ALL",
             group_by="campaigns",
@@ -296,7 +332,8 @@ class LedgerService:
             include_stock_gain=True,
             roll_max_gap_hours=self.settings.ledger.roll_max_gap_hours,
             live_marks=dict(self._live_marks) if self._live_marks else None,
-            as_of=self.now_fn(),
+            as_of=as_of,
+            compiled=compiled,
         )
 
     async def sync_ledger(
@@ -433,9 +470,9 @@ class LedgerService:
             mode_used = "gateway"
 
         synced_at = self._utc_now_iso()
-        self.repo.save_sync_state(last_sync_at=synced_at, last_sync_mode=mode_used)
+        sync_state = self.repo.save_sync_state(last_sync_at=synced_at, last_sync_mode=mode_used)
         self._notify_ledger_changed()
-        total_executions = self.repo.load_executions().height
+        total_executions = int(sync_state["total_executions"])
 
         return LedgerSyncResponse(
             mode_used=mode_used,
@@ -485,12 +522,12 @@ class LedgerService:
         if positions:
             positions_imported = self.repo.replace_positions(positions)
 
-        self.repo.save_sync_state(
+        sync_state = self.repo.save_sync_state(
             last_sync_at=self._utc_now_iso(),
             last_sync_mode=f"import:{file_format.lower()}",
         )
         self._notify_ledger_changed()
-        total_executions = self.repo.load_executions().height
+        total_executions = int(sync_state["total_executions"])
         return LedgerImportResponse(
             filename=safe_name,
             file_format=file_format,

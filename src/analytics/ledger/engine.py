@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -15,6 +17,7 @@ from src.analytics.ledger.classifier import (
     NormalizedPosition,
     classify_option_legs,
     format_expiry_short,
+    format_utc_iso,
 )
 from src.analytics.ledger.models import (
     LedgerAnalyticsReport,
@@ -35,6 +38,7 @@ from src.analytics.ledger.rolls import (
     OptLot,
     StkLot,
     StkRealization,
+    UnderlyingLedgerResult,
     build_underlying_ledger,
     resolve_campaign_status,
 )
@@ -127,6 +131,36 @@ def _opt_str(value: Any) -> str | None:
     return text if text else None
 
 
+def _parse_utc_dt_and_iso(raw: Any) -> tuple[datetime, str]:
+    if isinstance(raw, str):
+        text = raw.strip()
+        if (
+            len(text) == 20
+            and text[4] == "-"
+            and text[7] == "-"
+            and text[10] == "T"
+            and text[13] == ":"
+            and text[16] == ":"
+            and text[19] == "Z"
+            and text.isascii()
+        ):
+            try:
+                dt = datetime(
+                    int(text[0:4]),
+                    int(text[5:7]),
+                    int(text[8:10]),
+                    int(text[11:13]),
+                    int(text[14:16]),
+                    int(text[17:19]),
+                    tzinfo=UTC,
+                )
+                return dt, text
+            except ValueError:
+                pass
+    dt = _parse_utc_dt(raw)
+    return dt, format_utc_iso(dt)
+
+
 def _extract_executions(
     executions_df: pl.DataFrame, as_of_utc: datetime
 ) -> list[NormalizedExecution]:
@@ -134,54 +168,99 @@ def _extract_executions(
         return []
 
     sorted_df = executions_df.sort(["executed_at", "exec_id"])
+    col_idx = {name: i for i, name in enumerate(sorted_df.columns)}
+    i_exec_id = col_idx["exec_id"]
+    i_executed_at = col_idx["executed_at"]
+    i_underlying = col_idx["underlying"]
+    i_asset_class = col_idx["asset_class"]
+    i_side = col_idx["side"]
+    i_qty = col_idx.get("quantity")
+    i_price = col_idx.get("price")
+    i_mult = col_idx.get("multiplier")
+    i_fx = col_idx.get("fx_rate_to_base")
+    i_proceeds = col_idx.get("proceeds")
+    i_comm = col_idx.get("commission")
+    i_realized_ib = col_idx.get("realized_pnl_ib")
+    i_oc = col_idx.get("open_close")
+    i_ev = col_idx.get("event_code")
+    i_expiry = col_idx.get("expiry")
+    i_strike = col_idx.get("strike")
+    i_right = col_idx.get("right")
+    i_ib_order_id = col_idx.get("ib_order_id")
+    i_conid = col_idx.get("conid")
+    i_underlying_conid = col_idx.get("underlying_conid")
+    i_symbol = col_idx.get("symbol")
+    i_source = col_idx.get("source")
+
     rows: list[NormalizedExecution] = []
-    for idx, row in enumerate(sorted_df.iter_rows(named=True)):
-        dt = _parse_utc_dt(row["executed_at"])
+    for idx, row in enumerate(sorted_df.iter_rows()):
+        dt, executed_at_iso = _parse_utc_dt_and_iso(row[i_executed_at])
         if dt > as_of_utc:
             continue
-        underlying = normalize_underlying(str(row["underlying"]))
-        ac_raw = str(row["asset_class"]).strip().upper()
+        underlying = normalize_underlying(str(row[i_underlying]))
+        ac_raw = str(row[i_asset_class]).strip().upper()
         asset_class: LedgerAssetClass = "STK" if ac_raw == "STK" else "OPT"
-        side_raw = str(row["side"]).strip().upper()
+        side_raw = str(row[i_side]).strip().upper()
         side: LedgerSide = "BOT" if side_raw in ("BOT", "BUY") else "SLD"
-        qty = _finite_float(row.get("quantity"), default=0.0) or 0.0
+        qty = _finite_float(row[i_qty] if i_qty is not None else None, default=0.0) or 0.0
         if qty <= _EPS:
             continue
-        price = max(0.0, _finite_float(row.get("price"), default=0.0) or 0.0)
-        mult_raw = row.get("multiplier")
+        price = max(
+            0.0, _finite_float(row[i_price] if i_price is not None else None, default=0.0) or 0.0
+        )
+        mult_raw = row[i_mult] if i_mult is not None else None
         mult = int(mult_raw) if mult_raw is not None else (1 if asset_class == "STK" else 100)
         if mult <= 0:
             mult = 1 if asset_class == "STK" else 100
-        fx = _finite_float(row.get("fx_rate_to_base"), default=1.0)
+        fx = _finite_float(row[i_fx] if i_fx is not None else None, default=1.0)
         fx_rate = fx if fx is not None and fx > 0.0 else 1.0
-        proceeds_raw = _finite_float(row.get("proceeds"))
+        proceeds_raw = _finite_float(row[i_proceeds] if i_proceeds is not None else None)
         if proceeds_raw is None:
             proceeds_raw = (-qty * price * mult) if side == "BOT" else (qty * price * mult)
-        commission_raw = abs(_finite_float(row.get("commission"), default=0.0) or 0.0)
-        realized_ib = _finite_float(row.get("realized_pnl_ib"))
-        oc_raw = _opt_str(row.get("open_close"))
+        commission_raw = abs(
+            _finite_float(row[i_comm] if i_comm is not None else None, default=0.0) or 0.0
+        )
+        realized_ib = _finite_float(row[i_realized_ib] if i_realized_ib is not None else None)
+        oc_raw = _opt_str(row[i_oc] if i_oc is not None else None)
         open_close: LedgerOpenClose | None = (
             "O" if oc_raw in ("O", "OPEN") else ("C" if oc_raw in ("C", "CLOSE") else None)
         )
-        ev_raw = str(row.get("event_code") or "TRADE").strip().upper()
+        ev_cell = row[i_ev] if i_ev is not None else None
+        ev_raw = str(ev_cell or "TRADE").strip().upper()
         event_code: LedgerEventCode = (
             ev_raw  # type: ignore[assignment]
             if ev_raw in ("TRADE", "EXPIRED", "ASSIGNED", "EXERCISED")
             else "TRADE"
         )
-        expiry = normalize_expiry_yyyymmdd(row.get("expiry")) if asset_class == "OPT" else None
-        strike = _finite_float(row.get("strike")) if asset_class == "OPT" else None
-        right = normalize_right_optional(row.get("right")) if asset_class == "OPT" else None
+        expiry = (
+            normalize_expiry_yyyymmdd(row[i_expiry] if i_expiry is not None else None)
+            if asset_class == "OPT"
+            else None
+        )
+        strike = (
+            _finite_float(row[i_strike] if i_strike is not None else None)
+            if asset_class == "OPT"
+            else None
+        )
+        right = (
+            normalize_right_optional(row[i_right] if i_right is not None else None)
+            if asset_class == "OPT"
+            else None
+        )
         if asset_class == "OPT" and (expiry is None or strike is None or right is None):
             continue
 
+        symbol_cell = row[i_symbol] if i_symbol is not None else None
+        source_cell = row[i_source] if i_source is not None else None
         rows.append(
             NormalizedExecution(
-                exec_id=str(row["exec_id"]),
-                ib_order_id=_opt_str(row.get("ib_order_id")),
-                conid=_opt_int(row.get("conid")),
-                underlying_conid=_opt_int(row.get("underlying_conid")),
-                symbol=str(row.get("symbol") or underlying),
+                exec_id=str(row[i_exec_id]),
+                ib_order_id=_opt_str(row[i_ib_order_id] if i_ib_order_id is not None else None),
+                conid=_opt_int(row[i_conid] if i_conid is not None else None),
+                underlying_conid=_opt_int(
+                    row[i_underlying_conid] if i_underlying_conid is not None else None
+                ),
+                symbol=str(symbol_cell or underlying),
                 underlying=underlying,
                 asset_class=asset_class,
                 expiry=expiry,
@@ -196,9 +275,9 @@ def _extract_executions(
                 realized_pnl_ib=(realized_ib * fx_rate) if realized_ib is not None else None,
                 open_close=open_close,
                 event_code=event_code,
-                executed_at=dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                executed_at=executed_at_iso,
                 executed_at_dt=dt,
-                source=str(row.get("source") or "FLEX_IMPORT"),
+                source=str(source_cell or "FLEX_IMPORT"),
                 seq_index=idx,
             )
         )
@@ -685,6 +764,56 @@ def _format_chart_date_label(date_str: str, *, include_year: bool) -> str:
     return date_str
 
 
+@dataclass(frozen=True, slots=True)
+class CompiledLedgerData:
+    """Pre-extracted executions/positions and per-underlying FIFO roll-chains."""
+
+    all_execs: tuple[NormalizedExecution, ...]
+    all_positions: tuple[NormalizedPosition, ...]
+    max_exec_dt: datetime | None
+    available_tickers: tuple[str, ...]
+    roll_max_gap_hours: float
+    by_underlying: Mapping[str, UnderlyingLedgerResult]
+
+
+def compile_ledger_data(
+    executions_df: pl.DataFrame,
+    positions_df: pl.DataFrame,
+    *,
+    roll_max_gap_hours: float = 24.0,
+) -> CompiledLedgerData:
+    """Extract normalized rows and pre-build per-underlying FIFO roll-chains once."""
+    all_execs = tuple(_extract_executions(executions_df, datetime.max.replace(tzinfo=UTC)))
+    all_positions = tuple(_extract_positions(positions_df))
+    max_exec_dt = max((ex.executed_at_dt for ex in all_execs), default=None)
+    available_tickers = tuple(
+        sorted({ex.underlying for ex in all_execs} | {pos.underlying for pos in all_positions})
+    )
+    execs_by_u: dict[str, list[NormalizedExecution]] = defaultdict(list)
+    for ex in all_execs:
+        execs_by_u[ex.underlying].append(ex)
+    pos_stk_by_u: dict[str, float] = {}
+    for pos in all_positions:
+        if pos.asset_class == "STK":
+            pos_stk_by_u[pos.underlying] = pos_stk_by_u.get(pos.underlying, 0.0) + pos.position
+    by_underlying: dict[str, UnderlyingLedgerResult] = {}
+    for u, u_execs in sorted(execs_by_u.items()):
+        by_underlying[u] = build_underlying_ledger(
+            u,
+            u_execs,
+            pos_stk_by_u.get(u),
+            roll_max_gap_hours=roll_max_gap_hours,
+        )
+    return CompiledLedgerData(
+        all_execs=all_execs,
+        all_positions=all_positions,
+        max_exec_dt=max_exec_dt,
+        available_tickers=available_tickers,
+        roll_max_gap_hours=roll_max_gap_hours,
+        by_underlying=by_underlying,
+    )
+
+
 def build_ledger_report(
     executions_df: pl.DataFrame,
     positions_df: pl.DataFrame,
@@ -697,6 +826,7 @@ def build_ledger_report(
     roll_max_gap_hours: float = 24.0,
     live_marks: dict[int, float] | None = None,
     as_of: datetime | None = None,
+    compiled: CompiledLedgerData | None = None,
 ) -> LedgerAnalyticsReport:
     """Run Trade Ledger classification, FIFO/roll stitching, windowing, and MTM valuation."""
     resolved_as_of = as_of if as_of is not None else datetime.now(UTC)
@@ -710,19 +840,30 @@ def build_ledger_report(
     raw_ticker = ticker.strip().upper()
     ticker_norm = "ALL" if raw_ticker in ("", "ALL") else normalize_underlying(raw_ticker)
 
-    all_execs = _extract_executions(executions_df, as_of_utc)
-    all_positions = _extract_positions(positions_df)
-    available_tickers = sorted(
-        {ex.underlying for ex in all_execs} | {pos.underlying for pos in all_positions}
+    use_compiled = (
+        compiled is not None
+        and abs(compiled.roll_max_gap_hours - roll_max_gap_hours) <= 1e-9
+        and (compiled.max_exec_dt is None or as_of_utc >= compiled.max_exec_dt)
     )
+    compiled_data = compiled if use_compiled else None
+    if compiled_data is not None:
+        all_execs = compiled_data.all_execs
+        all_positions = compiled_data.all_positions
+        available_tickers = list(compiled_data.available_tickers)
+    else:
+        all_execs = tuple(_extract_executions(executions_df, as_of_utc))
+        all_positions = tuple(_extract_positions(positions_df))
+        available_tickers = sorted(
+            {ex.underlying for ex in all_execs} | {pos.underlying for pos in all_positions}
+        )
 
     filtered_execs = (
-        all_execs
+        list(all_execs)
         if ticker_norm == "ALL"
         else [ex for ex in all_execs if ex.underlying == ticker_norm]
     )
     filtered_positions = (
-        all_positions
+        list(all_positions)
         if ticker_norm == "ALL"
         else [pos for pos in all_positions if pos.underlying == ticker_norm]
     )
@@ -764,13 +905,18 @@ def build_ledger_report(
         u_execs = execs_by_u.get(u, [])
         if not u_execs:
             continue
-        u_pos_stk = pos_stk_by_u.get(u)
-        res = build_underlying_ledger(
-            u,
-            u_execs,
-            u_pos_stk,
-            roll_max_gap_hours=roll_max_gap_hours,
-        )
+        if compiled_data is not None:
+            res = compiled_data.by_underlying.get(u)
+            if res is None:
+                continue
+        else:
+            u_pos_stk = pos_stk_by_u.get(u)
+            res = build_underlying_ledger(
+                u,
+                u_execs,
+                u_pos_stk,
+                roll_max_gap_hours=roll_max_gap_hours,
+            )
         all_campaigns.extend(res.campaigns)
         for camp in res.campaigns:
             campaigns_by_id[camp.campaign_id] = camp
@@ -844,7 +990,9 @@ def build_ledger_report(
     daily_fees: dict[str, float] = defaultdict(float)
 
     for camp in all_campaigns:
-        steps_in_win = [s for s in camp.steps if _in_window(_parse_utc_dt(s.executed_at))]
+        steps_in_win = [
+            s for s in camp.steps if _in_window(_parse_utc_dt_and_iso(s.executed_at)[0])
+        ]
         camp_stk_reals = stk_reals_by_camp.get(camp.campaign_id, []) if include_stock_gain else []
         if not steps_in_win and not camp_stk_reals:
             continue
@@ -899,7 +1047,11 @@ def build_ledger_report(
                     camp_mtm_sums.get(camp.campaign_id) if view == "open_mtm" else None
                 ),
                 fees=opt_fees + stk_fees,
-                steps=steps_in_win,
+                steps=(
+                    [s.model_copy() for s in steps_in_win]
+                    if compiled_data is not None
+                    else steps_in_win
+                ),
             )
         )
 
@@ -929,8 +1081,8 @@ def build_ledger_report(
                     underlying=u,
                     strategy_type="STOCK_LOT",
                     status="OPEN" if open_stk_qty > _EPS else "CLOSED",
-                    opened_at=opened_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    last_activity_at=closed_dt.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    opened_at=format_utc_iso(opened_dt),
+                    last_activity_at=format_utc_iso(closed_dt),
                     roll_count=0,
                     initial_summary=f"{u} {total_qty:g} shs",
                     current_summary=curr_sum,
@@ -1104,9 +1256,9 @@ def build_ledger_report(
     )
 
     return LedgerAnalyticsReport(
-        as_of=as_of_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        as_of=format_utc_iso(as_of_utc),
         window=window,
-        window_start=window_start.strftime("%Y-%m-%dT%H:%M:%SZ") if window_start else None,
+        window_start=format_utc_iso(window_start) if window_start else None,
         ticker=ticker_norm,
         group_by=group_by,
         view=view,

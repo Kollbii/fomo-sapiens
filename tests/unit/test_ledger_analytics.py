@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any, Literal
 
 import polars as pl
@@ -10,12 +10,21 @@ import pytest
 
 from src.analytics.ledger import (
     AggregatedLeg,
+    CompiledLedgerData,
     LedgerAnalyticsReport,
     NormalizedExecution,
     build_ledger_report,
     classify_option_legs,
     cluster_option_episodes,
+    compile_ledger_data,
     compute_window_start,
+)
+from src.analytics.ledger.classifier import (
+    aggregate_legs,
+    format_legs_position_label,
+    format_legs_strike_summary,
+    format_step_summary,
+    format_utc_iso,
 )
 from src.storage.ledger_schema import (
     LEDGER_EXECUTION_COLUMNS,
@@ -2172,3 +2181,186 @@ def test_stale_gateway_snapshot_does_not_revert_later_partial_close() -> None:
     # Contracts active at T3 > T2 also remain visible even if absent from T2 Gateway snapshot
     assert by_key["OPT:AVGO:20261218:180:C"].quantity == pytest.approx(-1.0)
     assert by_key["STK:AVGO"].quantity == pytest.approx(50.0)
+
+
+def test_already_aggregated_fast_paths_and_format_utc_iso() -> None:
+    naive = datetime(2026, 11, 20, 9, 5, 7)
+    utc_dt = datetime(2026, 11, 20, 9, 5, 7, tzinfo=UTC)
+    plus_two = datetime(2026, 11, 20, 11, 5, 7, tzinfo=timezone(timedelta(hours=2)))
+    assert format_utc_iso(naive) == "2026-11-20T09:05:07Z"
+    assert format_utc_iso(utc_dt) == "2026-11-20T09:05:07Z"
+    assert format_utc_iso(plus_two) == "2026-11-20T09:05:07Z"
+
+    raw_legs = [
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=140.0,
+            right="P",
+            side="SLD",
+            quantity=1.0,
+            price=4.0,
+            cashflow_ex_fee=400.0,
+            fees=0.65,
+            multiplier=100,
+            conid=700001,
+            symbol="NVDA  261218P00140000",
+        ),
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=140.0,
+            right="P",
+            side="SLD",
+            quantity=1.0,
+            price=4.2,
+            cashflow_ex_fee=420.0,
+            fees=0.65,
+            multiplier=100,
+            conid=None,
+            symbol="NVDA  261218P00140000",
+        ),
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261218",
+            strike=135.0,
+            right="P",
+            side="BOT",
+            quantity=2.0,
+            price=2.1,
+            cashflow_ex_fee=-420.0,
+            fees=1.30,
+            multiplier=100,
+            conid=700002,
+            symbol="NVDA  261218P00135000",
+        ),
+    ]
+    old_legs = [
+        AggregatedLeg(
+            underlying="NVDA",
+            expiry="20261120",
+            strike=130.0,
+            right="P",
+            side="SLD",
+            quantity=2.0,
+            price=3.0,
+            cashflow_ex_fee=600.0,
+            fees=1.30,
+            multiplier=100,
+            conid=700003,
+            symbol="NVDA  261120P00130000",
+        ),
+    ]
+    distinct = aggregate_legs(raw_legs)
+    assert len(distinct) == 2
+    assert distinct[1].conid == 700001
+    assert distinct[1].quantity == pytest.approx(2.0)
+
+    assert classify_option_legs(raw_legs) == classify_option_legs(distinct, already_aggregated=True)
+    assert format_legs_strike_summary(raw_legs) == format_legs_strike_summary(
+        distinct, already_aggregated=True
+    )
+    assert format_legs_position_label(raw_legs) == format_legs_position_label(
+        distinct, already_aggregated=True
+    )
+    assert format_step_summary(
+        "ROLL",
+        raw_legs,
+        cashflow_ex_fee=120.0,
+        contracts=2.0,
+        roll_old_legs=old_legs,
+    ) == format_step_summary(
+        "ROLL",
+        distinct,
+        cashflow_ex_fee=120.0,
+        contracts=2.0,
+        roll_old_legs=aggregate_legs(old_legs),
+        already_aggregated=True,
+    )
+
+
+def test_compile_ledger_data_equivalence_and_as_of_fallback() -> None:
+    execs = _exec_df(
+        [
+            {
+                "exec_id": "comp-1",
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 5.0,
+                "proceeds": 500.0,
+                "commission": 1.0,
+                "open_close": "O",
+                "executed_at": _ts(1),
+            },
+            {
+                "exec_id": "comp-2",
+                "underlying": "AVGO",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 180.0,
+                "right": "P",
+                "side": "SLD",
+                "quantity": 1.0,
+                "price": 6.0,
+                "proceeds": 600.0,
+                "commission": 1.0,
+                "open_close": "O",
+                "executed_at": _ts(5),
+            },
+        ]
+    )
+    pos = _pos_df(
+        [
+            {
+                "conid": 740001,
+                "underlying": "NVDA",
+                "asset_class": "OPT",
+                "expiry": "20261218",
+                "strike": 140.0,
+                "right": "P",
+                "position": -1.0,
+                "avg_cost": 5.0,
+                "mark_price": 4.0,
+                "source": "FLEX_IMPORT",
+                "updated_at": _ts(5),
+            }
+        ]
+    )
+    compiled = compile_ledger_data(execs, pos)
+    assert isinstance(compiled, CompiledLedgerData)
+
+    later = AS_OF + timedelta(days=2)
+    views: tuple[Literal["realized", "open_mtm"], ...] = ("realized", "open_mtm")
+    for ticker_arg in ("ALL", "NVDA"):
+        for view_arg in views:
+            uncompiled = build_ledger_report(
+                execs,
+                pos,
+                window="ALL",
+                ticker=ticker_arg,
+                view=view_arg,
+                as_of=later,
+            )
+            fast = build_ledger_report(
+                execs,
+                pos,
+                window="ALL",
+                ticker=ticker_arg,
+                view=view_arg,
+                as_of=later,
+                compiled=compiled,
+            )
+            assert fast.model_dump() == uncompiled.model_dump()
+
+    # Safely ignores compiled cache when caller requests historical as_of < max_exec_dt
+    early_as_of = datetime.fromisoformat(_ts(2).replace("Z", "+00:00"))
+    expected_early = build_ledger_report(execs, pos, window="ALL", as_of=early_as_of)
+    actual_early = build_ledger_report(
+        execs, pos, window="ALL", as_of=early_as_of, compiled=compiled
+    )
+    assert actual_early.model_dump() == expected_early.model_dump()
