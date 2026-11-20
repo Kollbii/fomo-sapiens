@@ -21,7 +21,8 @@ from src.core.config import IBKRSettings, Settings, StorageSettings
 from src.core.exceptions import GatewayConnectionError
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository, make_snapshot_id
-from tests.support.aio import noop_sleep, run_coro, run_virtual_loop
+from src.web import api as web_api
+from tests.support.aio import VirtualEventLoop, noop_sleep, run_virtual_loop
 from tests.support.ib_fakes import FakeEvent
 
 
@@ -215,7 +216,7 @@ def test_index_and_status_and_snapshots_endpoints(tmp_path: Path) -> None:
                 assert snaps["latest_snapshot_id"] == "NVDA_20261111_150000"
                 assert len(snaps["snapshots"]) == 1
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
     assert mock_ib.disconnected_called is True
 
 
@@ -259,7 +260,7 @@ def test_chain_endpoint_enriches_bsm_and_handles_422_and_404(tmp_path: Path) -> 
             assert r_missing.status_code == 404
             assert r_missing.json()["error_code"] == "SNAPSHOT_NOT_FOUND"
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
@@ -278,7 +279,7 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             assert body["error_code"] == "GATEWAY_OFFLINE"
             assert "4001" in body["message"]
 
-    run_coro(_exercise_offline())
+    run_virtual_loop(_exercise_offline())
 
     # 2. Online Gateway -> HTTP 200 LIVE_REFRESH + persisted to CSVRepository
     app_online, repo_on, _ = _build_test_app(tmp_path / "online", offline=False)
@@ -331,7 +332,7 @@ def test_post_refresh_success_and_offline_503(tmp_path: Path) -> None:
             assert r_bad.status_code == 422
             assert r_bad.json()["error_code"] == "INVALID_TICKER"
 
-    run_coro(_exercise_online())
+    run_virtual_loop(_exercise_online())
     with pytest.raises(GatewayConnectionError):
         # Verify exception class import used for clarity
         raise GatewayConnectionError("check")
@@ -728,7 +729,7 @@ def test_dashboard_html_static_assets_and_csv_download(
             )
             assert r_auto.status_code == 200
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_expanded_120_dte_refresh_and_query_filtering(tmp_path: Path) -> None:
@@ -774,7 +775,7 @@ def test_expanded_120_dte_refresh_and_query_filtering(tmp_path: Path) -> None:
             r_bad_dte = await client.get("/api/chain/NVDA", params={"dte_max": 121})
             assert r_bad_dte.status_code == 422
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
@@ -896,7 +897,7 @@ def test_strategy_suggest_and_evaluate_endpoints(tmp_path: Path) -> None:
             )
             assert r_404.status_code == 404
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
@@ -953,7 +954,7 @@ def test_dynamic_live_config_and_custom_gateway_host_port_across_ui_and_api(
                 assert "10.0.0.5:7496" in err_msg
                 assert "4001" not in err_msg
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
@@ -968,7 +969,7 @@ def test_lifespan_creates_storage_layout_on_empty_root(tmp_path: Path) -> None:
             assert repo.latest_dir.is_dir()
             assert repo.index_path.parent.is_dir()
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_service_level_validation_errors_map_to_structured_422(tmp_path: Path) -> None:
@@ -984,7 +985,7 @@ def test_service_level_validation_errors_map_to_structured_422(tmp_path: Path) -
                 assert body["error_code"] == "INVALID_REQUEST"
                 assert body["message"] == body["detail"] == "dte_min must be <= dte_max"
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_short_dte_refresh_display_isolation_and_zero_dte_chain_and_strategy(
@@ -1068,7 +1069,7 @@ def test_short_dte_refresh_display_isolation_and_zero_dte_chain_and_strategy(
             assert len(evals) == 1
             assert all(0 <= leg["dte"] <= 29 for leg in evals[0]["legs"])
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_status_exposes_connection_state_across_timeout_reconnect_and_disconnect(
@@ -1212,4 +1213,83 @@ def test_lifespan_configures_isolated_logging_and_closes_handlers_on_shutdown(
 
         assert _analyzer_handlers() == []
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
+
+
+def test_sync_api_routes_offload_via_in_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app, _repo, _mock_ib = _build_test_app(tmp_path, offline=True)
+    dispatched: list[str] = []
+    executor_calls = 0
+    real_in_thread = web_api._in_thread
+    real_run_in_executor = VirtualEventLoop.run_in_executor
+
+    async def _run_sync_inline(func: Callable[..., Any], *args: Any, **_kwargs: Any) -> Any:
+        return func(*args)
+
+    async def _spy_in_thread(fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        dispatched.append(getattr(fn, "__name__", str(fn)))
+        return await real_in_thread(fn, *args, **kwargs)
+
+    def _spy_executor(
+        self_loop: VirtualEventLoop,
+        executor: Any,
+        func: Callable[..., Any],
+        *args: Any,
+    ) -> Any:
+        nonlocal executor_calls
+        executor_calls += 1
+        return real_run_in_executor(self_loop, executor, func, *args)
+
+    monkeypatch.setattr(anyio.to_thread, "run_sync", _run_sync_inline)
+    monkeypatch.setattr(
+        anyio.CancelScope,
+        "__new__",
+        lambda _cls, **_kw: contextlib.nullcontext(),
+    )
+    monkeypatch.setattr(web_api, "_in_thread", _spy_in_thread)
+    monkeypatch.setattr(VirtualEventLoop, "run_in_executor", _spy_executor)
+
+    async def _exercise() -> None:
+        async def _asgi_24(scope: Any, receive: Any, send: Any) -> None:
+            patched_scope = {**scope, "asgi": {"version": "3.0", "spec_version": "2.4"}}
+            await app(patched_scope, receive, send)
+
+        transport = httpx.ASGITransport(app=_asgi_24)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            assert (await client.get("/api/status")).status_code == 200
+            assert (await client.get("/api/snapshots/NVDA")).status_code == 200
+            assert (await client.get("/api/chain/NVDA")).status_code == 200
+            r_csv = await client.get("/api/csv/NVDA")
+            assert r_csv.status_code == 200
+            assert (
+                await client.post("/api/strategy/suggest", json={"ticker": "NVDA"})
+            ).status_code == 200
+            assert (
+                await client.post(
+                    "/api/strategy/evaluate",
+                    json={"ticker": "NVDA", "strategy_kind": "BULL_PUT_SPREAD"},
+                )
+            ).status_code == 200
+            assert (await client.get("/api/ledger")).status_code == 200
+            r_imp = await client.post(
+                "/api/ledger/import",
+                files={"file": ("sample.csv", b"Symbol,AssetCategory\n", "text/csv")},
+            )
+            assert r_imp.status_code == 200
+
+    run_virtual_loop(_exercise())
+
+    expected_fns = [
+        "get_status",
+        "list_snapshots",
+        "load_chain_analytics",
+        "resolve_csv_path",
+        "suggest_strategies",
+        "evaluate_strategy",
+        "get_ledger_dashboard",
+        "import_ledger_file",
+    ]
+    assert dispatched == expected_fns
+    assert executor_calls == len(expected_fns)

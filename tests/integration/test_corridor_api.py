@@ -19,7 +19,7 @@ from src.core.config import Settings, StorageSettings
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository
 from src.web.api import api_corridor_stream
-from tests.support.aio import noop_sleep, run_coro
+from tests.support.aio import noop_sleep, run_virtual_loop
 from tests.support.ib_fakes import FakeEvent
 
 
@@ -242,7 +242,7 @@ def test_corridor_offline_and_validation_errors(tmp_path: Path) -> None:
                 assert r_stream_off.status_code == 503
                 assert r_stream_off.json()["error_code"] == "GATEWAY_OFFLINE"
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Path) -> None:
@@ -414,7 +414,7 @@ def test_corridor_quotes_overlay_preserves_csv_and_streams_cleanly(tmp_path: Pat
                 assert sig.parameters["max_contracts"].default.default == 88
                 assert latest_csv_path.read_bytes() == csv_before
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
     assert mock_ib.isConnected() is False
 
 
@@ -483,7 +483,7 @@ def test_corridor_stream_refuses_when_lock_taken_before_first_read(tmp_path: Pat
             assert len(mock_ib.cancelled) == len(mock_ib.subscribed)
             return events
 
-    events = run_coro(_exercise())
+    events = run_virtual_loop(_exercise())
     assert [ev for ev, _ in events] == ["error"]
     assert events[0][1]["error_code"] == "REFRESH_BUSY"
     assert events[0][1]["status"] == 409
@@ -528,9 +528,11 @@ def test_corridor_stream_gateway_timeout_emits_gateway_timeout_error() -> None:
         raw = chunks[0].decode("utf-8") if isinstance(chunks[0], bytes) else str(chunks[0])
         return _parse_sse_block(raw)[1]
 
-    timeout = run_coro(_events(GatewayTimeoutError("IBKR Gateway did not answer during chain")))
+    timeout = run_virtual_loop(
+        _events(GatewayTimeoutError("IBKR Gateway did not answer during chain"))
+    )
     assert timeout["error_code"] == "GATEWAY_TIMEOUT"
     assert timeout["status"] == 503
     assert "not answering" in timeout["message"]
-    offline = run_coro(_events(GatewayConnectionError("lost")))
+    offline = run_virtual_loop(_events(GatewayConnectionError("lost")))
     assert offline["error_code"] == "GATEWAY_OFFLINE"

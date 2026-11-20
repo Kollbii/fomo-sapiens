@@ -738,10 +738,7 @@ class AnalyzerService:
         df, explicit_filter = self._isolate_dashboard_dte(df, dte_min=dte_min, dte_max=dte_max)
         if explicit_filter and df.height == 0:
             raise SnapshotNotFoundError(f"No contracts found in requested DTE range for {symbol}")
-        snap_meta = next(
-            (m for m in self.repo.list_snapshots(symbol) if m.snapshot_id == loaded_snap_id),
-            None,
-        )
+        snap_meta = self.repo.get_snapshot_meta(symbol, loaded_snap_id)
         has_meta_quality = (
             snap_meta is not None
             and df.height == snap_meta.contract_count

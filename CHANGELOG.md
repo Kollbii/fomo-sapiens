@@ -7,6 +7,12 @@ milestones in git history.
 
 ## [Unreleased]
 
+### Performance
+- **Quickest High-Impact Performance Pack (`src/storage/csv_repository.py`, `src/analytics/walls.py`, `src/web/api.py`, `tests/support/aio.py`):**
+  - Added a lock-protected, stat-keyed (`mtime_ns`, `size`, `ino`, `ctime_ns`) in-memory snapshot index and parsed `SnapshotMeta` cache in `CSVRepository` (`get_snapshot_meta()`, `_clone_snapshot_meta()` list-isolated copies) with automatic invalidation on write/corruption/unlink, and switched `AnalyzerService.load_chain_analytics()` to single-entry lookup.
+  - Replaced multi-query per-DTE Polars grouping inside `compute_walls()` with a single-pass column projection and `heapq.nsmallest` strike ranking.
+  - Offloaded synchronous disk/CSV/analytics FastAPI route handlers (`api_status`, `api_snapshots`, `api_chain`, `api_csv_download`, `api_strategy_suggest`, `api_strategy_evaluate`, `api_ledger`, `api_ledger_import`) off the `asyncio` event loop via `_in_thread` (`asyncio.to_thread`), and implemented socket-free `VirtualEventLoop.run_in_executor` for integration tests.
+
 ### Added
 - **Read-Only Code-Usability & Performance Auditor Agents (`refactoring-specialist`, `performance-optimizer`):** Added canonical read-only auditor agent specs in `.agent/agents/`, synced for Claude Code (`.claude/agents/`) and Gemini CLI (`.gemini/agents/` + `.gemini/settings.json`), and registered the `neon` (`gemini-4-neon`) Gemini model alias in `.agent/models.yaml`.
 - **Workspace Mode Tabs, Sticky Mini Context Bar, Pull-Scope Popover & Network-vs-Cache cues (`src/web/templates/{base,index}.html`, `src/web/static/css/{layout,controls,charts,responsive}.css`, `src/web/static/js/dashboard/{state,helpers,badges,panels,workspace,screener,backtest,network,watchlist,events,main}.js`, `tests/unit/test_workspace_ui_js.py`, `tests/integration/test_web_api.py`):**

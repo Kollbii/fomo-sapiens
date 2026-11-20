@@ -513,3 +513,59 @@ def test_partial_metadata_validation(repo: CSVRepository) -> None:
     with pytest.raises(StorageSchemaError, match="metadata validation"):
         repo.save_snapshot("NVDA", make_rows(), partial_reason="boom")  # type: ignore[arg-type]
     assert not repo.snapshot_path("NVDA", make_snapshot_id("NVDA", MARKET_DATE)).exists()
+
+
+def test_index_cache_avoids_reread_and_revalidation(
+    repo: CSVRepository, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    saved = repo.save_snapshot("NVDA", make_rows(), range_pct=0.2, strike_step=5.0)
+    assert [m.snapshot_id for m in repo.list_snapshots("NVDA")] == [saved.snapshot_id]
+
+    def _fail_loads(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("index JSON should be served from in-memory stat cache")
+
+    monkeypatch.setattr(json, "loads", _fail_loads)
+    assert [m.snapshot_id for m in repo.list_snapshots("NVDA")] == [saved.snapshot_id]
+    assert repo.latest_snapshots(["NVDA"])["NVDA"].snapshot_id == saved.snapshot_id
+    found = repo.get_snapshot_meta("NVDA", saved.snapshot_id)
+    assert found is not None and found.snapshot_id == saved.snapshot_id
+    assert repo.get_snapshot_meta("NVDA", "NVDA_19990101_000000") is None
+
+
+def test_index_cache_invalidates_on_external_change_corruption_and_unlink(
+    repo: CSVRepository,
+) -> None:
+    saved = repo.save_snapshot("NVDA", make_rows(), partial_reason="cancelled")
+    assert repo.list_snapshots("NVDA")[0].partial is True
+
+    raw = json.loads(repo.index_path.read_text(encoding="utf-8"))
+    for snap in raw["tickers"]["NVDA"]["snapshots"]:
+        snap.pop("partial")
+        snap.pop("partial_reason")
+    repo.index_path.write_text(json.dumps(raw), encoding="utf-8")
+    assert repo.list_snapshots("NVDA")[0].partial is None
+
+    repo.index_path.write_text("{ corrupt", encoding="utf-8")
+    healed = repo.list_snapshots("NVDA")
+    assert [m.snapshot_id for m in healed] == [saved.snapshot_id]
+
+    repo.index_path.unlink()
+    assert [m.snapshot_id for m in repo.list_snapshots("NVDA")] == [saved.snapshot_id]
+
+
+def test_index_cache_isolates_returned_meta_mutations(repo: CSVRepository) -> None:
+    saved = repo.save_snapshot("NVDA", make_rows())
+    listed = repo.list_snapshots("NVDA")
+    orig_expirations = list(listed[0].expirations)
+    listed[0].expirations.append("99991231")
+
+    fresh = repo.list_snapshots("NVDA")
+    assert fresh[0].expirations == orig_expirations
+    single = repo.get_snapshot_meta("NVDA", saved.snapshot_id)
+    assert single is not None
+    single.expirations.append("99991231")
+    single_again = repo.get_snapshot_meta("NVDA", saved.snapshot_id)
+    assert single_again is not None and single_again.expirations == orig_expirations
+    latest = repo.latest_snapshots(["NVDA"])
+    latest["NVDA"].expirations.append("99991231")
+    assert repo.latest_snapshots(["NVDA"])["NVDA"].expirations == orig_expirations

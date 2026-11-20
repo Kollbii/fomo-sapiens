@@ -13,7 +13,7 @@ from src.core.config import Settings, StorageSettings
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository
 from src.storage.schema import COLUMNS
-from tests.support.aio import run_coro
+from tests.support.aio import run_virtual_loop
 from tests.support.ib_fakes import FakeEvent
 
 GOLDEN_SNAPSHOT_ID = "NVDA_20261111_155004"
@@ -69,4 +69,4 @@ def test_offline_ui_and_chain_render_from_golden_snapshot(fixture_repo: CSVRepos
                 assert body["meta"]["snapshot_id"] == GOLDEN_SNAPSHOT_ID
                 assert body["walls"]["primary_basis"] == "VOLUME"  # OI is null
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())

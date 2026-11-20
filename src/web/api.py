@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
-from typing import Any, Literal
+from collections.abc import AsyncIterator, Callable
+from typing import Any, Literal, ParamSpec, TypeVar
 
 from fastapi import APIRouter, Body, Depends, File, HTTPException, Path, Query, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -60,6 +60,15 @@ from src.services.schemas import (
 
 router = APIRouter(prefix="/api", tags=["options-analyzer"])
 logger = logging.getLogger(__name__)
+
+_P = ParamSpec("_P")
+_T = TypeVar("_T")
+
+
+async def _in_thread(fn: Callable[_P, _T], *args: _P.args, **kwargs: _P.kwargs) -> _T:
+    """Offload blocking disk/CSV/analytics service work off the asyncio event loop."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
 
 #: Cap of the JSON `q` query parameter of `GET /api/screener/stream` (120 row ids x 64 chars).
 SCREENER_STREAM_QUERY_MAX_CHARS = 12_000
@@ -142,7 +151,7 @@ async def api_status(
     ticker: str | None = None,
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> GatewayStatusResponse:
-    return svc.get_status(ticker=ticker)
+    return await _in_thread(svc.get_status, ticker=ticker)
 
 
 @router.get("/snapshots/{ticker}", response_model=SnapshotsListResponse)
@@ -150,7 +159,7 @@ async def api_snapshots(
     ticker: str,
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> SnapshotsListResponse:
-    return svc.list_snapshots(ticker)
+    return await _in_thread(svc.list_snapshots, ticker)
 
 
 @router.get("/chain/{ticker}", response_model=ChainAnalyticsResponse)
@@ -161,7 +170,8 @@ async def api_chain(
     dte_max: int | None = Query(default=None, ge=0, le=120),
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> ChainAnalyticsResponse:
-    return svc.load_chain_analytics(
+    return await _in_thread(
+        svc.load_chain_analytics,
         ticker,
         snapshot_id=snapshot_id,
         dte_min=dte_min,
@@ -175,7 +185,7 @@ async def api_csv_download(
     snapshot_id: str | None = Query(default=None),
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> FileResponse:
-    csv_path = svc.resolve_csv_path(ticker, snapshot_id=snapshot_id)
+    csv_path = await _in_thread(svc.resolve_csv_path, ticker, snapshot_id=snapshot_id)
     return FileResponse(path=csv_path, media_type="text/csv", filename=csv_path.name)
 
 
@@ -264,7 +274,7 @@ async def api_strategy_suggest(
     payload: StrategySuggestRequest,
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> StrategySuggestResponse:
-    return svc.suggest_strategies(payload)
+    return await _in_thread(svc.suggest_strategies, payload)
 
 
 @router.post("/strategy/evaluate", response_model=StrategyEvaluationResponse)
@@ -272,7 +282,7 @@ async def api_strategy_evaluate(
     payload: StrategyEvaluateRequest,
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> StrategyEvaluationResponse:
-    return svc.evaluate_strategy(payload)
+    return await _in_thread(svc.evaluate_strategy, payload)
 
 
 @router.post("/corridor/quotes", response_model=CorridorQuoteFrame)
@@ -490,7 +500,8 @@ async def api_ledger(
     include_stock_gain: bool = False,
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> LedgerDashboardResponse:
-    return svc.get_ledger_dashboard(
+    return await _in_thread(
+        svc.get_ledger_dashboard,
         window=window,
         ticker=ticker,
         group_by=group_by,
@@ -522,7 +533,7 @@ async def api_ledger_import(
     if len(raw_bytes) > MAX_LEDGER_IMPORT_BYTES:
         raise InvalidRequestError("Uploaded ledger file exceeds 20 MB limit.")
     try:
-        return svc.import_ledger_file(file.filename or "upload.csv", raw_bytes)
+        return await _in_thread(svc.import_ledger_file, file.filename or "upload.csv", raw_bytes)
     except UnicodeDecodeError as exc:
         raise InvalidRequestError("Uploaded ledger file is not valid UTF-8 text.") from exc
 

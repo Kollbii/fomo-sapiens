@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import heapq
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, TypeVar
 
 T = TypeVar("T")
@@ -87,6 +87,23 @@ class VirtualEventLoop:
         self, callback: Any, *args: Any, context: Any = None
     ) -> asyncio.Handle:
         return self.call_soon(callback, *args, context=context)
+
+    def run_in_executor(
+        self,
+        executor: Any,
+        func: Callable[..., T],
+        *args: Any,
+    ) -> asyncio.Future[T]:
+        """Run `func(*args)` inline and return a resolved Future (socket-free test loop)."""
+        _ = executor
+        fut: asyncio.Future[T] = self.create_future()
+        try:
+            result = func(*args)
+        except BaseException as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(result)
+        return fut
 
     def call_later(
         self, delay: float, callback: Any, *args: Any, context: Any = None

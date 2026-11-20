@@ -24,7 +24,7 @@ from src.services.ledger import LedgerService
 from src.storage.csv_repository import CSVRepository
 from src.storage.ledger_repository import LedgerRepository
 from src.web import api as web_api
-from tests.support.aio import noop_sleep, run_coro
+from tests.support.aio import noop_sleep, run_virtual_loop
 from tests.support.ib_fakes import FakeEvent
 
 _FLEX_TOKEN = "secret-flex-tok-999"
@@ -375,7 +375,7 @@ def test_ledger_html_surface_and_offline_empty_state(
                 assert empty_data["status"]["execution_count"] == 0
                 assert empty_data["status"]["recommended_sync_mode"] == "full"
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_ledger_import_and_dashboard_queries(
@@ -514,7 +514,7 @@ def test_ledger_import_and_dashboard_queries(
             assert (await client.get("/api/ledger?group_by=unknown")).status_code == 422
             assert (await client.get("/api/ledger?view=unknown")).status_code == 422
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_ledger_sync_routes_and_error_mapping(
@@ -643,7 +643,7 @@ def test_ledger_sync_routes_and_error_mapping(
             assert s2["mode_used"] == "monthly+gateway"
             assert "MON30" in queries
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_ledger_mtm_route_offline_and_live_refresh(
@@ -696,7 +696,7 @@ def test_ledger_mtm_route_offline_and_live_refresh(
             ]["kpis"]["realized_pnl_ex_fee"]
             assert after_realized == pytest.approx(before_realized)
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())
 
 
 def test_ledger_import_security_and_bounded_reads(
@@ -788,4 +788,4 @@ def test_ledger_import_security_and_bounded_reads(
             assert spy_file.read_sizes == [129]
             assert spy_file.closed is True
 
-    run_coro(_exercise())
+    run_virtual_loop(_exercise())

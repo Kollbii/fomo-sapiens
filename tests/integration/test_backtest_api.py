@@ -21,6 +21,7 @@ from src.core.config import PaperTrackerSettings, Settings
 from src.main import create_app
 from src.storage.csv_repository import CSVRepository
 from src.storage.schema import OptionContractRow, SpotSource
+from src.web import api as web_api
 from src.web import backtest_api
 from tests.support.aio import noop_sleep, run_coro
 from tests.support.ib_fakes import FakeEvent
@@ -56,6 +57,7 @@ def _patch_inline_threads(monkeypatch: pytest.MonkeyPatch, app: Any) -> Any:
 
     monkeypatch.setattr(anyio.to_thread, "run_sync", _run_sync_inline)
     monkeypatch.setattr(backtest_api, "_in_thread", _in_thread_inline)
+    monkeypatch.setattr(web_api, "_in_thread", _in_thread_inline)
     monkeypatch.setattr(
         anyio.CancelScope,
         "__new__",
