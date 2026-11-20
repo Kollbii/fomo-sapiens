@@ -141,6 +141,7 @@
   max-width: calc(100vw - 24px);
   max-height: 440px;
   overflow-y: auto;
+  scrollbar-gutter: stable;
   padding: 4px 0;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
@@ -201,7 +202,7 @@
   grid-template-columns: auto 1fr auto auto;
   align-items: center;
   gap: 8px;
-  padding: 3px 12px;
+  padding: 3px 16px 3px 12px;
 }
 
 .wl-row:hover {
@@ -389,7 +390,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px 4px;
+  padding: 6px 16px 4px 12px;
   border-top: 1px solid var(--border-subtle);
 }
 

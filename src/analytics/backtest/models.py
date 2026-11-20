@@ -8,7 +8,7 @@ from typing import Final, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.analytics.bsm_fallback import DEFAULT_RISK_FREE_RATE
-from src.analytics.strategies.models import EvaluatedLeg, LegSide, StrategyKind
+from src.analytics.strategies.models import EvaluatedLeg, LegSide
 from src.storage.schema import OptionRight, SpotSource
 
 FLAG_LEG_FALLBACK_PRICE: Final = "LEG_FALLBACK_PRICE"
@@ -26,6 +26,12 @@ FLAG_FROZEN_MARKET_DATA: Final = "FROZEN_MARKET_DATA"
 FLAG_SNAPSHOT_META_MISSING: Final = "SNAPSHOT_META_MISSING"
 FLAG_EMPTY_CHAIN: Final = "EMPTY_CHAIN"
 FLAG_BROKER_FILL_ENTRY: Final = "BROKER_FILL_ENTRY"
+FLAG_ROLLED_ENTRY: Final = "ROLLED_ENTRY"
+FLAG_ROLL_SKIPPED: Final = "ROLL_SKIPPED"
+FLAG_SYNTHETIC_STOCK_ENTRY: Final = "SYNTHETIC_STOCK_ENTRY"
+FLAG_PUT_ASSIGNED: Final = "PUT_ASSIGNED"
+FLAG_CALLED_AWAY: Final = "CALLED_AWAY"
+FLAG_STOCK_LIQUIDATED_ON_SL: Final = "STOCK_LIQUIDATED_ON_SL"
 
 
 def deduplicate_flags(flags: Sequence[str]) -> list[str]:
@@ -33,12 +39,39 @@ def deduplicate_flags(flags: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(flags))
 
 
+BacktestStrategyKind = Literal[
+    "BULL_PUT_SPREAD",
+    "BULL_CALL_SPREAD",
+    "DIAGONAL_SPREAD",
+    "IRON_CONDOR",
+    "BEAR_CALL_SPREAD",
+    "BEAR_PUT_SPREAD",
+    "COVERED_CALL",
+    "WHEEL",
+    "CUSTOM",
+]
+StrikeSelectionMode = Literal["TARGET_DELTA", "WALL_ANCHORED"]
+CcStrikeFloorMode = Literal["COST_BASIS", "NET_BREAKEVEN", "NONE"]
+StockStopMode = Literal["OPTION_ONLY", "LIQUIDATE_STOCK_ON_SL"]
+CcItmMode = Literal["CALL_AWAY_AND_REBUY", "KEEP_SHARES_CASH_SETTLE"]
+RollCreditMode = Literal["CREDIT_ONLY", "ZERO_OR_CREDIT"]
+WheelPhase = Literal["CSP", "CC"]
+
 BacktestMode = Literal["SYSTEMATIC", "SINGLE_TRADE"]
 PriceBasis = Literal["AUTO_MID_LAST_CLOSE", "LAST_CLOSE_ONLY"]
 ClosePriceMode = Literal["MID", "NATURAL_SPREAD"]
 TpSlBasis = Literal["CREDIT_DEBIT_PCT", "MAX_RISK_PCT"]
 EntryCadence = Literal["WEEKLY_DAY", "EVERY_N_DAYS", "WHEN_FLAT"]
-ExitReason = Literal["PROFIT_TARGET", "STOP_LOSS", "EXIT_DTE", "EXPIRY_SETTLED", "END_OF_DATA"]
+ExitReason = Literal[
+    "PROFIT_TARGET",
+    "STOP_LOSS",
+    "EXIT_DTE",
+    "EXPIRY_SETTLED",
+    "PUT_ASSIGNED",
+    "CALLED_AWAY",
+    "ROLLED",
+    "END_OF_DATA",
+]
 StepStatus = Literal["OK", "UNRELIABLE", "INCOMPLETE"]
 StepMarkSource = Literal[
     "MID",
@@ -69,7 +102,7 @@ class BacktestConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
 
-    strategy_kind: StrategyKind = "BULL_PUT_SPREAD"
+    strategy_kind: BacktestStrategyKind = "BULL_PUT_SPREAD"
     target_dte_min: int = Field(default=30, ge=0, le=120)
     target_dte_max: int = Field(default=60, ge=0, le=120)
     entry_cadence: EntryCadence = "WEEKLY_DAY"
@@ -91,8 +124,9 @@ class BacktestConfig(BaseModel):
         default=100.0,
         ge=0.0,
         description=(
-            "Minimum net credit in dollars per 1-spread baseline (credit_per_share * 100, "
-            "independent of qty) for auto-built BULL_PUT_SPREAD entries; 0.0 or None disables."
+            "Minimum net credit in dollars per 1-spread/contract baseline "
+            "(credit_per_share * 100, independent of qty) for BULL_PUT_SPREAD, "
+            "COVERED_CALL, and WHEEL entries; 0.0 or None disables."
         ),
     )
     min_entry_ror_pct: float | None = Field(
@@ -104,6 +138,13 @@ class BacktestConfig(BaseModel):
             "auto-built BULL_PUT_SPREAD entries; 0.0 or None disables."
         ),
     )
+    strike_selection_mode: StrikeSelectionMode = "TARGET_DELTA"
+    target_delta: float = Field(default=0.30, ge=0.05, le=0.50)
+    cc_strike_floor: CcStrikeFloorMode = "COST_BASIS"
+    stock_stop_mode: StockStopMode = "OPTION_ONLY"
+    cc_itm_mode: CcItmMode = "CALL_AWAY_AND_REBUY"
+    roll_enabled: bool = False
+    roll_credit_mode: RollCreditMode = "CREDIT_ONLY"
 
     @model_validator(mode="after")
     def _validate_dte_window(self) -> Self:
@@ -162,6 +203,9 @@ class TradeDailyStep(BaseModel):
     status: StepStatus
     flags: list[str] = Field(default_factory=list)
     tracked_snapshot_ids: list[str] = Field(default_factory=list)
+    stock_shares: int = Field(default=0, ge=0)
+    stock_cost_basis: float | None = None
+    stock_unrealized_pnl_dollars: float | None = None
 
 
 class BacktestTradeRecord(BaseModel):
@@ -175,7 +219,13 @@ class BacktestTradeRecord(BaseModel):
     exit_date: str
     exit_snapshot_id: str
     exit_reason: ExitReason
-    strategy_kind: StrategyKind
+    strategy_kind: BacktestStrategyKind
+    wheel_phase: WheelPhase | None = None
+    stock_shares: int = Field(default=0, ge=0)
+    stock_cost_basis: float | None = None
+    stock_exit_price: float | None = None
+    option_net_pnl_dollars: float | None = None
+    stock_pnl_dollars: float | None = None
     legs: list[EvaluatedLeg]
     qty: int
     entry_cash_mid_dollars: float

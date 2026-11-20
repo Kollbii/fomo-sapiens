@@ -173,6 +173,24 @@ function buildTradeDrawerHtml(tr, sim) {
       ? '<div class="backtest-submeta">Trade Flags: ' + escapeHtml(tr.flags.join(", ")) + "</div>"
       : "";
 
+  var stockLotLine =
+    Number(tr.stock_shares || 0) > 0
+      ? '<div class="backtest-submeta">Synthetic Stock: ' +
+        escapeHtml(tr.stock_shares) +
+        " shs @ " +
+        fmtPlainMoney(tr.stock_cost_basis) +
+        (tr.stock_exit_price !== null && tr.stock_exit_price !== undefined
+          ? " \u2192 Exit " + fmtPlainMoney(tr.stock_exit_price)
+          : " (Held)") +
+        (tr.option_net_pnl_dollars !== null && tr.option_net_pnl_dollars !== undefined
+          ? " \u2022 Opt " + signedMoney(tr.option_net_pnl_dollars)
+          : "") +
+        (tr.stock_pnl_dollars !== null && tr.stock_pnl_dollars !== undefined
+          ? " / Stk " + signedMoney(tr.stock_pnl_dollars)
+          : "") +
+        "</div>"
+      : "";
+
   return (
     '<tr class="backtest-trade-detail-row" data-trade-detail-for="' +
     escapeHtml(tr.trade_id) +
@@ -186,6 +204,7 @@ function buildTradeDrawerHtml(tr, sim) {
     escapeHtml(tr.qty) +
     (tr.status === "OPEN" ? " \u2022 Latest MTM" : " \u2022 Exit Mark") +
     ")</span>" +
+    stockLotLine +
     '<table class="backtest-legs-subtable">' +
     "<thead><tr>" +
     '<th class="text-left">Side</th>' +
@@ -219,6 +238,7 @@ var SKIP_REASON_LABELS = {
   BELOW_MIN_CREDIT: "min credit",
   BELOW_MIN_ROR: "min RoR",
   BELOW_MIN_CREDIT_AND_ROR: "credit & RoR",
+  BELOW_COST_BASIS_FLOOR: "cost floor",
   NO_EXPIRY_IN_DTE_WINDOW: "DTE window",
   EMPTY_CHAIN: "empty chain",
   INVALID_SPOT: "invalid spot",
@@ -299,16 +319,15 @@ export function renderBacktestKpis(sim) {
   var skippedInfo = formatSkippedReasons(s.skipped_by_reason);
   var realizedVal = Number(s.realized_pnl_dollars || 0);
   var unrealizedVal = Number(s.unrealized_pnl_dollars || 0);
-  var realizedOpenValue =
-    openCount > 0
-      ? signedMoney(realizedVal) + " / " + signedMoney(unrealizedVal)
-      : signedMoney(realizedVal);
-  var realizedOpenCls =
-    openCount > 0
-      ? pnlClass(s.net_pnl_dollars)
-      : closedCount > 0
-        ? pnlClass(realizedVal)
-        : "";
+  var hasOpenExposure = openCount > 0 || Math.abs(unrealizedVal) > 1e-6;
+  var realizedOpenValue = hasOpenExposure
+    ? signedMoney(realizedVal) + " / " + signedMoney(unrealizedVal)
+    : signedMoney(realizedVal);
+  var realizedOpenCls = hasOpenExposure
+    ? pnlClass(s.net_pnl_dollars)
+    : closedCount > 0
+      ? pnlClass(realizedVal)
+      : "";
 
   var tiles = [
     {
@@ -328,7 +347,7 @@ export function renderBacktestKpis(sim) {
       cls: pnlClass(s.net_pnl_dollars),
     },
     {
-      label: openCount > 0 ? "Realized / Open MTM" : "Realized P&L",
+      label: hasOpenExposure ? "Realized / Open MTM" : "Realized P&L",
       value: realizedOpenValue,
       sub: closedCount + " closed \u2022 " + openCount + " open",
       cls: realizedOpenCls,
@@ -497,6 +516,15 @@ export function renderTradeSteps(trade) {
           ? '<span class="backtest-submeta">' + escapeHtml(st.flags.join(", ")) + "</span>"
           : "";
 
+      var stkStepLine =
+        Number(st.stock_shares || 0) > 0 &&
+        st.stock_unrealized_pnl_dollars !== null &&
+        st.stock_unrealized_pnl_dollars !== undefined
+          ? '<span class="backtest-submeta">Stk MTM ' +
+            signedMoney(st.stock_unrealized_pnl_dollars) +
+            "</span>"
+          : "";
+
       return (
         "<tr>" +
         '<td class="text-left" title="' +
@@ -530,7 +558,9 @@ export function renderTradeSteps(trade) {
         signedMoney(netVal) +
         '<span class="backtest-submeta">' +
         escapeHtml(pctStr) +
-        "</span></td>" +
+        "</span>" +
+        stkStepLine +
+        "</td>" +
         '<td class="text-left">' +
         exitHtml +
         flagsSub +
@@ -595,6 +625,35 @@ export function renderTradeLog(sim) {
           "d</span>";
       }
       var pnlTag = tr.status === "OPEN" ? "Unrealized" : "Realized";
+      if (
+        tr.option_net_pnl_dollars !== null &&
+        tr.option_net_pnl_dollars !== undefined &&
+        (Number(tr.stock_shares || 0) > 0 ||
+          (tr.stock_pnl_dollars !== null && tr.stock_pnl_dollars !== undefined))
+      ) {
+        var hasStkClose =
+          tr.stock_exit_price !== null && tr.stock_exit_price !== undefined;
+        var hasStkMtm =
+          tr.stock_pnl_dollars !== null &&
+          tr.stock_pnl_dollars !== undefined &&
+          (Math.abs(Number(tr.stock_pnl_dollars)) > 1e-6 || hasStkClose || tr.status === "OPEN");
+        pnlTag = hasStkMtm
+          ? "Opt " + signedMoney(tr.option_net_pnl_dollars) + " / Stk " + signedMoney(tr.stock_pnl_dollars)
+          : "Opt " +
+            signedMoney(tr.option_net_pnl_dollars) +
+            " \u2022 " +
+            escapeHtml(tr.stock_shares) +
+            " shs held";
+      }
+      var phaseMeta = "";
+      if (tr.wheel_phase || Number(tr.stock_shares || 0) > 0) {
+        var parts = [];
+        if (tr.wheel_phase) parts.push(tr.wheel_phase);
+        if (Number(tr.stock_shares || 0) > 0 && tr.stock_cost_basis !== null && tr.stock_cost_basis !== undefined) {
+          parts.push(tr.stock_shares + " shs @ $" + fmtStrike(tr.stock_cost_basis));
+        }
+        phaseMeta = '<span class="backtest-submeta">' + escapeHtml(parts.join(" \u2022 ")) + "</span>";
+      }
       var rowHtml =
         '<tr class="backtest-trade-row' +
         (isSel ? " is-selected" : "") +
@@ -618,6 +677,7 @@ export function renderTradeLog(sim) {
         escapeHtml(tr.strategy_kind) +
         '">' +
         escapeHtml(formatStrategyShortLabel(tr.strategy_kind)) +
+        phaseMeta +
         "</td>" +
         '<td class="text-left">' +
         escapeHtml(tr.entry_date) +

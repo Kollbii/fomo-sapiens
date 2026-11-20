@@ -696,6 +696,8 @@ export var PRESET_STRATEGY_LABELS = {
   BEAR_PUT_SPREAD: "Bear Put",
   DIAGONAL_SPREAD: "Diagonal",
   IRON_CONDOR: "Iron Condor",
+  COVERED_CALL: "Covered Call",
+  WHEEL: "Wheel",
 };
 
 export function formatStrategyShortLabel(kind) {

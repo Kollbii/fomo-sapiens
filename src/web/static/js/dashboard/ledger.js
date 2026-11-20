@@ -2,6 +2,7 @@
 
 import {
   LEDGER_PREFS_KEY,
+  LEDGER_SPLIT_KEY,
   dom,
   state,
 } from "./state.js";
@@ -12,6 +13,7 @@ import {
   fmtNum,
   formatStrikeShort,
   readJsonPref,
+  removePref,
   showBanner,
   themeVars,
   writeJsonPref,
@@ -1911,4 +1913,159 @@ export async function refreshOpenLedgerMtm() {
     setLedgerBusy(false, "");
     document.dispatchEvent(new Event("ibkr:lock-released"));
   }
+}
+
+// ------------------------------------------------------------------ Split-Pane Resizer
+export var DEFAULT_LEDGER_SPLIT_PCT = 34;
+export var MIN_LEDGER_SPLIT_PCT = 22;
+export var MAX_LEDGER_SPLIT_PCT = 62;
+
+export function clampLedgerSplitPct(pct) {
+  var num = Number(pct);
+  if (!Number.isFinite(num)) return DEFAULT_LEDGER_SPLIT_PCT;
+  var clamped = Math.max(MIN_LEDGER_SPLIT_PCT, Math.min(MAX_LEDGER_SPLIT_PCT, num));
+  return Math.round(clamped * 10) / 10;
+}
+
+export function computeLedgerSplitPct(clientX, splitRect) {
+  if (!splitRect || !(splitRect.width > 0) || !Number.isFinite(Number(clientX))) {
+    return DEFAULT_LEDGER_SPLIT_PCT;
+  }
+  var raw = ((Number(clientX) - Number(splitRect.left || 0)) / Number(splitRect.width)) * 100;
+  return clampLedgerSplitPct(raw);
+}
+
+export function readLedgerSplitPref() {
+  var parsed = readJsonPref(LEDGER_SPLIT_KEY, null);
+  if (parsed && typeof parsed === "object" && parsed.leftPct !== undefined) {
+    return clampLedgerSplitPct(parsed.leftPct);
+  }
+  return DEFAULT_LEDGER_SPLIT_PCT;
+}
+
+export function writeLedgerSplitPref(pct) {
+  var clamped = clampLedgerSplitPct(pct);
+  writeJsonPref(LEDGER_SPLIT_KEY, { leftPct: clamped });
+  return clamped;
+}
+
+export function clearLedgerSplitPref() {
+  removePref(LEDGER_SPLIT_KEY);
+}
+
+export function applyLedgerSplitPct(pct) {
+  var clamped = clampLedgerSplitPct(pct);
+  state.ledgerSplitPct = clamped;
+  if (dom.ledgerSplit && dom.ledgerSplit.style) {
+    if (typeof dom.ledgerSplit.style.setProperty === "function") {
+      dom.ledgerSplit.style.setProperty("--ledger-chart-col", clamped + "%");
+    } else {
+      dom.ledgerSplit.style["--ledger-chart-col"] = clamped + "%";
+    }
+  }
+  if (dom.ledgerSplitSplitter) {
+    dom.ledgerSplitSplitter.setAttribute("aria-valuenow", String(Math.round(clamped)));
+  }
+  schedulePlotlyResize(dom.ledgerChartEl);
+  return clamped;
+}
+
+export function initLedgerSplitter() {
+  applyLedgerSplitPct(readLedgerSplitPref());
+
+  var splitter = dom.ledgerSplitSplitter;
+  var splitGrid = dom.ledgerSplit;
+  if (!splitter || !splitGrid) return;
+  if (splitter.dataset && splitter.dataset.ledgerSplitterWired === "1") return;
+  if (splitter.dataset) splitter.dataset.ledgerSplitterWired = "1";
+
+  var dragState = null;
+
+  splitter.addEventListener("pointerdown", function (ev) {
+    if (ev.button !== undefined && ev.button !== 0) return;
+    if (ev.preventDefault) ev.preventDefault();
+    dragState = {
+      pointerId: ev.pointerId,
+      rect: splitGrid.getBoundingClientRect ? splitGrid.getBoundingClientRect() : null,
+    };
+    splitter.classList.add("is-dragging");
+    splitGrid.classList.add("is-dragging");
+    if (splitter.setPointerCapture && ev.pointerId !== undefined) {
+      try {
+        splitter.setPointerCapture(ev.pointerId);
+      } catch (_err) {
+        /* ignore synthetic events */
+      }
+    }
+  });
+
+  splitter.addEventListener("pointermove", function (ev) {
+    if (!dragState) return;
+    if (
+      ev.pointerId !== undefined &&
+      dragState.pointerId !== undefined &&
+      ev.pointerId !== dragState.pointerId
+    ) {
+      return;
+    }
+    var rect = splitGrid.getBoundingClientRect ? splitGrid.getBoundingClientRect() : dragState.rect;
+    applyLedgerSplitPct(computeLedgerSplitPct(ev.clientX, rect));
+  });
+
+  function finishDrag(ev) {
+    if (!dragState) return;
+    if (
+      ev &&
+      ev.pointerId !== undefined &&
+      dragState.pointerId !== undefined &&
+      ev.pointerId !== dragState.pointerId
+    ) {
+      return;
+    }
+    var pid = dragState.pointerId;
+    dragState = null;
+    splitter.classList.remove("is-dragging");
+    splitGrid.classList.remove("is-dragging");
+    if (splitter.releasePointerCapture && pid !== undefined) {
+      try {
+        if (!splitter.hasPointerCapture || splitter.hasPointerCapture(pid)) {
+          splitter.releasePointerCapture(pid);
+        }
+      } catch (_err) {
+        /* ignore */
+      }
+    }
+    writeLedgerSplitPref(state.ledgerSplitPct);
+    schedulePlotlyResize(dom.ledgerChartEl);
+  }
+
+  splitter.addEventListener("pointerup", finishDrag);
+  splitter.addEventListener("pointercancel", finishDrag);
+
+  splitter.addEventListener("dblclick", function () {
+    applyLedgerSplitPct(DEFAULT_LEDGER_SPLIT_PCT);
+    clearLedgerSplitPref();
+  });
+
+  splitter.addEventListener("keydown", function (ev) {
+    var key = ev.key;
+    var cur = state.ledgerSplitPct || DEFAULT_LEDGER_SPLIT_PCT;
+    if (key === "ArrowLeft") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeLedgerSplitPref(applyLedgerSplitPct(cur - 2));
+    } else if (key === "ArrowRight") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeLedgerSplitPref(applyLedgerSplitPct(cur + 2));
+    } else if (key === "Home") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeLedgerSplitPref(applyLedgerSplitPct(MIN_LEDGER_SPLIT_PCT));
+    } else if (key === "End") {
+      if (ev.preventDefault) ev.preventDefault();
+      writeLedgerSplitPref(applyLedgerSplitPct(MAX_LEDGER_SPLIT_PCT));
+    } else if (key === "Enter" || key === " ") {
+      if (ev.preventDefault) ev.preventDefault();
+      applyLedgerSplitPct(DEFAULT_LEDGER_SPLIT_PCT);
+      clearLedgerSplitPref();
+    }
+  });
 }

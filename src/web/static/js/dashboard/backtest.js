@@ -74,7 +74,31 @@ export function syncBacktestControlVisibility() {
   if (everyNEl) everyNEl.hidden = isSingle || cadence !== "EVERY_N_DAYS";
 
   var entryFiltersEl = document.querySelector("[data-bt-entry-filters]");
-  if (entryFiltersEl) entryFiltersEl.hidden = isSingle || strat !== "BULL_PUT_SPREAD";
+  var isWheelOrCc = strat === "COVERED_CALL" || strat === "WHEEL";
+  if (entryFiltersEl) {
+    entryFiltersEl.hidden = isSingle || !(strat === "BULL_PUT_SPREAD" || isWheelOrCc);
+  }
+  if (dom.backtestEntryFiltersLabel) {
+    dom.backtestEntryFiltersLabel.textContent = isWheelOrCc ? "Credit Entry Filter" : "BPS Entry Filters";
+  }
+  var minRorWrap = document.querySelector("[data-bt-min-ror-wrap]");
+  if (minRorWrap) minRorWrap.hidden = isWheelOrCc;
+
+  if (dom.backtestWheelControls) {
+    dom.backtestWheelControls.hidden = !isWheelOrCc || (isSingle && source !== "AUTO_BUILD");
+  }
+  var strikeMode = dom.backtestStrikeModeSelect
+    ? dom.backtestStrikeModeSelect.value
+    : "TARGET_DELTA";
+  var targetDeltaWrap = document.querySelector("[data-bt-target-delta-wrap]");
+  if (targetDeltaWrap) targetDeltaWrap.hidden = strikeMode !== "TARGET_DELTA";
+  var ccItmWrap = document.querySelector("[data-bt-cc-itm-wrap]");
+  if (ccItmWrap) ccItmWrap.hidden = strat !== "COVERED_CALL";
+  if (dom.backtestRollCreditSelect) {
+    dom.backtestRollCreditSelect.disabled = !(
+      dom.backtestRollToggle && dom.backtestRollToggle.checked
+    );
+  }
 
   var entryWrap = document.querySelector("[data-bt-entry-wrap]");
   if (entryWrap) entryWrap.hidden = !isSingle || source === "PAPER_TRADE";
@@ -242,7 +266,22 @@ function buildBacktestPayload() {
     min_entry_credit_dollars:
       mode === "SYSTEMATIC" ? optionalFilterNumberInput(dom.backtestMinCredit) : null,
     min_entry_ror_pct:
-      mode === "SYSTEMATIC" ? optionalFilterNumberInput(dom.backtestMinRor) : null,
+      mode === "SYSTEMATIC" && strat === "BULL_PUT_SPREAD"
+        ? optionalFilterNumberInput(dom.backtestMinRor)
+        : null,
+    strike_selection_mode: dom.backtestStrikeModeSelect
+      ? dom.backtestStrikeModeSelect.value
+      : "TARGET_DELTA",
+    target_delta: Number(dom.backtestTargetDelta ? dom.backtestTargetDelta.value : "0.30") || 0.3,
+    cc_strike_floor: dom.backtestCcFloorSelect ? dom.backtestCcFloorSelect.value : "COST_BASIS",
+    stock_stop_mode: dom.backtestStockStopSelect
+      ? dom.backtestStockStopSelect.value
+      : "OPTION_ONLY",
+    cc_itm_mode: dom.backtestCcItmSelect ? dom.backtestCcItmSelect.value : "CALL_AWAY_AND_REBUY",
+    roll_enabled: Boolean(dom.backtestRollToggle && dom.backtestRollToggle.checked),
+    roll_credit_mode: dom.backtestRollCreditSelect
+      ? dom.backtestRollCreditSelect.value
+      : "CREDIT_ONLY",
   };
   if (Number.isNaN(cfg.entry_weekday)) cfg.entry_weekday = 4;
   if (Number.isNaN(cfg.commission_per_contract)) cfg.commission_per_contract = 0.65;
@@ -533,6 +572,12 @@ export function bindBacktestEvents() {
 
   if (dom.backtestCadenceSelect) dom.backtestCadenceSelect.addEventListener("change", syncBacktestControlVisibility);
   if (dom.backtestStrategySelect) dom.backtestStrategySelect.addEventListener("change", syncBacktestControlVisibility);
+  if (dom.backtestStrikeModeSelect) {
+    dom.backtestStrikeModeSelect.addEventListener("change", syncBacktestControlVisibility);
+  }
+  if (dom.backtestRollToggle) {
+    dom.backtestRollToggle.addEventListener("change", syncBacktestControlVisibility);
+  }
   if (dom.backtestForm) {
     dom.backtestForm.addEventListener("submit", function (ev) {
       ev.preventDefault();

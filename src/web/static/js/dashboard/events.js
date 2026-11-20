@@ -25,6 +25,7 @@ import {
 } from "./charts.js";
 import {
   applyPanelVisibility,
+  ensurePanelVisible,
   isPanelVisible,
   renderAllCharts,
 } from "./panels.js";
@@ -88,7 +89,68 @@ import {
 } from "./workspace.js";
 
 // ------------------------------------------------------------------ Event Bindings
+function scrollElIntoView(el) {
+  if (!el) return;
+  var target = el.closest ? el.closest(".panel-card, .chain-panel") || el : el;
+  if (typeof target.scrollIntoView !== "function") return;
+  var stickyRect =
+    dom.stickyContextBar && typeof dom.stickyContextBar.getBoundingClientRect === "function"
+      ? dom.stickyContextBar.getBoundingClientRect()
+      : null;
+  var stickyH = stickyRect && stickyRect.height > 0 ? Math.round(stickyRect.height) : 46;
+  var offsetPx = stickyH + 12;
+  if (target.style) {
+    target.style.scrollMarginTop = offsetPx + "px";
+  }
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+export function handleKpiRibbonAction(action) {
+  if (action === "walls") {
+    ensurePanelVisible("walls");
+    scrollElIntoView(document.querySelector('.panel-card[data-panel-id="walls"]'));
+  } else if (action === "corridor") {
+    ensurePanelVisible("corridor");
+    scrollElIntoView(document.getElementById("wall-corridor-card"));
+  } else if (action === "build-walls") {
+    ensurePanelVisible("strategy");
+    scrollElIntoView(document.getElementById("strategy-lab-card"));
+    if (state.chainData) {
+      autoBuildStrategy(state.strategyKind);
+    }
+  } else if (action === "anomalies") {
+    ensurePanelVisible("anomalies");
+    scrollElIntoView(document.querySelector('.panel-card[data-panel-id="anomalies"]'));
+  } else if (action === "chain-unusual") {
+    if (dom.filterUnusual) {
+      dom.filterUnusual.checked = true;
+    }
+    if (state.chainData) {
+      renderTable(state.chainData);
+    }
+    scrollElIntoView(document.getElementById("chain-table"));
+  } else if (action === "chain") {
+    scrollElIntoView(document.getElementById("chain-table"));
+  }
+}
+
 export function bindEvents() {
+  if (dom.kpiStrip) {
+    dom.kpiStrip.addEventListener("click", function (ev) {
+      var trigger =
+        ev.target && ev.target.closest ? ev.target.closest("[data-kpi-action]") : null;
+      if (!trigger) return;
+      handleKpiRibbonAction(trigger.getAttribute("data-kpi-action"));
+    });
+    dom.kpiStrip.addEventListener("keydown", function (ev) {
+      if (ev.key !== "Enter" && ev.key !== " ") return;
+      var trigger =
+        ev.target && ev.target.closest ? ev.target.closest("[data-kpi-action]") : null;
+      if (!trigger || trigger.tagName === "BUTTON") return;
+      if (ev.preventDefault) ev.preventDefault();
+      handleKpiRibbonAction(trigger.getAttribute("data-kpi-action"));
+    });
+  }
   if (dom.themeToggle) {
     dom.themeToggle.addEventListener("click", function () {
       var next = currentTheme() === "terminal" ? "print" : "terminal";

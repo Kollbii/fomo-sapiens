@@ -281,8 +281,24 @@ makeEl("div", "backtest-tpsl-basis-group");
 makeEl("input", "backtest-tp-pct").value = "50";
 makeEl("input", "backtest-sl-pct").value = "100";
 makeEl("input", "backtest-exit-dte");
+makeEl("span", "backtest-entry-filters-label");
 makeEl("input", "backtest-min-credit");
 makeEl("input", "backtest-min-ror");
+makeEl("div", "backtest-wheel-controls").hidden = true;
+const btStrikeModeSelect = makeEl("select", "backtest-strike-mode-select");
+btStrikeModeSelect.value = "TARGET_DELTA";
+makeEl("input", "backtest-target-delta").value = "0.30";
+const btCcFloorSelect = makeEl("select", "backtest-cc-floor-select");
+btCcFloorSelect.value = "COST_BASIS";
+const btStockStopSelect = makeEl("select", "backtest-stock-stop-select");
+btStockStopSelect.value = "OPTION_ONLY";
+const btCcItmSelect = makeEl("select", "backtest-cc-itm-select");
+btCcItmSelect.value = "CALL_AWAY_AND_REBUY";
+const btRollToggle = makeEl("input", "backtest-roll-toggle");
+btRollToggle.checked = false;
+const btRollCreditSelect = makeEl("select", "backtest-roll-credit-select");
+btRollCreditSelect.value = "CREDIT_ONLY";
+btRollCreditSelect.disabled = true;
 makeEl("div", "backtest-legs-box");
 makeEl("button", "backtest-import-lab-btn");
 makeEl("button", "backtest-add-leg-btn");
@@ -676,6 +692,178 @@ def test_backtest_paper_drawer_toggle_table_filter_and_replay_autocollapse() -> 
         await bt.backtestOnSnapshotsLoaded("MSFT");
         assert.equal(btPaperTickerCount.hidden, true);
         assert.equal(btPaperTickerCount.textContent, "");
+
+        console.log(JSON.stringify({ ok: true }));
+        """
+    )
+    assert result["ok"] is True
+
+
+def test_backtest_wheel_controls_payload_and_opt_stock_breakdown_rendering() -> None:
+    result = _run_node_scenario(
+        """
+        const { state } = await import(modUrl("state.js"));
+        const bt = await import(modUrl("backtest.js"));
+        const tables = await import(modUrl("backtest_tables.js"));
+
+        const btWheelControls = elementsById["backtest-wheel-controls"];
+        const btFiltersLabel = elementsById["backtest-entry-filters-label"];
+        let capturedRunPayload = null;
+
+        nextFetchImpl = async (url, init) => {
+          const sUrl = String(url);
+          if (sUrl === "/api/backtest/run") {
+            capturedRunPayload = JSON.parse(String(init.body || "{}"));
+            return {
+              ok: true,
+              status: 200,
+              text: async () => JSON.stringify({
+                mode: "SYSTEMATIC",
+                daily_bar_count: 2,
+                warnings: [],
+                simulation: {
+                  mode: "SYSTEMATIC",
+                  ticker: "NVDA",
+                  config: capturedRunPayload.config,
+                  summary: {
+                    initial_capital: 10000,
+                    final_equity: 10700,
+                    net_pnl_dollars: 700,
+                    gross_pnl_dollars: 700.65,
+                    total_commissions_dollars: 0.65,
+                    total_return_pct: 7.0,
+                    realized_pnl_dollars: 700,
+                    unrealized_pnl_dollars: 0,
+                    trade_count: 1,
+                    closed_trades: 1,
+                    open_trades: 0,
+                    winning_trades: 1,
+                    losing_trades: 0,
+                    max_drawdown_dollars: 0,
+                    max_drawdown_pct: 0,
+                    ok_bars: 2,
+                    flagged_bars: 0,
+                    skipped_entries_count: 0,
+                    skipped_by_reason: {},
+                  },
+                  equity_curve: [],
+                  trades: [
+                    {
+                      trade_id: "NVDA_BT_0001",
+                      entry_date: "2026-11-06",
+                      entry_snapshot_id: "s0",
+                      exit_date: "2026-12-18",
+                      exit_snapshot_id: "s1",
+                      exit_reason: "CALLED_AWAY",
+                      strategy_kind: "COVERED_CALL",
+                      wheel_phase: "CC",
+                      stock_shares: 100,
+                      stock_cost_basis: 100.0,
+                      stock_exit_price: 105.0,
+                      option_net_pnl_dollars: 200.0,
+                      stock_pnl_dollars: 500.0,
+                      qty: 1,
+                      entry_cash_mid_dollars: 200.65,
+                      entry_cash_natural_dollars: 190.0,
+                      entry_basis_dollars: 200.65,
+                      commissions_dollars: 0.65,
+                      gross_pnl_dollars: 700.65,
+                      net_pnl_dollars: 700.0,
+                      return_on_basis_pct: 348.87,
+                      return_on_risk_pct: 7.14,
+                      days_held: 42,
+                      status: "CLOSED",
+                      legs: [
+                        {
+                          side: "SELL", right: "C", expiry: "2026-12-18", dte: 42,
+                          strike: 105.0, qty: 1, bid: 1.9, ask: 2.1, mid: 2.0, natural_fill: 1.9,
+                        },
+                      ],
+                      steps: [
+                        {
+                          market_date: "2026-11-06",
+                          snapshot_id: "s0",
+                          ts_utc: "2026-11-06T20:00:00Z",
+                          ts_et: "2026-11-06 15:00 ET",
+                          dte_min_leg: 42,
+                          spot: 100.0,
+                          legs: [],
+                          net_pnl_dollars: -0.65,
+                          pnl_pct_of_basis: -0.32,
+                          stock_shares: 100,
+                          stock_cost_basis: 100.0,
+                          stock_unrealized_pnl_dollars: 0.0,
+                          status: "OK",
+                        },
+                        {
+                          market_date: "2026-12-18",
+                          snapshot_id: "s1",
+                          ts_utc: "2026-12-18T21:20:00Z",
+                          ts_et: "2026-12-18 16:20 ET",
+                          dte_min_leg: 0,
+                          spot: 110.0,
+                          legs: [],
+                          net_pnl_dollars: 700.0,
+                          pnl_pct_of_basis: 348.87,
+                          stock_shares: 0,
+                          stock_cost_basis: 100.0,
+                          stock_unrealized_pnl_dollars: 0.0,
+                          status: "OK",
+                        },
+                      ],
+                    },
+                  ],
+                  notes: [],
+                  assumptions: [],
+                },
+              }),
+            };
+          }
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ trades: [], active_count: 0 }),
+          };
+        };
+
+        state.ticker = "NVDA";
+        bt.bindBacktestEvents();
+        bt.initBacktestPanel();
+
+        // 1. Standard preset keeps Wheel controls hidden
+        assert.equal(btWheelControls.hidden, true);
+        assert.equal(btFiltersLabel.textContent, "BPS Entry Filters");
+
+        // 2. Selecting WHEEL reveals controls, enables Roll Credit Rule on toggle
+        btStrategySelect.value = "WHEEL";
+        btStrategySelect.dispatchEvent({ type: "change" });
+        assert.equal(btWheelControls.hidden, false);
+        assert.equal(btFiltersLabel.textContent, "Credit Entry Filter");
+        assert.equal(btRollCreditSelect.disabled, true);
+
+        btRollToggle.checked = true;
+        btRollToggle.dispatchEvent({ type: "change" });
+        assert.equal(btRollCreditSelect.disabled, false);
+
+        btCcFloorSelect.value = "NET_BREAKEVEN";
+        btStockStopSelect.value = "LIQUIDATE_STOCK_ON_SL";
+        btRollCreditSelect.value = "ZERO_OR_CREDIT";
+
+        // 3. Running backtest sends configured fields and renders Opt / Stk breakdown
+        await bt.runBacktestStudy();
+        assert.ok(capturedRunPayload);
+        assert.equal(capturedRunPayload.config.strategy_kind, "WHEEL");
+        assert.equal(capturedRunPayload.config.strike_selection_mode, "TARGET_DELTA");
+        assert.equal(capturedRunPayload.config.target_delta, 0.3);
+        assert.equal(capturedRunPayload.config.cc_strike_floor, "NET_BREAKEVEN");
+        assert.equal(capturedRunPayload.config.stock_stop_mode, "LIQUIDATE_STOCK_ON_SL");
+        assert.equal(capturedRunPayload.config.roll_enabled, true);
+        assert.equal(capturedRunPayload.config.roll_credit_mode, "ZERO_OR_CREDIT");
+
+        const tbodyHtml = elementsById["backtest-trades-body"].innerHTML;
+        assert.ok(tbodyHtml.includes("Covered Call"));
+        assert.ok(tbodyHtml.includes("100 shs @ $100"));
+        assert.ok(tbodyHtml.includes("Opt +$200.00 / Stk +$500.00"));
 
         console.log(JSON.stringify({ ok: true }));
         """

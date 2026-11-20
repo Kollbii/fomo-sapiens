@@ -369,30 +369,142 @@
 <!-- Status / Alert Banner -->
 <div id="alert-banner" class="alert-banner alert-banner--info" role="status" aria-live="polite" hidden></div>
 
-<!-- Row 4: Headline KPI Strip -->
-<section class="kpi-strip" aria-label="Headline Analytics Summary">
-  <article id="kpi-spot" class="kpi-card">
-    <span class="kpi-label">Underlying Spot</span>
-    <strong class="kpi-value">&mdash;</strong>
+<!-- Row 4: Compact Market Structure & Guided Flow Ribbon -->
+<section class="kpi-strip" aria-label="Headline Market Structure and Guided Flow">
+  <article id="kpi-spot" class="kpi-card kpi-card--spot">
+    <div class="kpi-spot-main">
+      <div class="kpi-spot-headline">
+        <span class="kpi-label">Spot</span>
+        <strong class="kpi-value">&mdash;</strong>
+      </div>
+      <div class="kpi-flow-actions">
+        <button
+          type="button"
+          id="kpi-jump-chain"
+          class="kpi-flow-btn"
+          data-kpi-action="chain"
+          title="Scroll to Option Chain Table"
+        >
+          Chain &nearr;
+        </button>
+      </div>
+    </div>
     <span class="kpi-sub">Select ticker or refresh</span>
   </article>
 
-  <article id="kpi-call-wall" class="kpi-card kpi-card--call">
-    <span class="kpi-label">Primary Call Wall</span>
-    <strong class="kpi-value">&mdash;</strong>
-    <span class="kpi-sub">&mdash;</span>
-  </article>
-
-  <article id="kpi-put-wall" class="kpi-card kpi-card--put">
-    <span class="kpi-label">Primary Put Wall</span>
-    <strong class="kpi-value">&mdash;</strong>
-    <span class="kpi-sub">&mdash;</span>
+  <article id="kpi-walls-ribbon" class="kpi-card kpi-card--walls-ribbon">
+    <div class="kpi-ribbon-head">
+      <div class="kpi-ribbon-title">
+        <span class="kpi-label">Put &ndash; Call Wall Corridor</span>
+        <span id="kpi-corridor-caption" class="kpi-corridor-caption">OI / Vol structure</span>
+      </div>
+      <div class="kpi-flow-actions">
+        <button
+          type="button"
+          id="kpi-jump-walls"
+          class="kpi-flow-btn"
+          data-kpi-action="walls"
+          title="Jump to Call &amp; Put Walls Chart"
+        >
+          Walls &nearr;
+        </button>
+        <button
+          type="button"
+          id="kpi-jump-corridor"
+          class="kpi-flow-btn"
+          data-kpi-action="corridor"
+          title="Jump to Wall Strike Corridor"
+        >
+          Corridor &nearr;
+        </button>
+        <button
+          type="button"
+          id="kpi-jump-strategy"
+          class="kpi-flow-btn kpi-flow-btn--accent"
+          data-kpi-action="build-walls"
+          title="Auto-build strategy from walls in Strategy Lab"
+        >
+          Build from Walls &nearr;
+        </button>
+      </div>
+    </div>
+    <div class="kpi-corridor-body">
+      <div
+        id="kpi-put-wall"
+        class="kpi-wall-node kpi-wall-node--put"
+        data-kpi-action="walls"
+        role="button"
+        tabindex="0"
+        title="Click to view Call &amp; Put Walls Chart"
+      >
+        <span class="kpi-label">PW</span>
+        <strong class="kpi-value">&mdash;</strong>
+        <span class="kpi-sub">&mdash;</span>
+      </div>
+      <div
+        id="kpi-corridor-gauge"
+        class="kpi-corridor-gauge"
+        data-kpi-action="walls"
+        role="button"
+        tabindex="0"
+        title="Spot position between Primary Put Wall and Primary Call Wall (click for Walls Chart)"
+      >
+        <div id="kpi-corridor-track" class="kpi-corridor-track">
+          <span id="kpi-corridor-pin" class="kpi-corridor-pin" style="left: 50%"></span>
+        </div>
+      </div>
+      <div
+        id="kpi-call-wall"
+        class="kpi-wall-node kpi-wall-node--call"
+        data-kpi-action="walls"
+        role="button"
+        tabindex="0"
+        title="Click to view Call &amp; Put Walls Chart"
+      >
+        <span class="kpi-label">CW</span>
+        <strong class="kpi-value">&mdash;</strong>
+        <span class="kpi-sub">&mdash;</span>
+      </div>
+    </div>
   </article>
 
   <article id="kpi-anomalies" class="kpi-card kpi-card--anomaly">
-    <span class="kpi-label">Unusual Activity</span>
-    <strong class="kpi-value">&mdash;</strong>
-    <span class="kpi-sub">&mdash;</span>
+    <div class="kpi-ribbon-head">
+      <div class="kpi-anomaly-headline">
+        <span class="kpi-label">Unusual</span>
+        <strong class="kpi-value">&mdash;</strong>
+        <span class="kpi-sub">&mdash;</span>
+      </div>
+      <div class="kpi-flow-actions">
+        <button
+          type="button"
+          id="kpi-jump-anomalies"
+          class="kpi-flow-btn"
+          data-kpi-action="anomalies"
+          title="Jump to Unusual Activity Chart"
+        >
+          Chart &nearr;
+        </button>
+        <button
+          type="button"
+          id="kpi-jump-chain-unusual"
+          class="kpi-flow-btn kpi-flow-btn--accent"
+          data-kpi-action="chain-unusual"
+          title="Filter Option Chain Table to Unusual Activity Only"
+        >
+          Filter Chain &nearr;
+        </button>
+      </div>
+    </div>
+    <button
+      type="button"
+      id="kpi-anomaly-top"
+      class="kpi-anomaly-top"
+      data-kpi-action="chain-unusual"
+      title="Click to filter Option Chain Table to Unusual Activity Only"
+    >
+      0 flagged contracts
+    </button>
   </article>
 </section>
 
@@ -932,7 +1044,7 @@
         </div>
       </div>
 
-      <div class="ledger-split">
+      <div id="ledger-split" class="ledger-split">
         <section class="ledger-chart-pane" aria-label="Trade Ledger Performance Chart">
           <div
             id="chart-ledger"
@@ -944,6 +1056,21 @@
             </div>
           </div>
         </section>
+
+        <div
+          id="ledger-split-splitter"
+          class="ledger-split-splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize Trade Ledger Chart and Detail Table panels"
+          aria-valuemin="22"
+          aria-valuemax="62"
+          aria-valuenow="34"
+          tabindex="0"
+          title="Drag to resize panels (double-click to reset to 34/66 split)"
+        >
+          <span class="ledger-split-splitter__grip" aria-hidden="true"></span>
+        </div>
 
         <section class="ledger-table-pane" aria-label="Trade Ledger Detail Table">
           <div id="ledger-table-container" class="ledger-table-wrap">
@@ -1025,6 +1152,8 @@
               <option value="BULL_CALL_SPREAD">Bull Call Spread</option>
               <option value="DIAGONAL_SPREAD">Diagonal Spread</option>
               <option value="IRON_CONDOR">Iron Condor</option>
+              <option value="COVERED_CALL">Covered Call (Synthetic Stock)</option>
+              <option value="WHEEL">Wheel (CSP &rarr; Assigned CC)</option>
               <option value="CUSTOM">Custom Legs</option>
             </select>
           </label>
@@ -1125,17 +1254,63 @@
           </div>
 
           <div class="backtest-switch-group" data-bt-systematic data-bt-entry-filters>
-            <span class="field-label">BPS Entry Filters</span>
+            <span id="backtest-entry-filters-label" class="field-label">BPS Entry Filters</span>
             <div class="backtest-tpsl-inputs">
               <label class="backtest-field">
                 <span class="field-label">Min Credit ($)</span>
-                <input id="backtest-min-credit" class="input-control" type="number" min="0" step="10" value="100" placeholder="Off" inputmode="decimal" title="Minimum net credit in dollars per 1-spread baseline (0 or blank disables)" />
+                <input id="backtest-min-credit" class="input-control" type="number" min="0" step="10" value="100" placeholder="Off" inputmode="decimal" title="Minimum net credit in dollars per 1-spread/contract baseline (0 or blank disables)" />
               </label>
-              <label class="backtest-field">
+              <label class="backtest-field" data-bt-min-ror-wrap>
                 <span class="field-label">Min RoR (%)</span>
                 <input id="backtest-min-ror" class="input-control" type="number" min="0" max="1000" step="1" value="" placeholder="Off" inputmode="decimal" title="Minimum Return on Risk % (credit / max loss * 100; 0 or blank disables)" />
               </label>
             </div>
+          </div>
+        </div>
+
+        <div id="backtest-wheel-controls" class="backtest-wheel-controls" hidden>
+          <label class="backtest-field">
+            <span class="field-label">Strike Selection</span>
+            <select id="backtest-strike-mode-select" class="select-control" aria-label="Covered Call and Wheel Strike Selection">
+              <option value="TARGET_DELTA" selected>Target Delta (&Delta;)</option>
+              <option value="WALL_ANCHORED">Primary Call / Put Wall</option>
+            </select>
+          </label>
+          <label class="backtest-field" data-bt-target-delta-wrap>
+            <span class="field-label">Target &Delta;</span>
+            <input id="backtest-target-delta" class="input-control" type="number" min="0.05" max="0.50" step="0.05" value="0.30" inputmode="decimal" title="Target absolute delta (0.05-0.50) for short Calls and short Puts" />
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">CC Strike Floor</span>
+            <select id="backtest-cc-floor-select" class="select-control" aria-label="Covered Call Strike Floor">
+              <option value="COST_BASIS" selected>&ge; Cost Basis</option>
+              <option value="NET_BREAKEVEN">&ge; Net Breakeven</option>
+              <option value="NONE">No Floor</option>
+            </select>
+          </label>
+          <label class="backtest-field">
+            <span class="field-label">Stop-Loss Scope</span>
+            <select id="backtest-stock-stop-select" class="select-control" aria-label="Stock Stop-Loss Scope">
+              <option value="OPTION_ONLY" selected>Option Only (Keep Shares)</option>
+              <option value="LIQUIDATE_STOCK_ON_SL">Liquidate Option + Shares</option>
+            </select>
+          </label>
+          <label class="backtest-field" data-bt-cc-itm-wrap>
+            <span class="field-label">ITM Call Expiry</span>
+            <select id="backtest-cc-itm-select" class="select-control" aria-label="Covered Call ITM Expiry Behavior">
+              <option value="CALL_AWAY_AND_REBUY" selected>Call Away &amp; Re-Buy</option>
+              <option value="KEEP_SHARES_CASH_SETTLE">Keep Shares (Cash-Settle)</option>
+            </select>
+          </label>
+          <div class="backtest-switch-group backtest-wheel-roll-group">
+            <label class="backtest-roll-check">
+              <input id="backtest-roll-toggle" type="checkbox" />
+              <span class="field-label">Defensive Roll ITM</span>
+            </label>
+            <select id="backtest-roll-credit-select" class="select-control" aria-label="Defensive Roll Net Credit Rule" disabled>
+              <option value="CREDIT_ONLY" selected>Net Credit &gt; $0</option>
+              <option value="ZERO_OR_CREDIT">Even or Credit (&ge; $0)</option>
+            </select>
           </div>
         </div>
 
@@ -1572,5 +1747,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261120b"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261120g"></script>
 {% endblock %}

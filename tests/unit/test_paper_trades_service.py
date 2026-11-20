@@ -751,3 +751,235 @@ def test_quote_active_trades_handles_corrupt_paper_trades_file(tmp_path: Path) -
     assert "paper_trades.json unreadable" in (rec.error or "")
     assert len(notices) == 1
     assert "Paper trade leg quote refresh warning for NVDA" in notices[0]
+
+
+def test_quote_active_trades_includes_unexpired_closed_and_ledger_specs(tmp_path: Path) -> None:
+    """Closed paper trades and Trade Ledger `extra_specs` still unexpired are quoted."""
+    svc, _, fetcher, repo = _make_service(tmp_path)
+    repo.save_snapshot("NVDA", _chain_rows("NVDA", _SNAP_NVDA), spot_source="MID")
+
+    # Register and stop a trade whose expiry (2026-12-18) is still in the future.
+    stopped = svc.register_trade(
+        "NVDA",
+        _SNAP_NVDA,
+        "CUSTOM",
+        [StrategyLegInput(side="SELL", right="P", expiry="2026-12-18", strike=140.0)],
+    )
+    svc.stop_trade(stopped.id)
+
+    # Extra ledger specs: one already quoted in main chain (excluded), one expired (excluded),
+    # and one closed/assigned legacy $205P Dec 18 leg missing from main chain (quoted!).
+    extra = [
+        ExactContractSpec(option_conid=9003, expiry="2026-12-18", strike=135.0, right="P"),
+        ExactContractSpec(option_conid=9901, expiry="2026-11-06", strike=190.0, right="P"),
+        ExactContractSpec(option_conid=9902, expiry="2026-12-18", strike=205.0, right="P"),
+    ]
+    already_quoted = {("2026-12-18", 135.0, "P")}
+
+    record, notices = run_coro(
+        svc.quote_active_trades_for_refresh(
+            "NVDA",
+            underlying_conid=4815747,
+            extra_specs=extra,
+            already_quoted_keys=already_quoted,
+        )
+    )
+    assert record is not None
+    assert record.status == "QUOTED"
+    assert len(fetcher.calls) == 1
+    quoted_specs = fetcher.calls[0][1]
+    assert {(s.expiry, s.strike, s.right) for s in quoted_specs} == {
+        ("2026-12-18", 140.0, "P"),
+        ("2026-12-18", 205.0, "P"),
+    }
+    assert any("closed/ledger leg(s)" in n for n in notices)
+
+
+def test_analyzer_refresh_collects_spot_envelope_and_unexpired_ledger_specs(
+    tmp_path: Path,
+) -> None:
+    """AnalyzerService passes historical spot envelope and unexpired closed ledger legs."""
+    import asyncio
+    from datetime import date
+
+    from src.broker.contracts import ChainPlan, ExpirationMatch, StrikeSelection, UnderlyingInfo
+    from src.broker.fetcher import FetchResult
+    from src.core.config import LedgerSettings, StorageSettings
+    from src.services.analyzer import AnalyzerService
+    from src.storage.ledger_schema import LedgerExecutionRow
+
+    now = datetime(2026, 11, 20, 15, 30, 0, tzinfo=UTC)
+    storage = StorageSettings(
+        data_dir=str(tmp_path / "data"),
+        snapshots_dir=str(tmp_path / "data" / "snapshots"),
+        latest_dir=str(tmp_path / "data" / "latest"),
+        metadata_index_file=str(tmp_path / "data" / "metadata" / "snapshot_index.json"),
+        logs_dir=str(tmp_path / "data" / "logs"),
+    )
+    settings = Settings(
+        storage=storage,
+        ledger=LedgerSettings(ledger_dir=str(tmp_path / "data" / "ledger")),
+        tracker=PaperTrackerSettings(tracked_dir=str(tmp_path / "data" / "tracked")),
+    )
+    repo = CSVRepository(storage)
+    repo.ensure_layout()
+
+    # Older snapshot at $200 spot holding Dec 18 expiry (still active on Nov 20).
+    old_row = OptionContractRow(
+        snapshot_id="NVDA_20261106_153000",
+        snapshot_ts_utc="2026-11-06T15:30:00Z",
+        market_date="2026-11-06",
+        market_data_type=3,
+        underlying="NVDA",
+        underlying_conid=4815747,
+        underlying_price=200.0,
+        option_conid=8801,
+        expiry="2026-12-18",
+        dte=42,
+        strike=200.0,
+        moneyness_pct=0.0,
+        right="P",
+        bid=5.0,
+        ask=5.2,
+        mid=5.1,
+        last=5.1,
+        close=5.0,
+        mark_price=5.1,
+        volume=10,
+        open_interest=100,
+        iv=0.45,
+        delta=-0.48,
+        gamma=0.02,
+        theta=-0.05,
+        vega=0.14,
+        greeks_source="IBKR_MODEL",
+    )
+    repo.save_snapshot("NVDA", [old_row.model_dump()], spot_source="MID")
+
+    clock = _Clock(now)
+
+    class _RecordingFetcher:
+        def __init__(self) -> None:
+            self.clock = clock
+            self.sleep = asyncio.sleep
+            self.chain_calls: list[tuple[float, float] | None] = []
+            self.exact_calls: list[list[ExactContractSpec]] = []
+
+        async def fetch_option_chain(
+            self,
+            ticker: str,
+            *,
+            spot_envelope: tuple[float, float] | None = None,
+            **_kwargs: Any,
+        ) -> FetchResult:
+            self.chain_calls.append(spot_envelope)
+            mkt = date(2026, 11, 20)
+            exp_dt = date(2026, 12, 18)
+            plan = ChainPlan(
+                underlying=UnderlyingInfo(ticker, 4815747, object(), 125.0, "MID"),
+                market_date=mkt,
+                exchange="SMART",
+                trading_class=ticker,
+                multiplier="100",
+                expirations=(ExpirationMatch("20261218", exp_dt, 28),),
+                strikes=StrikeSelection((125.0,), 125.0, 5.0, 5.0),
+                range_pct=0.20,
+            )
+            row = OptionContractRow(
+                snapshot_id="NVDA_20261120_153000",
+                snapshot_ts_utc="2026-11-20T15:30:00Z",
+                market_date="2026-11-20",
+                market_data_type=3,
+                underlying=ticker,
+                underlying_conid=4815747,
+                underlying_price=125.0,
+                option_conid=8802,
+                expiry="2026-12-18",
+                dte=28,
+                strike=125.0,
+                moneyness_pct=0.0,
+                right="P",
+                bid=3.0,
+                ask=3.2,
+                mid=3.1,
+                last=3.1,
+                close=3.0,
+                mark_price=3.1,
+                volume=20,
+                open_interest=200,
+                iv=0.50,
+                delta=-0.45,
+                gamma=0.03,
+                theta=-0.06,
+                vega=0.12,
+                greeks_source="IBKR_MODEL",
+            )
+            return FetchResult(
+                snapshot_id="NVDA_20261120_153000",
+                snapshot_ts_utc="2026-11-20T15:30:00Z",
+                market_date="2026-11-20",
+                market_data_type=3,
+                plan=plan,
+                rows=[row],
+                pages_fetched=1,
+                elapsed_ms=5.0,
+            )
+
+        async def fetch_exact_contracts(
+            self,
+            ticker: str,
+            specs: list[ExactContractSpec],
+            *,
+            underlying_conid: int = 0,
+        ) -> ExactQuoteResult:
+            self.exact_calls.append(list(specs))
+            fake_deleg = _FakeFetcher(clock)
+            return await fake_deleg.fetch_exact_contracts(
+                ticker, specs, underlying_conid=underlying_conid
+            )
+
+    rec_fetcher = _RecordingFetcher()
+    svc = AnalyzerService(settings=settings, repo=repo, fetcher=rec_fetcher)  # type: ignore[arg-type]
+    # Closed/assigned Dec 18 $205P in the Trade Ledger (expired past Nov 20 should be skipped).
+    svc.ledger.repo.upsert_executions(
+        [
+            LedgerExecutionRow(
+                exec_id="exec-assigned-205p",
+                underlying="NVDA",
+                symbol="NVDA  261218P00205000",
+                asset_class="OPT",
+                expiry="20261218",
+                strike=205.0,
+                right="P",
+                side="SLD",
+                quantity=1.0,
+                price=6.5,
+                proceeds=650.0,
+                commission=1.0,
+                executed_at="2026-11-06T15:35:00Z",
+                source="FLEX_ACTIVITY_365",
+                conid=9955,
+            )
+        ]
+    )
+
+    async def _run() -> None:
+        assert await svc.acquire_refresh("test")
+        try:
+            await svc.refresh_ticker_locked(
+                "NVDA",
+                range_pct=0.20,
+                strike_step=5.0,
+                dte_min=30,
+                dte_max=120,
+                include_short_dte=False,
+            )
+        finally:
+            svc.release_refresh()
+
+    run_coro(_run())
+    assert rec_fetcher.chain_calls == [(200.0, 200.0)]
+    assert len(rec_fetcher.exact_calls) == 1
+    assert [(s.expiry, s.strike, s.right, s.option_conid) for s in rec_fetcher.exact_calls[0]] == [
+        ("2026-12-18", 205.0, "P", 9955)
+    ]

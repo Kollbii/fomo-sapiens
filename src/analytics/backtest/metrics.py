@@ -6,16 +6,17 @@ from datetime import date
 
 from src.analytics.backtest.models import (
     BacktestConfig,
+    BacktestStrategyKind,
     BacktestTradeRecord,
     EquityCurvePoint,
     ExitReason,
     PortfolioSummary,
     TradeDailyStep,
     TradeStatus,
+    WheelPhase,
     deduplicate_flags,
 )
 from src.analytics.backtest.rules import DENOM_EPS, EntryBuildResult, resolve_tp_sl_thresholds
-from src.analytics.strategies.models import StrategyKind
 from src.storage.backtest_store import DailyChainBar
 
 
@@ -31,7 +32,14 @@ def finalize_trade_record(
     trade_id: str,
     entry_date: str,
     entry_snapshot_id: str,
-    strategy_kind: StrategyKind,
+    strategy_kind: BacktestStrategyKind,
+    wheel_phase: WheelPhase | None = None,
+    stock_shares: int = 0,
+    stock_cost_basis: float | None = None,
+    stock_exit_price: float | None = None,
+    option_net_pnl_dollars: float | None = None,
+    stock_pnl_dollars: float | None = None,
+    open_stock_unrealized_pnl: float | None = None,
     qty: int,
     config: BacktestConfig,
     entry: EntryBuildResult,
@@ -53,12 +61,24 @@ def finalize_trade_record(
         exit_reason = "END_OF_DATA"
         exit_date, exit_snapshot_id = last_bar.market_date, last_bar.snapshot_id
         last_step = steps[-1]
-        gross_pnl_dollars = last_step.gross_pnl_dollars
-        net_pnl_dollars = last_step.net_pnl_dollars
+        opt_gross = last_step.gross_pnl_dollars
+        opt_net = last_step.net_pnl_dollars
+        if open_stock_unrealized_pnl is not None:
+            option_net_pnl_dollars = opt_net
+            stock_pnl_dollars = open_stock_unrealized_pnl
+            gross_pnl_dollars = (
+                round(opt_gross + open_stock_unrealized_pnl, 2) if opt_gross is not None else None
+            )
+            net_pnl_dollars = (
+                round(opt_net + open_stock_unrealized_pnl, 2) if opt_net is not None else None
+            )
+        else:
+            if wheel_phase is not None and option_net_pnl_dollars is None:
+                option_net_pnl_dollars = opt_net
+            gross_pnl_dollars = opt_gross
+            net_pnl_dollars = opt_net
         exit_value_dollars = (
-            round(last_step.gross_pnl_dollars - entry.entry_cash_mid_dollars, 2)
-            if last_step.gross_pnl_dollars is not None
-            else None
+            round(opt_gross - entry.entry_cash_mid_dollars, 2) if opt_gross is not None else None
         )
         commissions_dollars = open_commission
 
@@ -78,6 +98,12 @@ def finalize_trade_record(
         exit_snapshot_id=exit_snapshot_id,
         exit_reason=exit_reason,
         strategy_kind=strategy_kind,
+        wheel_phase=wheel_phase,
+        stock_shares=stock_shares,
+        stock_cost_basis=stock_cost_basis,
+        stock_exit_price=stock_exit_price,
+        option_net_pnl_dollars=option_net_pnl_dollars,
+        stock_pnl_dollars=stock_pnl_dollars,
         legs=entry.legs,
         qty=qty,
         entry_cash_mid_dollars=entry.entry_cash_mid_dollars,

@@ -533,19 +533,47 @@ class PaperTradeService:
         ticker: str,
         *,
         underlying_conid: int = 0,
+        extra_specs: Sequence[ExactContractSpec] = (),
+        already_quoted_keys: set[tuple[str, float, str]] | None = None,
     ) -> tuple[PaperQuoteRecord | None, list[str]]:
-        """Quote unique legs of `ACTIVE` trades for `ticker` after chain refresh cleanup."""
+        """Quote active paper-trade legs plus unexpired closed/ledger legs into `data/tracked/`."""
         symbol = TickerValidator.validate(ticker)
         trade_ids: list[str] = []
+        excluded = already_quoted_keys or set()
         try:
+            today_iso = self._today_et().isoformat()
             trades = self._load_synced_trades()
             active_for_ticker = [t for t in trades if t.status == "ACTIVE" and t.ticker == symbol]
-            if not active_for_ticker:
-                return None, []
+            non_active_for_ticker = [
+                t for t in trades if t.status != "ACTIVE" and t.ticker == symbol
+            ]
 
             spec_map: dict[tuple[str, float, str], ExactContractSpec] = {}
+
+            def _add_spec(spec: ExactContractSpec) -> None:
+                key = spec.key()
+                prev = spec_map.get(key)
+                if prev is None or (prev.option_conid <= 0 and spec.option_conid > 0):
+                    spec_map[key] = spec
+
             for trade in active_for_ticker:
                 for leg in trade.legs:
+                    _add_spec(
+                        ExactContractSpec(
+                            option_conid=leg.con_id,
+                            expiry=leg.expiry,
+                            strike=leg.strike,
+                            right=leg.right,
+                        )
+                    )
+
+            active_keys = set(spec_map.keys())
+            extra_count = 0
+
+            for trade in non_active_for_ticker:
+                for leg in trade.legs:
+                    if leg.expiry < today_iso:
+                        continue
                     spec = ExactContractSpec(
                         option_conid=leg.con_id,
                         expiry=leg.expiry,
@@ -553,11 +581,28 @@ class PaperTradeService:
                         right=leg.right,
                     )
                     key = spec.key()
-                    prev = spec_map.get(key)
-                    if prev is None or (prev.option_conid <= 0 and spec.option_conid > 0):
-                        spec_map[key] = spec
+                    if key in active_keys or key in excluded:
+                        continue
+                    if key not in spec_map:
+                        extra_count += 1
+                    _add_spec(spec)
 
-            specs = list(spec_map.values())
+            for spec in extra_specs:
+                if spec.expiry < today_iso:
+                    continue
+                key = spec.key()
+                if key in active_keys or key in excluded:
+                    continue
+                if key not in spec_map:
+                    extra_count += 1
+                _add_spec(spec)
+
+            if not spec_map:
+                return None, []
+
+            oc = self.settings.options_chain
+            cap = max(1, oc.max_contracts_per_page * oc.max_pages_per_refresh)
+            specs = list(spec_map.values())[:cap]
             trade_ids = [t.id for t in active_for_ticker]
             result = await self.fetcher.fetch_exact_contracts(
                 symbol,
@@ -624,10 +669,17 @@ class PaperTradeService:
                     f"{len(result.missing)} active {symbol} paper-trade contract(s) were "
                     "unqualified or missing during tracked quote refresh."
                 )
-            notices.append(
-                f"Quoted {len(result.rows)} active paper-trade contract(s) for {symbol} "
-                f"({result.snapshot_id})."
-            )
+            if extra_count > 0:
+                notices.append(
+                    f"Quoted {len(result.rows)} tracked contract(s) "
+                    f"(incl. {extra_count} closed/ledger leg(s)) for {symbol} "
+                    f"({result.snapshot_id})."
+                )
+            else:
+                notices.append(
+                    f"Quoted {len(result.rows)} active paper-trade contract(s) for {symbol} "
+                    f"({result.snapshot_id})."
+                )
             return record, notices
         except (AnalyzerError, OSError, ValueError) as exc:
             logger.warning("paper trade quote refresh failed for %s: %s", symbol, exc)

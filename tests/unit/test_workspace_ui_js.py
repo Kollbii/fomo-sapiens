@@ -23,6 +23,7 @@ const modUrl = (name) => pathToFileURL(`${ROOT}/${name}`).href;
 
 const store = {};
 const scrollCalls = [];
+const scrollIntoViewCalls = [];
 
 class FakeClassList {
   constructor(owner) {
@@ -107,9 +108,21 @@ class FakeNode {
     this.checked = false;
     this.disabled = false;
     this.hidden = false;
+    this._innerHTML = "";
+    this.style = {};
+    this.dataset = {};
     this.parentNode = null;
     this.focused = false;
     this._rectBottom = 120;
+  }
+  get innerHTML() {
+    return this._innerHTML;
+  }
+  set innerHTML(val) {
+    this._innerHTML = String(val || "");
+  }
+  scrollIntoView() {
+    scrollIntoViewCalls.push(this.id || this.getAttribute("data-panel-id") || this.tagName);
   }
   get className() {
     return this._className;
@@ -294,8 +307,75 @@ for (const pid of allPanels) {
   const card = new FakeNode("article");
   card.className = "panel-card";
   card.setAttribute("data-panel-id", pid);
+  if (pid === "corridor") {
+    card.id = "wall-corridor-card";
+    byId[card.id] = card;
+  }
+  if (pid === "strategy") {
+    card.id = "strategy-lab-card";
+    byId[card.id] = card;
+  }
   chartGrid.appendChild(card);
 }
+
+const kpiStrip = makeEl("section", "", "kpi-strip");
+const kpiSpot = makeEl("article", "kpi-spot", "kpi-card kpi-card--spot");
+const spotVal = new FakeNode("strong");
+spotVal.className = "kpi-value";
+const spotSub = new FakeNode("span");
+spotSub.className = "kpi-sub";
+kpiSpot.appendChild(spotVal);
+kpiSpot.appendChild(spotSub);
+kpiStrip.appendChild(kpiSpot);
+
+const kpiWallsRibbon = makeEl("article", "kpi-walls-ribbon", "kpi-card kpi-card--walls-ribbon");
+const kpiCorridorCaption = makeEl("span", "kpi-corridor-caption", "kpi-corridor-caption");
+const kpiPutWall = makeEl("div", "kpi-put-wall", "kpi-wall-node kpi-wall-node--put");
+kpiPutWall.setAttribute("data-kpi-action", "walls");
+const pwVal = new FakeNode("strong");
+pwVal.className = "kpi-value";
+const pwSub = new FakeNode("span");
+pwSub.className = "kpi-sub";
+kpiPutWall.appendChild(pwVal);
+kpiPutWall.appendChild(pwSub);
+const kpiCorridorGauge = makeEl("div", "kpi-corridor-gauge", "kpi-corridor-gauge");
+kpiCorridorGauge.setAttribute("data-kpi-action", "walls");
+const kpiCorridorPin = makeEl("span", "kpi-corridor-pin", "kpi-corridor-pin");
+kpiCorridorGauge.appendChild(kpiCorridorPin);
+const kpiCallWall = makeEl("div", "kpi-call-wall", "kpi-wall-node kpi-wall-node--call");
+kpiCallWall.setAttribute("data-kpi-action", "walls");
+const cwVal = new FakeNode("strong");
+cwVal.className = "kpi-value";
+const cwSub = new FakeNode("span");
+cwSub.className = "kpi-sub";
+kpiCallWall.appendChild(cwVal);
+kpiCallWall.appendChild(cwSub);
+kpiWallsRibbon.appendChild(kpiCorridorCaption);
+kpiWallsRibbon.appendChild(kpiPutWall);
+kpiWallsRibbon.appendChild(kpiCorridorGauge);
+kpiWallsRibbon.appendChild(kpiCallWall);
+kpiStrip.appendChild(kpiWallsRibbon);
+
+const kpiAnomalies = makeEl("article", "kpi-anomalies", "kpi-card kpi-card--anomaly");
+const anomVal = new FakeNode("strong");
+anomVal.className = "kpi-value";
+const anomSub = new FakeNode("span");
+anomSub.className = "kpi-sub";
+const kpiAnomalyTop = makeEl("button", "kpi-anomaly-top", "kpi-anomaly-top");
+kpiAnomalyTop.setAttribute("data-kpi-action", "chain-unusual");
+kpiAnomalies.appendChild(anomVal);
+kpiAnomalies.appendChild(anomSub);
+kpiAnomalies.appendChild(kpiAnomalyTop);
+kpiStrip.appendChild(kpiAnomalies);
+
+const filterUnusual = makeEl("input", "filter-unusual");
+makeEl("table", "chain-table");
+makeEl("tbody", "chain-table-body");
+makeEl("span", "table-row-count");
+makeEl("div", "dte-bucket-tabs");
+
+globalThis.Node = FakeNode;
+globalThis.Element = FakeNode;
 
 const outsideBtn = makeEl("button", "outside-el");
 const customEvents = [];
@@ -317,6 +397,7 @@ globalThis.window = {
   requestAnimationFrame: () => {},
   setTimeout: (fn) => { fn(); return 1; },
   clearTimeout: () => {},
+  getComputedStyle: () => ({ getPropertyValue: () => "#111111" }),
   Plotly: { Plots: { resize() {} }, purge() {}, react() {} },
 };
 
@@ -327,6 +408,7 @@ globalThis.document = {
   getElementById: (id) => byId[id] || null,
   querySelector: (sel) => docNode.querySelector(sel),
   querySelectorAll: (sel) => docNode.querySelectorAll(sel),
+  createElement: (tag) => new FakeNode(tag),
   addEventListener: (t, fn) => docNode.addEventListener(t, fn),
   dispatchEvent: (ev) => {
     customEvents.push(ev);
@@ -546,6 +628,173 @@ def test_helpers_json_prefs_and_formatters() -> None:
         assert.equal(formatStrategyShortLabel(null), "\\u2014");
         assert.equal(formatStrategyShortLabel("NEW_KIND"), "NEW KIND");
         assert.equal(Object.prototype.hasOwnProperty.call(PRESET_STRATEGY_LABELS, "CUSTOM"), false);
+
+        console.log(JSON.stringify({ ok: true }));
+        """
+    )
+    assert result["ok"] is True
+
+
+def test_row4_market_ribbon_formatting_and_guided_flow_actions() -> None:
+    result = _run_node(
+        """
+        const stateMod = await import(modUrl("state.js"));
+        const badgesMod = await import(modUrl("badges.js"));
+        const panelsMod = await import(modUrl("panels.js"));
+        const eventsMod = await import(modUrl("events.js"));
+
+        const { state, dom } = stateMod;
+        const {
+          computeCorridorSpotPct,
+          formatKpiContractScope,
+          formatTopAnomalySummary,
+          formatWallBasisShort,
+          renderKpis,
+        } = badgesMod;
+        const { applyPanelVisibility, applyWorkspaceMode, isPanelVisible } = panelsMod;
+        const { bindEvents, handleKpiRibbonAction } = eventsMod;
+
+        // 1. Pure helpers
+        assert.equal(formatWallBasisShort("OPEN_INTEREST"), "OI");
+        assert.equal(formatWallBasisShort("VOLUME"), "Vol");
+
+        assert.equal(
+          formatKpiContractScope(
+            { snapshot_id: "s1", market_date: "2026-11-20", contract_count: 160 },
+            [{ snapshot_id: "s1", market_date: "2026-11-20", contract_count: 440 }],
+          ),
+          "160/440c",
+        );
+        assert.equal(
+          formatKpiContractScope(
+            { snapshot_id: "s2", market_date: "2026-11-20", contract_count: 440 },
+            [{ snapshot_id: "s2", market_date: "2026-11-20", contract_count: 440 }],
+          ),
+          "440c",
+        );
+
+        const pos = computeCorridorSpotPct(137.79, 100, 200);
+        assert.equal(pos.valid, true);
+        assert.equal(pos.pinPct, 37.8);
+        assert.equal(computeCorridorSpotPct(90, 100, 200).pinPct, 4);
+        assert.equal(computeCorridorSpotPct(250, 100, 200).pinPct, 96);
+        assert.equal(computeCorridorSpotPct(100, 200, 100).valid, false);
+
+        assert.equal(
+          formatTopAnomalySummary({
+            total_flagged: 26,
+            anomalies: [
+              { strike: 150, right: "C", dte: 28, vol_oi_ratio: 2.8, volume_zscore: 4.1 },
+            ],
+          }),
+          "Top: $150C (28d) \\u2022 2.8\\u00D7 Vol/OI",
+        );
+        assert.equal(
+          formatTopAnomalySummary({ total_flagged: 0, anomalies: [] }),
+          "0 flagged contracts",
+        );
+
+        // 2. renderKpis populates compact corridor ribbon with human labels
+        state.snapshots = [
+          { snapshot_id: "snap1", market_date: "2026-11-20", contract_count: 440 },
+        ];
+        const sample = {
+          meta: {
+            snapshot_id: "snap1",
+            underlying: "NVDA",
+            underlying_price: 137.79,
+            market_date: "2026-11-20",
+            contract_count: 160,
+            range_pct: 0.5,
+            strike_step: 5,
+            source: "CACHE",
+          },
+          walls: {
+            primary_basis: "OPEN_INTEREST",
+            total_call_oi: 1730000,
+            total_put_oi: 1000000,
+            aggregate_primary_put_wall: {
+              strike: 100,
+              distance_from_spot_pct: -27.4,
+              metric_value: 241696,
+            },
+            aggregate_primary_call_wall: {
+              strike: 200,
+              distance_from_spot_pct: 45.1,
+              metric_value: 417950,
+            },
+          },
+          anomalies: {
+            total_flagged: 26,
+            vol_gt_oi_count: 18,
+            high_zscore_count: 9,
+            anomalies: [
+              { strike: 150, right: "C", dte: 28, vol_oi_ratio: 2.8, volume_zscore: 4.1 },
+            ],
+          },
+        };
+        renderKpis(sample);
+
+        assert.equal(dom.kpiSpot.querySelector(".kpi-value").textContent, "$137.79");
+        assert.ok(dom.kpiSpot.querySelector(".kpi-sub").textContent.includes("160/440c"));
+        assert.equal(dom.kpiPutWall.querySelector(".kpi-value").textContent, "$100");
+        assert.ok(dom.kpiPutWall.querySelector(".kpi-sub").textContent.includes("OI 241,696"));
+        assert.ok(!dom.kpiPutWall.querySelector(".kpi-sub").textContent.includes("OPEN_INTEREST"));
+        assert.equal(dom.kpiCallWall.querySelector(".kpi-value").textContent, "$200");
+        assert.ok(dom.kpiCallWall.querySelector(".kpi-sub").textContent.includes("OI 417,950"));
+        assert.equal(dom.kpiCorridorPin.style.left, "37.8%");
+        assert.equal(
+          dom.kpiCorridorCaption.textContent,
+          "Spot 38% of range \\u2022 C/P OI 1.73\\u00D7",
+        );
+        assert.equal(dom.kpiAnomalies.querySelector(".kpi-value").textContent, "26");
+        assert.equal(dom.kpiAnomalyTop.textContent, "Top: $150C (28d) \\u2022 2.8\\u00D7 Vol/OI");
+
+        // 3. Guided flow actions reveal hidden panels, filter unusual chain rows, and scroll
+        applyWorkspaceMode("desk", { persist: false, skipRender: true });
+        applyPanelVisibility(
+          { ...state.panelVisibility, walls: false, anomalies: false, corridor: false },
+          { skipRender: true },
+        );
+        bindEvents();
+
+        scrollIntoViewCalls.length = 0;
+        stickyBar.getBoundingClientRect = () => ({
+          left: 0,
+          top: 0,
+          right: 1000,
+          bottom: 46,
+          width: 1000,
+          height: 46,
+        });
+        const wallsBtn = new FakeNode("button");
+        wallsBtn.setAttribute("data-kpi-action", "walls");
+        kpiWallsRibbon.appendChild(wallsBtn);
+        wallsBtn.dispatchEvent({ type: "click" });
+        assert.equal(isPanelVisible("walls"), true);
+        assert.ok(scrollIntoViewCalls.includes("walls"));
+        const wallsCardEl = document.querySelector('.panel-card[data-panel-id="walls"]');
+        assert.equal(wallsCardEl.style.scrollMarginTop, "58px");
+
+        handleKpiRibbonAction("corridor");
+        assert.equal(isPanelVisible("corridor"), true);
+        assert.ok(scrollIntoViewCalls.includes("wall-corridor-card"));
+        assert.equal(document.getElementById("wall-corridor-card").style.scrollMarginTop, "58px");
+
+        handleKpiRibbonAction("anomalies");
+        assert.equal(isPanelVisible("anomalies"), true);
+        assert.ok(scrollIntoViewCalls.includes("anomalies"));
+
+        assert.equal(dom.filterUnusual.checked, false);
+        handleKpiRibbonAction("chain-unusual");
+        assert.equal(dom.filterUnusual.checked, true);
+        assert.ok(scrollIntoViewCalls.includes("chain-table"));
+        assert.equal(document.getElementById("chain-table").style.scrollMarginTop, "58px");
+
+        // Keyboard Enter on role="button" wall node triggers action
+        scrollIntoViewCalls.length = 0;
+        dom.kpiPutWall.dispatchEvent({ type: "keydown", key: "Enter" });
+        assert.ok(scrollIntoViewCalls.includes("walls"));
 
         console.log(JSON.stringify({ ok: true }));
         """

@@ -22,7 +22,7 @@
 
 @media (max-width: 1120px) {
   .kpi-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: 1fr;
   }
   .panel-card,
   .panel-card--span-4,
@@ -68,6 +68,10 @@
   }
   .ledger-split {
     grid-template-columns: 1fr;
+    gap: 12px;
+  }
+  .ledger-split-splitter {
+    display: none;
   }
   .ledger-chart-pane {
     height: 320px;
@@ -79,7 +83,8 @@
   .ledger-timeline-step {
     grid-template-columns: 1fr 1fr;
   }
-  .backtest-config-grid {
+  .backtest-config-grid,
+  .backtest-wheel-controls {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .backtest-kpis {
@@ -125,6 +130,7 @@
   .ledger-kpi-strip,
   .strategy-sim-bar,
   .backtest-config-grid,
+  .backtest-wheel-controls,
   .backtest-kpis {
     grid-template-columns: 1fr;
   }

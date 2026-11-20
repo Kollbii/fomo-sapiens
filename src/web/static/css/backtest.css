@@ -42,10 +42,45 @@
 }
 
 .backtest-single-controls[hidden],
+.backtest-wheel-controls[hidden],
 .backtest-legs-box[hidden],
 .backtest-switch-group[hidden],
 .backtest-field[hidden] {
   display: none;
+}
+
+.backtest-wheel-controls {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(120px, 1fr));
+  gap: 8px 12px;
+  align-items: end;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-subtle);
+}
+
+.backtest-wheel-roll-group {
+  min-width: 0;
+}
+
+.backtest-roll-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.backtest-roll-check input {
+  accent-color: var(--accent-primary);
+}
+
+.backtest-roll-check input:focus-visible {
+  outline: 2px solid var(--accent-focus);
+  outline-offset: 2px;
+}
+
+.backtest-wheel-roll-group .select-control:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .backtest-config-grid {
@@ -290,7 +325,10 @@
 
 .backtest-paper-table-wrap {
   max-height: 260px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
   background: var(--bg-elevated);
@@ -299,6 +337,11 @@
 .backtest-table.backtest-paper-table th,
 .backtest-table.backtest-paper-table td {
   padding: 4px 6px;
+}
+
+.backtest-table.backtest-paper-table th:last-child,
+.backtest-table.backtest-paper-table td:last-child {
+  padding-right: 14px;
 }
 
 .backtest-paper-table tbody tr:nth-child(even) {
@@ -544,7 +587,10 @@
 
 .backtest-table-wrap {
   max-height: 360px;
+  box-sizing: border-box;
   overflow: auto;
+  scrollbar-gutter: stable;
+  padding-bottom: 4px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
 }
@@ -571,6 +617,15 @@
 #backtest-steps-table th,
 #backtest-steps-table td {
   padding: 4px 6px;
+}
+
+.backtest-table th:last-child,
+.backtest-table tbody tr:not(.backtest-trade-detail-row) > td:last-child,
+#backtest-trades-table th:last-child,
+#backtest-trades-table tbody tr.backtest-trade-row > td:last-child,
+#backtest-steps-table th:last-child,
+#backtest-steps-table td:last-child {
+  padding-right: 14px;
 }
 
 .backtest-table th {

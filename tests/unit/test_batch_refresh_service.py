@@ -280,7 +280,9 @@ def _make(
     svc.ensure_layout()
     quoted: list[str] = []
 
-    async def _quote(ticker: str, *, underlying_conid: int = 0) -> tuple[None, list[str]]:
+    async def _quote(
+        ticker: str, *, underlying_conid: int = 0, **_kwargs: Any
+    ) -> tuple[None, list[str]]:
         assert svc.refresh_lock.locked()
         quoted.append(ticker)
         return None, [f"quoted {ticker}"]
@@ -822,7 +824,9 @@ def test_interrupt_during_paper_quoting_keeps_complete_snapshot(tmp_path: Path, 
         tmp_path, pause_sec=0.0, watchlist=WatchlistSettings(batch_ticker_timeout_sec=30.0)
     )
 
-    async def _slow_quote(ticker: str, *, underlying_conid: int = 0) -> tuple[None, list[str]]:
+    async def _slow_quote(
+        ticker: str, *, underlying_conid: int = 0, **_kwargs: Any
+    ) -> tuple[None, list[str]]:
         await asyncio.sleep(3600.0)  # exact-leg quoting hangs after the chain was saved
         return None, []
 
@@ -1294,7 +1298,9 @@ def test_batch_item_done_when_post_save_quoting_raises(tmp_path: Path) -> None:
     """If paper-trade quoting fails after on_saved fired, item is marked done with a notice."""
     svc, batch, _fetcher, _, _ = _make(tmp_path, pause_sec=0.0)
 
-    async def _failing_quote(ticker: str, *, underlying_conid: int = 0) -> tuple[None, list[str]]:
+    async def _failing_quote(
+        ticker: str, *, underlying_conid: int = 0, **_kwargs: Any
+    ) -> tuple[None, list[str]]:
         raise StorageSchemaError("paper_trades.json unreadable")
 
     svc.paper_trades.quote_active_trades_for_refresh = _failing_quote  # type: ignore[method-assign]
