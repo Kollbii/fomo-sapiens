@@ -95,12 +95,14 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   └── parser.py
     │   ├── storage/
     │   │   ├── __init__.py
+    │   │   ├── _atomic.py            # shared atomic .tmp + os.replace/fsync & stat-signature helpers
     │   │   ├── schema.py
     │   │   ├── csv_repository.py
     │   │   ├── quality.py            # SpotSource & quote coverage snapshot usability scoring
     │   │   ├── paper_trade_store.py  # atomic paper_trades.json, paper_quotes.jsonl & data/tracked/
     │   │   ├── backtest_store.py     # O(window) daily bar selection & tracked fallback merge
     │   │   ├── watchlist_store.py    # atomic data/watchlist.json (lazy seed, cap, corrupt backup)
+    │   │   ├── logo_store.py         # disk-cached ticker logos under data/cache/logos/
     │   │   ├── ledger_schema.py      # 23-col execution & 15-col open position contracts
     │   │   └── ledger_repository.py  # atomic data/ledger/ archive & Gateway -> Flex upgrade
     │   ├── analytics/
@@ -114,6 +116,7 @@ The **IBKR Options Analyzer & Dashboard** is a local, single-user, strictly read
     │   │   └── backtest/         # models, context, pricing, rules, metrics, engine
     │   ├── services/
     │   │   ├── __init__.py
+    │   │   ├── _concurrency.py   # shared BlockingRunner protocol
     │   │   ├── analyzer.py       # AnalyzerService: refresh_lock, refresh, analytics, Lab, corridor
     │   │   ├── screener.py       # ScreenerService: cached cross-watchlist best-strategy screen (zero IBKR)
     │   │   ├── screener_live.py  # ScreenerLiveService: live leg stream, allocation & re-pick

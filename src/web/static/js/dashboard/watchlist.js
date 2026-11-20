@@ -9,10 +9,10 @@ import {
   buildLogoBadge,
   buildRefreshDtePayload,
   extractApiErrorMessage,
-  readPref,
+  readJsonPref,
   showBanner,
   syncActiveTickerLogo,
-  writePref,
+  writeJsonPref,
 } from "./helpers.js";
 import {
   apiJson,
@@ -227,14 +227,10 @@ function effectiveSelectedCount() {
 
 function readSelection() {
   var out = {};
-  try {
-    var parsed = JSON.parse(readPref(WATCHLIST_SELECTION_KEY, "{}"));
-    var list = parsed && Array.isArray(parsed.unchecked) ? parsed.unchecked : [];
-    for (var i = 0; i < list.length; i++) {
-      if (typeof list[i] === "string") out[list[i]] = true;
-    }
-  } catch (_err) {
-    /* ignore corrupt prefs */
+  var parsed = readJsonPref(WATCHLIST_SELECTION_KEY, null);
+  var list = parsed && Array.isArray(parsed.unchecked) ? parsed.unchecked : [];
+  for (var i = 0; i < list.length; i++) {
+    if (typeof list[i] === "string") out[list[i]] = true;
   }
   return out;
 }
@@ -246,7 +242,7 @@ function writeSelection() {
     if (state.watchlistUnchecked[sym]) pruned[sym] = true;
   }
   state.watchlistUnchecked = pruned;
-  writePref(WATCHLIST_SELECTION_KEY, JSON.stringify({ unchecked: Object.keys(pruned) }));
+  writeJsonPref(WATCHLIST_SELECTION_KEY, { unchecked: Object.keys(pruned) });
 }
 
 function markerFor(sym) {

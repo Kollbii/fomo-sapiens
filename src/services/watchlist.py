@@ -10,29 +10,22 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, date, datetime
-from typing import Final, Protocol, TypeVar
+from typing import Final
 
 from src.core.calendar import et_date
 from src.core.exceptions import StorageSchemaError
+from src.services._concurrency import BlockingRunner
 from src.services.schemas import WatchlistEntry, WatchlistResponse
 from src.storage.csv_repository import CSVRepository
 from src.storage.watchlist_store import WatchlistState, WatchlistStore
 
 logger = logging.getLogger(__name__)
 
-_T = TypeVar("_T")
-
 FRESHNESS_UNAVAILABLE_NOTICE: Final = (
     "Snapshot index could not be read; freshness markers are unavailable."
 )
-
-
-class BlockingRunner(Protocol):
-    """Runs a blocking zero-argument callable off the event loop (e.g. `asyncio.to_thread`)."""
-
-    def __call__(self, func: Callable[[], _T], /) -> Awaitable[_T]: ...
 
 
 def _parse_utc(value: str) -> datetime | None:

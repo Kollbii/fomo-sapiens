@@ -6,6 +6,7 @@ import {
 } from "./state.js";
 import {
   extractApiErrorMessage,
+  formatExpiryIso,
   showBanner,
   themeVars,
 } from "./helpers.js";
@@ -33,7 +34,6 @@ import {
   setPaperTradesExpanded,
   stopPaperTrade,
   syncPaperTradesFromLedger,
-  toIsoExpiry,
   togglePaperTradesDrawer,
 } from "./backtest_paper.js";
 import {
@@ -210,7 +210,7 @@ function serializeLegsForRequest() {
     return {
       side: leg.side,
       right: leg.right,
-      expiry: toIsoExpiry(leg.expiry),
+      expiry: formatExpiryIso(leg.expiry),
       strike: Number(leg.strike),
       qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
     };

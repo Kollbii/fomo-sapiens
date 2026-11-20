@@ -12,7 +12,12 @@ import {
 } from "./state.js";
 import {
   isStrategyAutoPopulateEnabled,
+  readJsonPref,
+  readPref,
+  removePref,
   themeVars,
+  writeJsonPref,
+  writePref,
 } from "./helpers.js";
 import {
   purgeCharts,
@@ -40,36 +45,22 @@ import {
 // ------------------------------------------------------------------ Panel Visibility
 export function readPanelVisibility() {
   var next = cloneDefaultPanelVisibility();
-  try {
-    var raw = window.localStorage.getItem(PANEL_VISIBILITY_KEY);
-    if (!raw) return next;
-    var parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return next;
-    Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (panelId) {
-      if (typeof parsed[panelId] === "boolean") {
-        next[panelId] = parsed[panelId];
-      }
-    });
-  } catch (_err) {
-    return cloneDefaultPanelVisibility();
-  }
+  var parsed = readJsonPref(PANEL_VISIBILITY_KEY, null);
+  if (!parsed || typeof parsed !== "object") return next;
+  Object.keys(DEFAULT_PANEL_VISIBILITY).forEach(function (panelId) {
+    if (typeof parsed[panelId] === "boolean") {
+      next[panelId] = parsed[panelId];
+    }
+  });
   return next;
 }
 
 function writePanelVisibility(vis) {
-  try {
-    window.localStorage.setItem(PANEL_VISIBILITY_KEY, JSON.stringify(vis));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(PANEL_VISIBILITY_KEY, vis);
 }
 
 function clearPanelVisibilityOverrides() {
-  try {
-    window.localStorage.removeItem(PANEL_VISIBILITY_KEY);
-  } catch (_err) {
-    /* ignore */
-  }
+  removePref(PANEL_VISIBILITY_KEY);
 }
 
 export var VALID_WORKSPACE_MODES = ["desk", "portfolio", "backtest", "all"];
@@ -92,20 +83,11 @@ export function workspaceForPanel(panelId) {
 }
 
 export function readWorkspaceMode() {
-  try {
-    var raw = window.localStorage.getItem(WORKSPACE_MODE_KEY);
-    return normalizeWorkspaceMode(raw);
-  } catch (_err) {
-    return DEFAULT_WORKSPACE_MODE;
-  }
+  return normalizeWorkspaceMode(readPref(WORKSPACE_MODE_KEY, null));
 }
 
 export function writeWorkspaceMode(mode) {
-  try {
-    window.localStorage.setItem(WORKSPACE_MODE_KEY, normalizeWorkspaceMode(mode));
-  } catch (_err) {
-    /* ignore */
-  }
+  writePref(WORKSPACE_MODE_KEY, normalizeWorkspaceMode(mode));
 }
 
 export function isPanelVisible(panelId) {

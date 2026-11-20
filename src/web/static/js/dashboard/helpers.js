@@ -225,6 +225,32 @@ export function writePref(key, value) {
   }
 }
 
+export function removePref(key) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
+export function readJsonPref(key, fallback) {
+  try {
+    var raw = window.localStorage.getItem(key);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (_err) {
+    return fallback;
+  }
+}
+
+export function writeJsonPref(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (_err) {
+    /* ignore */
+  }
+}
+
 export function isStrategyAutoPopulateEnabled() {
   if (dom.strategyAutoPopulate) {
     return Boolean(dom.strategyAutoPopulate.checked);
@@ -238,14 +264,8 @@ export function syncStrategyAutoPopulateUI() {
 }
 
 function readPullPrefsMap() {
-  try {
-    var raw = window.localStorage.getItem(PULL_PREFS_KEY);
-    if (!raw) return {};
-    var parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch (_err) {
-    return {};
-  }
+  var parsed = readJsonPref(PULL_PREFS_KEY, null);
+  return parsed && typeof parsed === "object" ? parsed : {};
 }
 
 export function readTickerPullPrefs(ticker) {
@@ -267,11 +287,7 @@ export function writeTickerPullPrefs(ticker) {
       ? Boolean(dom.includeShortDteToggle.checked)
       : defaultIncludeShortDte(),
   };
-  try {
-    window.localStorage.setItem(PULL_PREFS_KEY, JSON.stringify(map));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(PULL_PREFS_KEY, map);
 }
 
 function selectHasEnabledOption(selectEl, targetVal) {
@@ -662,15 +678,30 @@ export function formatExpiryIso(rawExpiry) {
   return s;
 }
 
-export function formatStrikeShort(val) {
+export function formatStrikeShort(val, emptyFallback) {
   if (val === null || val === undefined || Number.isNaN(Number(val))) {
-    return "—";
+    return emptyFallback !== undefined ? emptyFallback : "\u2014";
   }
   var n = Number(val);
   if (Math.abs(n - Math.round(n)) < 1e-6) {
     return "$" + Math.round(n).toString();
   }
   return "$" + n.toFixed(2);
+}
+
+export var PRESET_STRATEGY_LABELS = {
+  BULL_PUT_SPREAD: "Bull Put",
+  BEAR_CALL_SPREAD: "Bear Call",
+  BULL_CALL_SPREAD: "Bull Call",
+  BEAR_PUT_SPREAD: "Bear Put",
+  DIAGONAL_SPREAD: "Diagonal",
+  IRON_CONDOR: "Iron Condor",
+};
+
+export function formatStrategyShortLabel(kind) {
+  if (!kind) return "\u2014";
+  if (kind === "CUSTOM") return "Custom";
+  return PRESET_STRATEGY_LABELS[kind] || String(kind).replace(/_/g, " ");
 }
 
 export function fmtNum(val, decimals) {

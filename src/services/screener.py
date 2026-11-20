@@ -51,6 +51,7 @@ from src.analytics.strategies import (
 from src.core.calendar import et_date
 from src.core.config import Settings
 from src.core.exceptions import InvalidRequestError, SnapshotNotFoundError, StorageSchemaError
+from src.services._concurrency import BlockingRunner
 from src.services.error_messages import GENERIC_ERROR_MESSAGE, describe_error
 from src.services.schemas import (
     ScreenerFilterName,
@@ -61,7 +62,7 @@ from src.services.schemas import (
     ScreenerRunResponse,
     ScreenerStatusCounts,
 )
-from src.services.watchlist import BlockingRunner, WatchlistService, is_snapshot_today_et
+from src.services.watchlist import WatchlistService, is_snapshot_today_et
 from src.storage.csv_repository import CSVRepository
 from src.storage.schema import SnapshotMeta
 

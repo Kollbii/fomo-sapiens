@@ -7,7 +7,11 @@ import {
 } from "./state.js";
 import {
   escapeHtml,
+  formatStrategyShortLabel,
+  readJsonPref,
+  removePref,
   themeVars,
+  writeJsonPref,
 } from "./helpers.js";
 import {
   renderBacktestChart,
@@ -49,20 +53,6 @@ function fmtStrike(strike) {
   var n = Number(strike);
   if (Number.isNaN(n)) return String(strike || "");
   return Number.isInteger(n) ? String(n) : String(Number(n.toFixed(2)));
-}
-
-var STRATEGY_SHORT_LABELS = {
-  BULL_PUT_SPREAD: "Bull Put",
-  BULL_CALL_SPREAD: "Bull Call",
-  BEAR_CALL_SPREAD: "Bear Call",
-  BEAR_PUT_SPREAD: "Bear Put",
-  DIAGONAL_SPREAD: "Diagonal",
-  IRON_CONDOR: "Iron Condor",
-  CUSTOM: "Custom",
-};
-
-function formatStrategyShort(kind) {
-  return STRATEGY_SHORT_LABELS[kind] || String(kind || "\u2014").replace(/_/g, " ");
 }
 
 function formatCompactLegs(legs) {
@@ -627,7 +617,7 @@ export function renderTradeLog(sim) {
         '<td class="text-left" title="' +
         escapeHtml(tr.strategy_kind) +
         '">' +
-        escapeHtml(formatStrategyShort(tr.strategy_kind)) +
+        escapeHtml(formatStrategyShortLabel(tr.strategy_kind)) +
         "</td>" +
         '<td class="text-left">' +
         escapeHtml(tr.entry_date) +
@@ -740,35 +730,21 @@ export function computeBacktestSplitPct(clientX, gridRect) {
 }
 
 export function readBacktestSplitPref() {
-  try {
-    var raw = window.localStorage.getItem(BACKTEST_SPLIT_KEY);
-    if (!raw) return DEFAULT_BACKTEST_SPLIT_PCT;
-    var parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === "object" && parsed.leftPct !== undefined) {
-      return clampBacktestSplitPct(parsed.leftPct);
-    }
-    return DEFAULT_BACKTEST_SPLIT_PCT;
-  } catch (_err) {
-    return DEFAULT_BACKTEST_SPLIT_PCT;
+  var parsed = readJsonPref(BACKTEST_SPLIT_KEY, null);
+  if (parsed && typeof parsed === "object" && parsed.leftPct !== undefined) {
+    return clampBacktestSplitPct(parsed.leftPct);
   }
+  return DEFAULT_BACKTEST_SPLIT_PCT;
 }
 
 export function writeBacktestSplitPref(pct) {
   var clamped = clampBacktestSplitPct(pct);
-  try {
-    window.localStorage.setItem(BACKTEST_SPLIT_KEY, JSON.stringify({ leftPct: clamped }));
-  } catch (_err) {
-    /* ignore */
-  }
+  writeJsonPref(BACKTEST_SPLIT_KEY, { leftPct: clamped });
   return clamped;
 }
 
 export function clearBacktestSplitPref() {
-  try {
-    window.localStorage.removeItem(BACKTEST_SPLIT_KEY);
-  } catch (_err) {
-    /* ignore */
-  }
+  removePref(BACKTEST_SPLIT_KEY);
 }
 
 export function applyBacktestSplitPct(pct) {

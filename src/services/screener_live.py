@@ -78,6 +78,7 @@ from src.core.exceptions import (
     SnapshotNotFoundError,
     StorageSchemaError,
 )
+from src.services._concurrency import BlockingRunner
 from src.services.corridor import QuoteKey, chain_quote_key, overlay_live_quotes
 from src.services.schemas import (
     ScreenerLiveFrame,
@@ -100,7 +101,6 @@ from src.services.screener import (
     leg_inputs,
     min_leg_open_interest,
 )
-from src.services.watchlist import BlockingRunner
 
 logger = logging.getLogger(__name__)
 

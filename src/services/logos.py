@@ -6,11 +6,11 @@ import asyncio
 import logging
 import urllib.error
 import urllib.request
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Final, Literal, Protocol, TypeVar
+from typing import Final, Literal, Protocol
 
 from src.core.security import TickerValidator
+from src.services._concurrency import BlockingRunner
 from src.storage.logo_store import (
     MAX_LOGO_BYTES,
     LogoExt,
@@ -21,16 +21,8 @@ from src.storage.logo_store import (
 
 logger = logging.getLogger(__name__)
 
-_T = TypeVar("_T")
-
 ELBSTREAM_LOGO_URL: Final = "https://api.elbstream.com/logos/symbol/{ticker}?format={fmt}"
 DEFAULT_LOGO_TIMEOUT_SEC: Final = 3.0
-
-
-class BlockingRunner(Protocol):
-    """Runs a blocking zero-argument callable off the event loop (e.g. `asyncio.to_thread`)."""
-
-    def __call__(self, func: Callable[[], _T], /) -> Awaitable[_T]: ...
 
 
 @dataclass(frozen=True, slots=True)

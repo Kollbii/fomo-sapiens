@@ -93,11 +93,7 @@ export function bindEvents() {
     dom.themeToggle.addEventListener("click", function () {
       var next = currentTheme() === "terminal" ? "print" : "terminal";
       document.documentElement.setAttribute("data-theme", next);
-      try {
-        window.localStorage.setItem("ibkr_options_theme", next);
-      } catch (_err) {
-        /* ignore */
-      }
+      writePref("ibkr_options_theme", next);
       updateThemeToggleLabel();
       if (state.chainData) {
         renderAllCharts(state.chainData);

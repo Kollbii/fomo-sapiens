@@ -495,3 +495,59 @@ def test_workspace_modes_and_sticky_controls() -> None:
         """
     )
     assert result["ok"] is True
+
+
+def test_helpers_json_prefs_and_formatters() -> None:
+    result = _run_node(
+        """
+        const {
+          PRESET_STRATEGY_LABELS,
+          formatExpiryIso,
+          formatStrategyShortLabel,
+          formatStrikeShort,
+          readJsonPref,
+          removePref,
+          writeJsonPref,
+        } = await import(modUrl("helpers.js"));
+
+        assert.equal(readJsonPref("missing_key", "fallback"), "fallback");
+        writeJsonPref("test_json_pref_v1", { a: 1, b: ["x"] });
+        assert.deepEqual(readJsonPref("test_json_pref_v1", null), { a: 1, b: ["x"] });
+
+        store["corrupt_json_pref"] = "{not-json";
+        assert.deepEqual(readJsonPref("corrupt_json_pref", { ok: false }), { ok: false });
+
+        removePref("test_json_pref_v1");
+        assert.equal(readJsonPref("test_json_pref_v1", null), null);
+
+        // Graceful fallback when localStorage throws
+        const origStorage = globalThis.window.localStorage;
+        globalThis.window.localStorage = {
+          getItem() { throw new Error("blocked"); },
+          setItem() { throw new Error("quota"); },
+          removeItem() { throw new Error("blocked"); },
+        };
+        assert.equal(readJsonPref("any", "safe"), "safe");
+        writeJsonPref("any", { x: 1 });
+        removePref("any");
+        globalThis.window.localStorage = origStorage;
+
+        // Strike & expiry formatters
+        assert.equal(formatStrikeShort(120), "$120");
+        assert.equal(formatStrikeShort(120.5), "$120.50");
+        assert.equal(formatStrikeShort(null), "\\u2014");
+        assert.equal(formatStrikeShort(null, ""), "");
+        assert.equal(formatExpiryIso("20261218"), "2026-12-18");
+        assert.equal(formatExpiryIso("2026-12-18"), "2026-12-18");
+
+        // Strategy label formatting & preset validation exclusion
+        assert.equal(formatStrategyShortLabel("BULL_PUT_SPREAD"), "Bull Put");
+        assert.equal(formatStrategyShortLabel("CUSTOM"), "Custom");
+        assert.equal(formatStrategyShortLabel(null), "\\u2014");
+        assert.equal(formatStrategyShortLabel("NEW_KIND"), "NEW KIND");
+        assert.equal(Object.prototype.hasOwnProperty.call(PRESET_STRATEGY_LABELS, "CUSTOM"), false);
+
+        console.log(JSON.stringify({ ok: true }));
+        """
+    )
+    assert result["ok"] is True

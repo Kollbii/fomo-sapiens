@@ -14,14 +14,6 @@ import {
   apiJson,
 } from "./network.js";
 
-export function toIsoExpiry(rawExpiry) {
-  var s = String(rawExpiry || "").trim();
-  if (/^\d{8}$/.test(s)) {
-    return s.slice(0, 4) + "-" + s.slice(4, 6) + "-" + s.slice(6, 8);
-  }
-  return s;
-}
-
 export function setBacktestNotice(tone, msg) {
   if (!dom.backtestWarnings) return;
   if (!msg) {
@@ -38,7 +30,7 @@ function defaultLegFromChain() {
   if (state.chainData && state.chainData.contracts && state.chainData.contracts.length) {
     var midIdx = Math.floor(state.chainData.contracts.length / 2);
     var sample = state.chainData.contracts[midIdx] || state.chainData.contracts[0];
-    exp = toIsoExpiry(sample.expiry);
+    exp = formatExpiryIso(sample.expiry);
     strike = Number(sample.strike) || 100;
   }
   return { side: "SELL", right: "P", expiry: exp, strike: strike, qty: 1 };
@@ -68,7 +60,7 @@ export function renderCustomLegsEditor() {
       '<option value="C"' + (leg.right === "C" ? " selected" : "") + ">Call</option>" +
       "</select></td>" +
       '<td><input class="input-control" type="text" placeholder="YYYY-MM-DD" data-bt-leg-field="expiry" value="' +
-      escapeHtml(toIsoExpiry(leg.expiry)) +
+      escapeHtml(formatExpiryIso(leg.expiry)) +
       '" aria-label="Leg Expiry" /></td>' +
       '<td><input class="input-control" type="number" step="0.5" min="0.01" data-bt-leg-field="strike" value="' +
       escapeHtml(leg.strike) +
@@ -96,7 +88,7 @@ export function readCustomLegsFromUI() {
     var expEl = row.querySelector('[data-bt-leg-field="expiry"]');
     var strikeEl = row.querySelector('[data-bt-leg-field="strike"]');
     var qtyEl = row.querySelector('[data-bt-leg-field="qty"]');
-    var expiry = toIsoExpiry(expEl ? expEl.value : "");
+    var expiry = formatExpiryIso(expEl ? expEl.value : "");
     var strike = Number(strikeEl ? strikeEl.value : 0);
     var qty = parseInt(qtyEl ? qtyEl.value : "1", 10) || 1;
     out.push({
@@ -137,7 +129,7 @@ export function copyStrategyLabLegsToBacktest() {
     return {
       side: leg.side === "BUY" ? "BUY" : "SELL",
       right: leg.right === "C" ? "C" : "P",
-      expiry: toIsoExpiry(leg.expiry),
+      expiry: formatExpiryIso(leg.expiry),
       strike: Number(leg.strike),
       qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
     };
@@ -485,7 +477,7 @@ async function resolveLegsForPaperTrade(snapshotId) {
         return {
           side: leg.side === "BUY" ? "BUY" : "SELL",
           right: leg.right === "C" ? "C" : "P",
-          expiry: toIsoExpiry(leg.expiry),
+          expiry: formatExpiryIso(leg.expiry),
           strike: Number(leg.strike),
           qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
         };
@@ -524,7 +516,7 @@ async function resolveLegsForPaperTrade(snapshotId) {
           return {
             side: leg.side,
             right: leg.right,
-            expiry: toIsoExpiry(leg.expiry),
+            expiry: formatExpiryIso(leg.expiry),
             strike: Number(leg.strike),
             qty: Math.max(1, parseInt(leg.qty || 1, 10) || 1),
           };

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import stat
 import threading
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -17,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from src.core.config import PROJECT_ROOT
 from src.core.exceptions import StorageSchemaError
+from src.storage._atomic import StatSig, atomic_write_bytes, atomic_write_csv, path_stat_sig
 from src.storage.ledger_schema import (
     FLEX_SOURCES,
     LEDGER_EXECUTION_COLUMNS,
@@ -31,35 +30,9 @@ from src.storage.ledger_schema import (
 
 logger = logging.getLogger(__name__)
 
-_StatSig = tuple[int, int, int, int]
-
-
-def _path_stat_sig(path: Path) -> _StatSig | None:
-    try:
-        st = path.stat()
-    except OSError:
-        return None
-    if not stat.S_ISREG(st.st_mode):
-        return None
-    return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
-
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
-def _atomic_write_csv(df: pl.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp")
-    df.write_csv(tmp)
-    os.replace(tmp, path)
 
 
 def _exec_id_suffix_match(id_a: str, id_b: str) -> bool:
@@ -155,11 +128,11 @@ class LedgerRepository:
         self.positions_path = self.ledger_dir / "open_positions.csv"
         self.sync_state_path = self.ledger_dir / "sync_state.json"
         self._lock = threading.RLock()
-        self._exec_cache_sig: _StatSig | None = None
+        self._exec_cache_sig: StatSig | None = None
         self._exec_cache_df: pl.DataFrame | None = None
-        self._pos_cache_sig: _StatSig | None = None
+        self._pos_cache_sig: StatSig | None = None
         self._pos_cache_df: pl.DataFrame | None = None
-        self._sync_cache_sig: tuple[_StatSig | None, _StatSig | None, _StatSig | None] | None = None
+        self._sync_cache_sig: tuple[StatSig | None, StatSig | None, StatSig | None] | None = None
         self._sync_cache_data: dict[str, Any] | None = None
 
     def ensure_layout(self) -> None:
@@ -202,7 +175,7 @@ class LedgerRepository:
     def load_executions(self) -> pl.DataFrame:
         """Load `executions.csv`, returning an empty schema-typed DataFrame if absent."""
         with self._lock:
-            sig = _path_stat_sig(self.executions_path)
+            sig = path_stat_sig(self.executions_path)
             if sig is None:
                 self._exec_cache_sig = None
                 self._exec_cache_df = None
@@ -227,7 +200,7 @@ class LedgerRepository:
     def load_positions(self) -> pl.DataFrame:
         """Load `open_positions.csv`, returning an empty schema-typed DataFrame if absent."""
         with self._lock:
-            sig = _path_stat_sig(self.positions_path)
+            sig = path_stat_sig(self.positions_path)
             if sig is None:
                 self._pos_cache_sig = None
                 self._pos_cache_df = None
@@ -253,12 +226,12 @@ class LedgerRepository:
         """Return True if `executions.csv` already stores at least one execution row."""
         return self.load_executions().height > 0
 
-    def cache_token(self) -> tuple[_StatSig | None, _StatSig | None]:
+    def cache_token(self) -> tuple[StatSig | None, StatSig | None]:
         """Return current stat signatures for `(executions.csv, open_positions.csv)`."""
         with self._lock:
             return (
-                _path_stat_sig(self.executions_path),
-                _path_stat_sig(self.positions_path),
+                path_stat_sig(self.executions_path),
+                path_stat_sig(self.positions_path),
             )
 
     # ------------------------------------------------------------------ write
@@ -395,8 +368,8 @@ class LedgerRepository:
                 [r.model_dump() for r in ordered],
                 schema=LEDGER_EXECUTION_POLARS_SCHEMA,
             )
-            _atomic_write_csv(out_df, self.executions_path)
-            sig = _path_stat_sig(self.executions_path)
+            atomic_write_csv(out_df, self.executions_path)
+            sig = path_stat_sig(self.executions_path)
             self._exec_cache_sig = sig
             self._exec_cache_df = out_df if sig is not None else None
             self._sync_cache_sig = None
@@ -434,8 +407,8 @@ class LedgerRepository:
                 if ordered
                 else pl.DataFrame(schema=LEDGER_POSITION_POLARS_SCHEMA)
             )
-            _atomic_write_csv(df, self.positions_path)
-            sig = _path_stat_sig(self.positions_path)
+            atomic_write_csv(df, self.positions_path)
+            sig = path_stat_sig(self.positions_path)
             self._pos_cache_sig = sig
             self._pos_cache_df = df if sig is not None else None
             self._sync_cache_sig = None
@@ -453,9 +426,9 @@ class LedgerRepository:
         """Load `sync_state.json` or return computed defaults when missing/corrupt."""
         with self._lock:
             combined_sig = (
-                _path_stat_sig(self.executions_path),
-                _path_stat_sig(self.positions_path),
-                _path_stat_sig(self.sync_state_path),
+                path_stat_sig(self.executions_path),
+                path_stat_sig(self.positions_path),
+                path_stat_sig(self.sync_state_path),
             )
             if combined_sig == self._sync_cache_sig and self._sync_cache_data is not None:
                 return {
@@ -486,9 +459,9 @@ class LedgerRepository:
                     recommended_incremental_mode=recommended,
                 ).model_dump()
             final_sig = (
-                _path_stat_sig(self.executions_path),
-                _path_stat_sig(self.positions_path),
-                _path_stat_sig(self.sync_state_path),
+                path_stat_sig(self.executions_path),
+                path_stat_sig(self.positions_path),
+                path_stat_sig(self.sync_state_path),
             )
             self._sync_cache_sig = final_sig
             self._sync_cache_data = {
@@ -519,14 +492,14 @@ class LedgerRepository:
                 recommended_incremental_mode=recommended,
             )
             payload = state.model_dump()
-            _atomic_write_bytes(
+            atomic_write_bytes(
                 self.sync_state_path,
                 json.dumps(payload, indent=2).encode("utf-8"),
             )
             self._sync_cache_sig = (
-                _path_stat_sig(self.executions_path),
-                _path_stat_sig(self.positions_path),
-                _path_stat_sig(self.sync_state_path),
+                path_stat_sig(self.executions_path),
+                path_stat_sig(self.positions_path),
+                path_stat_sig(self.sync_state_path),
             )
             self._sync_cache_data = {
                 **payload,

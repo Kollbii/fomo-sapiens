@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import shutil
 import threading
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -19,6 +17,13 @@ from pydantic import ValidationError
 from src.core.config import PROJECT_ROOT, StorageSettings
 from src.core.exceptions import SnapshotNotFoundError, StorageSchemaError
 from src.core.security import TickerValidator
+from src.storage._atomic import (
+    StatSig,
+    atomic_copy_file,
+    atomic_write_bytes,
+    atomic_write_csv,
+    path_stat_sig,
+)
 from src.storage.quality import measure_quote_quality
 from src.storage.schema import (
     COLUMNS,
@@ -45,18 +50,6 @@ def make_snapshot_id(ticker: str, ts: datetime) -> str:
 
 def _utc_now_iso() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
-
-
-def _atomic_copy(src: Path, dest: Path) -> None:
-    tmp = dest.with_name(f".{dest.name}.tmp")
-    shutil.copyfile(src, tmp)
-    os.replace(tmp, dest)
 
 
 def _clone_snapshot_meta(meta: SnapshotMeta) -> SnapshotMeta:
@@ -110,7 +103,7 @@ class CSVRepository:
         self.latest_dir = self._resolve(self.storage.latest_dir)
         self.index_path = self._resolve(self.storage.metadata_index_file)
         self._lock = threading.RLock()
-        self._index_cache_sig: tuple[int, int, int, int] | None = None
+        self._index_cache_sig: StatSig | None = None
         self._index_cache_data: dict[str, Any] | None = None
         self._index_cache_metas: dict[str, tuple[SnapshotMeta, ...]] | None = None
 
@@ -231,13 +224,10 @@ class CSVRepository:
                 raise StorageSchemaError(f"Snapshot already exists (immutable): {snapshot_id}")
             latest = self.latest_path(symbol)
             update_latest = partial_reason is None or not latest.is_file()
-            target.parent.mkdir(parents=True, exist_ok=True)
             self.latest_dir.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.tmp")
-            df.write_csv(tmp)
-            os.replace(tmp, target)
+            atomic_write_csv(df, target)
             if update_latest:
-                _atomic_copy(target, latest)
+                atomic_copy_file(target, latest, ensure_parent=False)
             self._index_add(symbol, meta, latest_snapshot_id=snapshot_id if update_latest else None)
         logger.info(
             "snapshot saved id=%s contracts=%d partial=%s latest_updated=%s",
@@ -429,12 +419,8 @@ class CSVRepository:
             prior_close_only_count=quality.prior_close_only_count,
         )
 
-    def _index_stat_sig(self) -> tuple[int, int, int, int] | None:
-        try:
-            st = self.index_path.stat()
-        except OSError:
-            return None
-        return (st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns)
+    def _index_stat_sig(self) -> StatSig | None:
+        return path_stat_sig(self.index_path)
 
     def _invalidate_index_cache(self) -> None:
         self._index_cache_sig = None
@@ -448,8 +434,7 @@ class CSVRepository:
         cached_metas: dict[str, tuple[SnapshotMeta, ...]] | None = None,
     ) -> dict[str, Any]:
         index: dict[str, Any] = {"updated_at_utc": _utc_now_iso(), "tickers": tickers}
-        self.index_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write_bytes(self.index_path, json.dumps(index, indent=2).encode("utf-8"))
+        atomic_write_bytes(self.index_path, json.dumps(index, indent=2).encode("utf-8"))
         with self._lock:
             if cached_metas is not None and (sig := self._index_stat_sig()) is not None:
                 self._index_cache_sig = sig

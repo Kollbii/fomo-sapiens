@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import contextlib
 import logging
-import os
 import re
 import threading
 import time
@@ -21,6 +20,7 @@ from typing import Final, Literal
 
 from src.core.config import StorageSettings, resolve_project_path
 from src.core.security import TickerValidator
+from src.storage._atomic import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -163,17 +163,13 @@ class LogoStore:
         with self._lock:
             self.ensure_layout()
             target = self.cache_dir / f"{symbol}.{ext}"
-            tmp = self.cache_dir / f"{symbol}.{ext}.{os.getpid()}.{threading.get_ident()}.tmp"
-            try:
-                with tmp.open("wb") as handle:
-                    handle.write(validated)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                os.replace(tmp, target)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
-                raise
+            atomic_write_bytes(
+                target,
+                validated,
+                fsync=True,
+                unique_tmp=True,
+                ensure_parent=False,
+            )
             for other_ext in SUPPORTED_LOGO_EXTS:
                 if other_ext != ext:
                     with contextlib.suppress(OSError):
@@ -196,11 +192,9 @@ class LogoStore:
                 return
             self.ensure_layout()
             target = self.cache_dir / f"{symbol}.miss"
-            tmp = self.cache_dir / f"{symbol}.miss.{os.getpid()}.{threading.get_ident()}.tmp"
-            try:
-                tmp.write_text("miss\n", encoding="utf-8")
-                os.replace(tmp, target)
-            except BaseException:
-                with contextlib.suppress(OSError):
-                    tmp.unlink()
-                raise
+            atomic_write_bytes(
+                target,
+                b"miss\n",
+                unique_tmp=True,
+                ensure_parent=False,
+            )

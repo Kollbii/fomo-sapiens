@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from src.core.calendar import et_date
 from src.core.exceptions import InvalidTickerError, SnapshotNotFoundError, StorageSchemaError
 from src.core.security import TickerValidator
+from src.storage._atomic import atomic_write_bytes, atomic_write_csv
 from src.storage.csv_repository import validate_frame
 from src.storage.schema import (
     COLUMNS,
@@ -375,14 +376,7 @@ class PaperTradeStore:
             indent=2,
             ensure_ascii=False,
         ).encode("utf-8")
-        self.metadata_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.registry_path.with_name(f".{self.registry_path.name}.tmp")
-        try:
-            tmp.write_bytes(payload)
-            os.replace(tmp, self.registry_path)
-        finally:
-            if tmp.exists():
-                tmp.unlink()
+        atomic_write_bytes(self.registry_path, payload)
 
     def load_trades(self) -> list[PaperTrade]:
         """Load all paper trades; a missing file returns `[]`, an unreadable file errors."""
@@ -561,14 +555,7 @@ class PaperTradeStore:
         with self._lock:
             if target.exists():
                 raise StorageSchemaError(f"Tracked-quote file already exists: {target.name}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_name(f".{target.name}.tmp")
-            try:
-                df.write_csv(tmp)
-                os.replace(tmp, target)
-            finally:
-                if tmp.exists():
-                    tmp.unlink()
+            atomic_write_csv(df, target)
         return target
 
     def load_quotes(self, ticker: str, snapshot_id: str) -> pl.DataFrame:
