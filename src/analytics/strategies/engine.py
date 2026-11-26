@@ -416,7 +416,7 @@ def strategy_risk_metrics(
     mid_cash_total: float,
     qty_multiplier: int,
     risk_free_rate: float,
-    pop_grid: PopGrid | None,
+    pop_grid: PopGrid | None = None,
 ) -> StrategyRiskMetrics:
     """Expiry risk bounds, RoR, EV/risk, breakevens, POP and 1-sigma move (no display curves).
 
@@ -510,9 +510,12 @@ def evaluate_strategy(
     min_net_credit_dollars: float | None = None,
     min_ror_pct: float | None = None,
     entry_price_basis: EntryPriceBasis = "MID",
+    include_curves: bool = True,
+    include_pop: bool = True,
+    prepared_chain: tuple[str, float, list[PreparedRow]] | None = None,
 ) -> StrategyEvaluationResponse:
     """Evaluate pricing, risk metrics, net Greeks, and BSM T+n curves for any multi-leg strategy."""
-    underlying, spot, rows = prepare_rows(df)
+    underlying, spot, rows = prepared_chain if prepared_chain is not None else prepare_rows(df)
     walls = walls_report or compute_walls(df)
     lookup = row_lookup_map(rows)
 
@@ -529,6 +532,7 @@ def evaluate_strategy(
             min_net_credit_dollars=min_net_credit_dollars,
             min_ror_pct=min_ror_pct,
             entry_price_basis=entry_price_basis,
+            prepared_chain=(underlying, spot, rows),
         )
         rationale.extend(auto_notes)
     else:
@@ -552,6 +556,7 @@ def evaluate_strategy(
     ref_iv = chain_reference_iv(rows, spot, short_expiry)
     states = build_leg_states(matched, spot, risk_free_rate, ref_iv)
     pricing, mid_cash_total = strategy_pricing(states, qty_multiplier)
+    pop_grid = lognormal_pop_grid(spot, short_dte, ref_iv, risk_free_rate) if include_pop else None
     risk = strategy_risk_metrics(
         states,
         spot=spot,
@@ -560,50 +565,55 @@ def evaluate_strategy(
         mid_cash_total=mid_cash_total,
         qty_multiplier=qty_multiplier,
         risk_free_rate=risk_free_rate,
-        pop_grid=lognormal_pop_grid(spot, short_dte, ref_iv, risk_free_rate),
+        pop_grid=pop_grid,
     )
 
-    # Interactive Plotly curves: Today (T+0), 50% Decay, Short Expiry (+ custom Sim if active)
-    display_grid = _build_display_grid(spot, [row.strike for _, row in matched])
-    half_days = max(0, short_dte // 2)
-    curve_specs: list[tuple[str, int, float, bool]] = [
-        ("Today (T+0)", 0, 0.0, False),
-    ]
-    if 0 < half_days < short_dte:
-        curve_specs.append((f"Midpoint (T+{half_days}d)", half_days, 0.0, False))
-    expiry_label = (
-        f"At Short Expiry ({short_dte}d)"
-        if short_dte != long_dte
-        else f"At Expiration ({short_dte}d)"
-    )
-    curve_specs.append((expiry_label, short_dte, 0.0, True))
-
-    if eff_days_forward != 0 or abs(iv_shift) > 1e-6:
-        iv_tag = f" IV{iv_shift:+.0%}" if abs(iv_shift) > 1e-6 else ""
-        sim_label = f"Simulated (T+{eff_days_forward}d{iv_tag})"
-        curve_specs.append((sim_label, eff_days_forward, iv_shift, False))
-
-    curves = [
-        StrategyPayoffSeries(
-            label=label,
-            days_elapsed=d_el,
-            iv_shift=sh,
-            pnl_values=[
-                round(float(v), 2)
-                for v in evaluate_pnl_grid(
-                    display_grid,
-                    states,
-                    entry_cash_total=mid_cash_total,
-                    days_elapsed=float(d_el),
-                    iv_shift=sh,
-                    qty_multiplier=qty_multiplier,
-                    risk_free_rate=risk_free_rate,
-                    at_expiration=is_exp,
-                )
-            ],
+    if include_curves:
+        # Interactive Plotly curves: Today (T+0), 50% Decay, Short Expiry (+ custom Sim if active)
+        display_grid = _build_display_grid(spot, [row.strike for _, row in matched])
+        half_days = max(0, short_dte // 2)
+        curve_specs: list[tuple[str, int, float, bool]] = [
+            ("Today (T+0)", 0, 0.0, False),
+        ]
+        if 0 < half_days < short_dte:
+            curve_specs.append((f"Midpoint (T+{half_days}d)", half_days, 0.0, False))
+        expiry_label = (
+            f"At Short Expiry ({short_dte}d)"
+            if short_dte != long_dte
+            else f"At Expiration ({short_dte}d)"
         )
-        for label, d_el, sh, is_exp in curve_specs
-    ]
+        curve_specs.append((expiry_label, short_dte, 0.0, True))
+
+        if eff_days_forward != 0 or abs(iv_shift) > 1e-6:
+            iv_tag = f" IV{iv_shift:+.0%}" if abs(iv_shift) > 1e-6 else ""
+            sim_label = f"Simulated (T+{eff_days_forward}d{iv_tag})"
+            curve_specs.append((sim_label, eff_days_forward, iv_shift, False))
+
+        curves = [
+            StrategyPayoffSeries(
+                label=label,
+                days_elapsed=d_el,
+                iv_shift=sh,
+                pnl_values=[
+                    round(float(v), 2)
+                    for v in evaluate_pnl_grid(
+                        display_grid,
+                        states,
+                        entry_cash_total=mid_cash_total,
+                        days_elapsed=float(d_el),
+                        iv_shift=sh,
+                        qty_multiplier=qty_multiplier,
+                        risk_free_rate=risk_free_rate,
+                        at_expiration=is_exp,
+                    )
+                ],
+            )
+            for label, d_el, sh, is_exp in curve_specs
+        ]
+        price_grid_out = [round(float(p), 2) for p in display_grid]
+    else:
+        price_grid_out = []
+        curves = []
 
     return StrategyEvaluationResponse(
         underlying=underlying,
@@ -623,7 +633,7 @@ def evaluate_strategy(
         pricing=pricing,
         risk=risk,
         net_greeks=net_position_greeks(states, qty_multiplier),
-        price_grid=[round(float(p), 2) for p in display_grid],
+        price_grid=price_grid_out,
         curves=curves,
         rationale=rationale,
     )

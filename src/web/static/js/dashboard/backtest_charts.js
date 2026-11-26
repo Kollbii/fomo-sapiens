@@ -194,20 +194,25 @@ function renderSystematicChart(sim, t) {
   setChartCaption(caption);
 
   var initCap = sim.summary && sim.summary.initial_capital ? Number(sim.summary.initial_capital) : null;
+  var maxAbsDdDollars = 0;
+  for (var d = 0; d < drawdownY.length; d++) {
+    maxAbsDdDollars = Math.max(maxAbsDdDollars, Math.abs(drawdownY[d]));
+  }
   var layout = baseLayout(t, "Trading Date", "Portfolio Equity ($)", []);
   layout.xaxis.type = "date";
   if (xDates.length === 1) {
     layout.xaxis.range = [shiftIsoDate(xDates[0], -1), shiftIsoDate(xDates[0], 1)];
   }
-  layout.margin = { t: 48, r: 58, b: 42, l: 64 };
-  layout.title = {
-    text: caption,
+  layout.margin = { t: 36, r: 58, b: 42, l: 64 };
+  layout.legend = {
+    orientation: "h",
     x: 0,
     xanchor: "left",
-    y: 0.98,
-    font: { size: 11, color: t.ink, family: t.fontMono },
+    y: 1.02,
+    yanchor: "bottom",
+    bgcolor: t.transparent,
+    font: { size: 10, color: t.ink },
   };
-  layout.legend = { orientation: "h", y: 1.09, x: 0, font: { size: 10, color: t.ink } };
   layout.yaxis2 = {
     title: { text: "Drawdown ($)", font: { size: 11, color: t.muted } },
     overlaying: "y",
@@ -215,6 +220,7 @@ function renderSystematicChart(sim, t) {
     showgrid: false,
     zeroline: true,
     zerolinecolor: t.grid,
+    range: [-Math.max(100, maxAbsDdDollars * 3.2), 0],
     tickfont: { color: t.muted },
   };
   if (initCap !== null) {
@@ -473,15 +479,16 @@ function renderSingleTradeChart(sim, t) {
   layout.yaxis.zeroline = true;
   layout.yaxis.zerolinecolor = t.muted;
 
-  layout.margin = { t: 54, r: 60, b: 42, l: 64 };
-  layout.title = {
-    text: caption,
+  layout.margin = { t: 36, r: 60, b: 42, l: 64 };
+  layout.legend = {
+    orientation: "h",
     x: 0,
     xanchor: "left",
-    y: 0.98,
-    font: { size: 11, color: t.ink, family: t.fontMono },
+    y: 1.02,
+    yanchor: "bottom",
+    bgcolor: t.transparent,
+    font: { size: 10, color: t.ink },
   };
-  layout.legend = { orientation: "h", y: 1.09, x: 0, font: { size: 10, color: t.ink } };
   layout.yaxis2 = {
     title: { text: "Spot ($)", font: { size: 11, color: t.muted } },
     overlaying: "y",

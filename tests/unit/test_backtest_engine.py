@@ -12,6 +12,7 @@ import pytest
 from src.analytics.backtest import (
     FLAG_BROKER_FILL_ENTRY,
     FLAG_CALLED_AWAY,
+    FLAG_CAPITAL_DEPLETED,
     FLAG_NO_USABLE_DAILY_SNAPSHOT,
     FLAG_PUT_ASSIGNED,
     FLAG_ROLL_SKIPPED,
@@ -2140,3 +2141,104 @@ def test_defensive_roll_up_and_out_and_credit_rules() -> None:
     assert res_roll.trades[1].legs[0].expiry == exp2
     assert res_roll.trades[1].legs[0].strike == pytest.approx(105.0)
     assert FLAG_ROLLED_ENTRY in res_roll.trades[1].flags
+
+
+def test_covered_call_negative_equity_caps_drawdown_pct_and_flags_capital_depleted() -> None:
+    d0 = datetime(2026, 11, 2, 20, 0, tzinfo=UTC)
+    d1 = datetime(2026, 11, 3, 20, 0, tzinfo=UTC)
+    d2 = datetime(2026, 11, 4, 20, 0, tzinfo=UTC)
+    exp = "2026-12-18"
+
+    b0 = _bar(
+        "cap0",
+        d0,
+        "2026-11-02",
+        _make_chain_df(
+            snapshot_id="cap0",
+            ts_utc=d0,
+            market_date="2026-11-02",
+            spot=100.0,
+            strikes=(100.0, 105.0),
+            expiries=((exp, 46),),
+            overrides={
+                (exp, 105.0, "C"): {"bid": 1.9, "ask": 2.1, "mid": 2.0, "last": 2.0, "delta": 0.30}
+            },
+        ),
+        spot=100.0,
+    )
+    b1 = _bar(
+        "cap1",
+        d1,
+        "2026-11-03",
+        _make_chain_df(
+            snapshot_id="cap1",
+            ts_utc=d1,
+            market_date="2026-11-03",
+            spot=50.0,
+            strikes=(100.0, 105.0),
+            expiries=((exp, 45),),
+            overrides={
+                (exp, 105.0, "C"): {
+                    "bid": 0.05,
+                    "ask": 0.05,
+                    "mid": 0.05,
+                    "last": 0.05,
+                    "delta": 0.01,
+                }
+            },
+        ),
+        spot=50.0,
+    )
+    b2 = _bar(
+        "cap2",
+        d2,
+        "2026-11-04",
+        _make_chain_df(
+            snapshot_id="cap2",
+            ts_utc=d2,
+            market_date="2026-11-04",
+            spot=40.0,
+            strikes=(100.0, 105.0),
+            expiries=((exp, 44),),
+            overrides={
+                (exp, 105.0, "C"): {
+                    "bid": 0.05,
+                    "ask": 0.05,
+                    "mid": 0.05,
+                    "last": 0.05,
+                    "delta": 0.01,
+                }
+            },
+        ),
+        spot=40.0,
+    )
+
+    cfg = BacktestConfig(
+        strategy_kind="COVERED_CALL",
+        entry_cadence="WHEN_FLAT",
+        initial_capital=1000.0,
+        target_dte_min=30,
+        target_dte_max=60,
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        min_entry_credit_dollars=0.0,
+    )
+    res = run_systematic_backtest([b0, b1, b2], cfg, ticker="NVDA")
+    assert len(res.equity_curve) == 3
+
+    pt1 = res.equity_curve[1]
+    assert pt1.equity_dollars < 0.0
+    assert pt1.drawdown_dollars > 1000.0
+    assert pt1.drawdown_dollars == pytest.approx(1000.0 - pt1.equity_dollars)
+    assert pt1.drawdown_pct == pytest.approx(100.0)
+    assert FLAG_CAPITAL_DEPLETED in pt1.flags
+
+    pt2 = res.equity_curve[2]
+    assert pt2.equity_dollars < pt1.equity_dollars
+    assert pt2.drawdown_dollars == pytest.approx(1000.0 - pt2.equity_dollars)
+    assert pt2.drawdown_pct == pytest.approx(100.0)
+    assert FLAG_CAPITAL_DEPLETED in pt2.flags
+
+    assert res.summary.max_drawdown_pct == pytest.approx(100.0)
+    assert res.summary.max_drawdown_dollars == pytest.approx(pt2.drawdown_dollars)
+    assert any("CAPITAL_DEPLETED" in note for note in res.notes)

@@ -188,3 +188,82 @@ def test_two_voice_typography_reserves_font_sans_for_logo_monograms() -> None:
     assert violations == [], (
         f"Unexpected var(--font-sans) usage violating Two-Voice typography: {violations}"
     )
+
+
+def test_robustness_and_cadence_accessibility_markup() -> None:
+    """Verdict cards are buttons, tabs omit aria-pressed, and info buttons sit outside <label>."""
+    html = (TEMPLATES_DIR / "index.html").read_text(encoding="utf-8")
+
+    # 1. Cadence hint sits outside <label> and label uses explicit for="backtest-cadence-select"
+    assert 'aria-describedby="backtest-cadence-legacy-hint"' in html
+    assert 'id="backtest-cadence-legacy-hint"' in html
+    assert 'for="backtest-cadence-select"' in html
+    for label_match in re.finditer(r"<label\b[^>]*>.*?</label>", html, re.S):
+        label_html = label_match.group(0)
+        if 'for="backtest-cadence-select"' in label_html:
+            assert 'id="backtest-cadence-legacy-hint"' not in label_html
+
+    # 1b. Zero <button> nested in <label> in #backtest-card, and .bt-info-btn has valid attrs
+    bt_card_match = re.search(
+        r'<article id="backtest-card".*?</article>',
+        html,
+        re.S,
+    )
+    assert bt_card_match is not None
+    bt_card_html = bt_card_match.group(0)
+    for label_match in re.finditer(r"<label\b[^>]*>.*?</label>", bt_card_html, re.S):
+        assert "<button" not in label_match.group(0).lower(), (
+            f"Nested <button> inside <label> in #backtest-card: {label_match.group(0)}"
+        )
+
+    info_btns = re.findall(r'<button\b[^>]*class="[^"]*\bbt-info-btn\b[^"]*"[^>]*>', bt_card_html)
+    assert len(info_btns) >= 20
+    for btn_tag in info_btns:
+        assert 'type="button"' in btn_tag, f".bt-info-btn missing type='button': {btn_tag}"
+        tip_m = re.search(r'data-tip="([^"]+)"', btn_tag)
+        aria_m = re.search(r'aria-label="([^"]+)"', btn_tag)
+        assert tip_m is not None and tip_m.group(1).strip(), (
+            f".bt-info-btn missing data-tip: {btn_tag}"
+        )
+        assert aria_m is not None and aria_m.group(1).strip(), (
+            f".bt-info-btn missing aria-label: {btn_tag}"
+        )
+
+    # 1c. All 5 Robustness charts have HTML .bt-rob-chart-head bars with title spans
+    assert bt_card_html.count('class="bt-rob-chart-head"') == 5
+    for title_id in (
+        "bt-rob-cohorts-chart-title",
+        "bt-rob-sens-chart-title",
+        "bt-rob-wfo-chart-title",
+        "bt-rob-mc-fan-chart-title",
+        "bt-rob-mc-dd-chart-title",
+    ):
+        assert f'id="{title_id}"' in bt_card_html
+
+    # 2. Robustness verdict cards use native <button type="button">
+    verdicts_match = re.search(
+        r'<div id="bt-rob-verdicts".*?</div>\s*<div id="bt-rob-tabs"', html, re.S
+    )
+    assert verdicts_match is not None
+    verdicts_block = verdicts_match.group(0)
+    assert verdicts_block.count('<button type="button" class="bt-rob-verdict-card"') == 4
+    assert 'role="button"' not in verdicts_block
+
+    # 3. Robustness role="tab" buttons use aria-selected + aria-controls without aria-pressed
+    tabs_match = re.search(r'<div id="bt-rob-tabs".*?</div>', html, re.S)
+    assert tabs_match is not None
+    tabs_block = tabs_match.group(0)
+    assert "aria-pressed" not in tabs_block
+    assert tabs_block.count('role="tab"') == 4
+    assert tabs_block.count("aria-controls=") == 4
+
+    # 4. Robustness tabpanels link back via aria-labelledby
+    for pane_id, tab_id in (
+        ("bt-rob-pane-cohorts", "bt-rob-tab-cohorts"),
+        ("bt-rob-pane-sensitivity", "bt-rob-tab-sensitivity"),
+        ("bt-rob-pane-walkforward", "bt-rob-tab-walkforward"),
+        ("bt-rob-pane-montecarlo", "bt-rob-tab-montecarlo"),
+    ):
+        assert (
+            f'id="{pane_id}" class="bt-rob-pane" role="tabpanel" aria-labelledby="{tab_id}"' in html
+        )

@@ -9,9 +9,11 @@ from typing import ParamSpec, TypeVar
 from fastapi import APIRouter, Depends, Path, Query
 
 from src.services.analyzer import AnalyzerService
-from src.services.backtest import list_backtest_entries, run_backtest
+from src.services.backtest import list_backtest_entries, run_backtest, run_backtest_robustness
 from src.services.schemas import (
     BacktestEntriesResponse,
+    BacktestRobustnessRequest,
+    BacktestRobustnessResponse,
     BacktestRunRequest,
     BacktestRunResponse,
     PaperTrade,
@@ -49,6 +51,14 @@ async def api_backtest_run(
     svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
 ) -> BacktestRunResponse:
     return await _in_thread(run_backtest, svc, payload)
+
+
+@backtest_router.post("/robustness", response_model=BacktestRobustnessResponse)
+async def api_backtest_robustness(
+    payload: BacktestRobustnessRequest,
+    svc: AnalyzerService = Depends(get_web_service),  # noqa: B008
+) -> BacktestRobustnessResponse:
+    return await _in_thread(run_backtest_robustness, svc, payload)
 
 
 @backtest_router.get("/paper-trades", response_model=PaperTradesListResponse)

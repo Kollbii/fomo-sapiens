@@ -188,6 +188,14 @@ export function themeVars() {
     legSell: cssVar("--corridor-leg-sell", isTerminal ? "#FB923C" : "#EA580C"),
     anomaly: cssVar("--accent-anomaly", isTerminal ? "#FB923C" : "#B83B0A"),
     warn: cssVar("--accent-warn", isTerminal ? "#F59E0B" : "#9A4306"),
+    accentFocus: cssVar("--accent-focus", isTerminal ? "#38BDF8" : "#1D4ED8"),
+    fanOuter: cssVar("--bt-fan-outer-fill", isTerminal ? "rgba(56, 189, 248, 0.12)" : "rgba(29, 78, 216, 0.10)"),
+    fanInner: cssVar("--bt-fan-inner-fill", isTerminal ? "rgba(56, 189, 248, 0.22)" : "rgba(29, 78, 216, 0.20)"),
+    heatLow: cssVar("--bt-heat-low", isTerminal ? "#EF4444" : "#A82020"),
+    heatMid: cssVar("--bt-heat-mid", isTerminal ? "#1E2636" : "#F3EFE6"),
+    heatHigh: cssVar("--bt-heat-high", isTerminal ? "#10B981" : "#0F6E4F"),
+    heatZeroLine: cssVar("--bt-heat-zero-line", isTerminal ? "rgba(160, 170, 184, 0.35)" : "rgba(74, 74, 74, 0.35)"),
+    transparent: cssVar("--bt-transparent", "rgba(0, 0, 0, 0)"),
     fontMono: cssVar("--font-mono", "monospace"),
     dtePalette: isTerminal
       ? ["#38BDF8", "#10B981", "#F59E0B", "#A78BFA", "#F472B6"]

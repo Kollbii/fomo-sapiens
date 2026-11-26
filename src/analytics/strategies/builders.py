@@ -715,6 +715,7 @@ def try_suggest_strategy_legs_from_walls(
     min_net_credit_dollars: float | None = None,
     min_ror_pct: float | None = None,
     entry_price_basis: EntryPriceBasis = "MID",
+    prepared_chain: tuple[str, float, list[PreparedRow]] | None = None,
 ) -> StrategySuggestionOutcome:
     """Choose preset legs from a chain DataFrame, returning `legs=None` on filter rejection.
 
@@ -724,7 +725,7 @@ def try_suggest_strategy_legs_from_walls(
     (`EMPTY_CHAIN`, Iron Condor `NO_PUT_CONTRACTS` / `NO_CALL_CONTRACTS`), otherwise a plain
     `ValueError` (e.g. insufficient wing strikes).
     """
-    _, spot, rows = prepare_rows(df)
+    _, spot, rows = prepared_chain if prepared_chain is not None else prepare_rows(df)
     walls = walls_report or compute_walls(df)
     short_exp, short_dte = pick_target_expiry(rows, target_expiry)
     _, call_wall, put_wall = find_wall_for_expiry(walls, short_exp)
@@ -784,6 +785,7 @@ def suggest_strategy_legs_from_walls(
     min_net_credit_dollars: float | None = None,
     min_ror_pct: float | None = None,
     entry_price_basis: EntryPriceBasis = "MID",
+    prepared_chain: tuple[str, float, list[PreparedRow]] | None = None,
 ) -> tuple[list[StrategyLegInput], list[str], float | None, float | None]:
     """Automatically choose Wall- and liquidity-optimal option legs from a chain DataFrame."""
     outcome = try_suggest_strategy_legs_from_walls(
@@ -794,6 +796,7 @@ def suggest_strategy_legs_from_walls(
         min_net_credit_dollars=min_net_credit_dollars,
         min_ror_pct=min_ror_pct,
         entry_price_basis=entry_price_basis,
+        prepared_chain=prepared_chain,
     )
     if outcome.legs is None:
         msg = outcome.notes[0] if outcome.notes else "No eligible option contracts found"

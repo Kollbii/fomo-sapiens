@@ -55,14 +55,20 @@ def finalize_trade_record(
     gross_pnl_dollars: float | None,
     net_pnl_dollars: float | None,
     last_bar: DailyChainBar,
+    open_opt_gross: float | None = None,
+    open_opt_net: float | None = None,
 ) -> BacktestTradeRecord:
     """Convert mutable trade state into an immutable `BacktestTradeRecord`."""
     if status == "OPEN":
         exit_reason = "END_OF_DATA"
         exit_date, exit_snapshot_id = last_bar.market_date, last_bar.snapshot_id
-        last_step = steps[-1]
-        opt_gross = last_step.gross_pnl_dollars
-        opt_net = last_step.net_pnl_dollars
+        if steps:
+            last_step = steps[-1]
+            opt_gross = last_step.gross_pnl_dollars
+            opt_net = last_step.net_pnl_dollars
+        else:
+            opt_gross = open_opt_gross
+            opt_net = open_opt_net
         if open_stock_unrealized_pnl is not None:
             option_net_pnl_dollars = opt_net
             stock_pnl_dollars = open_stock_unrealized_pnl

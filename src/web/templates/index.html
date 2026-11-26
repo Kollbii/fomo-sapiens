@@ -1111,6 +1111,7 @@
         <div id="backtest-mode-group" class="backtest-seg-group" role="group" aria-label="Backtest Mode">
           <button type="button" class="backtest-seg-btn is-active" data-bt-mode="SYSTEMATIC" aria-pressed="true">Systematic Study</button>
           <button type="button" class="backtest-seg-btn" data-bt-mode="SINGLE_TRADE" aria-pressed="false">Single Trade Replay</button>
+          <button type="button" class="backtest-seg-btn" data-bt-mode="ROBUSTNESS" aria-pressed="false">Robustness Suite</button>
         </div>
         <button type="button" id="backtest-save-paper-btn" class="btn">Save Paper Trade</button>
         <button type="button" id="backtest-run-btn" class="btn btn-primary">RUN BACKTEST</button>
@@ -1121,196 +1122,309 @@
       <form id="backtest-form" class="backtest-controls">
         <div id="backtest-single-controls" class="backtest-single-controls" hidden>
           <div class="backtest-switch-group">
-            <span class="field-label">Replay Source</span>
+            <div class="backtest-field-head">
+              <span class="field-label">Replay Source</span>
+              <button type="button" class="bt-info-btn" data-tip="Choose whether Single Trade Replay builds a preset from a snapshot, uses custom legs, or replays a saved Paper Trade." aria-label="Info: Replay Source">i</button>
+            </div>
             <div id="backtest-source-group" class="backtest-seg-group" role="group" aria-label="Single Trade Source">
               <button type="button" class="backtest-seg-btn is-active" data-bt-source="AUTO_BUILD" aria-pressed="true">Auto Build</button>
               <button type="button" class="backtest-seg-btn" data-bt-source="LEGS" aria-pressed="false">Custom Legs</button>
               <button type="button" class="backtest-seg-btn" data-bt-source="PAPER_TRADE" aria-pressed="false">Paper Trade</button>
             </div>
           </div>
-          <label class="backtest-field backtest-field--wide" data-bt-entry-wrap>
-            <span class="field-label">Entry Snapshot</span>
+          <div class="backtest-field backtest-field--wide" data-bt-entry-wrap>
+            <div class="backtest-field-head">
+              <label class="field-label" for="backtest-entry-select">Entry Snapshot</label>
+              <button type="button" class="bt-info-btn" data-tip="Archived market snapshot used to enter the simulated single trade." aria-label="Info: Entry Snapshot">i</button>
+            </div>
             <select id="backtest-entry-select" class="select-control" aria-label="Backtest Entry Snapshot"></select>
-          </label>
-          <label class="backtest-field" data-bt-end-wrap>
-            <span class="field-label">Replay End Snapshot (Opt)</span>
+          </div>
+          <div class="backtest-field" data-bt-end-wrap>
+            <div class="backtest-field-head">
+              <label class="field-label" for="backtest-end-select">Replay End Snapshot (Opt)</label>
+              <button type="button" class="bt-info-btn" data-tip="Optional cutoff snapshot to stop single-trade mark-to-market replay early." aria-label="Info: Replay End Snapshot">i</button>
+            </div>
             <select id="backtest-end-select" class="select-control" aria-label="Backtest End Snapshot">
               <option value="">Latest Available</option>
             </select>
-          </label>
-          <label class="backtest-field backtest-field--wide" data-bt-paper-wrap hidden>
-            <span class="field-label">Saved Paper Trade</span>
+          </div>
+          <div class="backtest-field backtest-field--wide" data-bt-paper-wrap hidden>
+            <div class="backtest-field-head">
+              <label class="field-label" for="backtest-paper-select">Saved Paper Trade</label>
+              <button type="button" class="bt-info-btn" data-tip="Tracked manual or Trade Ledger option campaign to replay over archived daily bars." aria-label="Info: Saved Paper Trade">i</button>
+            </div>
             <select id="backtest-paper-select" class="select-control" aria-label="Select Saved Paper Trade"></select>
-          </label>
+          </div>
         </div>
 
-        <div class="backtest-config-grid">
-          <label class="backtest-field">
-            <span class="field-label">Strategy</span>
-            <select id="backtest-strategy-select" class="select-control" aria-label="Backtest Strategy">
-              <option value="BULL_PUT_SPREAD" selected>Bull Put Spread</option>
-              <option value="BULL_CALL_SPREAD">Bull Call Spread</option>
-              <option value="DIAGONAL_SPREAD">Diagonal Spread</option>
-              <option value="IRON_CONDOR">Iron Condor</option>
-              <option value="COVERED_CALL">Covered Call (Synthetic Stock)</option>
-              <option value="WHEEL">Wheel (CSP &rarr; Assigned CC)</option>
-              <option value="CUSTOM">Custom Legs</option>
-            </select>
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">DTE Min</span>
-            <input id="backtest-dte-min" class="input-control" type="number" min="0" max="120" step="1" value="30" inputmode="numeric" title="Target entry DTE lower bound (0–120; use 0–29 for short-DTE/weekly backtests)" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">DTE Max</span>
-            <input id="backtest-dte-max" class="input-control" type="number" min="0" max="120" step="1" value="60" inputmode="numeric" title="Target entry DTE upper bound (0–120; >= DTE Min, e.g. 29 for 0–29d)" />
-          </label>
-          <label class="backtest-field" data-bt-systematic>
-            <span class="field-label">Entry Cadence</span>
-            <select id="backtest-cadence-select" class="select-control" aria-label="Entry Cadence">
-              <option value="WEEKLY_DAY" selected>Weekly Day</option>
-              <option value="EVERY_N_DAYS">Every N Days</option>
-              <option value="WHEN_FLAT">When Flat</option>
-            </select>
-          </label>
-          <label class="backtest-field" data-bt-systematic data-bt-weekday>
-            <span class="field-label">Entry Weekday</span>
-            <select id="backtest-weekday-select" class="select-control" aria-label="Entry Weekday">
-              <option value="0">Monday</option>
-              <option value="1">Tuesday</option>
-              <option value="2">Wednesday</option>
-              <option value="3">Thursday</option>
-              <option value="4" selected>Friday</option>
-            </select>
-          </label>
-          <label class="backtest-field" data-bt-systematic data-bt-every-n hidden>
-            <span class="field-label">Every N Bars</span>
-            <input id="backtest-every-n-days" class="input-control" type="number" min="1" max="60" step="1" value="5" inputmode="numeric" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">Initial Capital ($)</span>
-            <input id="backtest-initial-capital" class="input-control" type="number" min="100" step="100" value="10000" inputmode="decimal" />
-          </label>
-          <label class="backtest-field" data-bt-systematic>
-            <span class="field-label">Max Open Trades</span>
-            <input id="backtest-max-open" class="input-control" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">Qty</span>
-            <input id="backtest-qty" class="input-control" type="number" min="1" max="100" step="1" value="1" inputmode="numeric" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">Comm ($/contract)</span>
-            <input id="backtest-commission" class="input-control" type="number" min="0" max="50" step="0.05" value="0.65" inputmode="decimal" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">Start Date</span>
-            <input id="backtest-start-date" class="input-control" type="date" aria-label="Backtest Start Date" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">End Date</span>
-            <input id="backtest-end-date" class="input-control" type="date" aria-label="Backtest End Date" />
-          </label>
+        <div class="bt-form-section">
+          <div class="bt-form-section-title">1. Strategy &amp; Window</div>
+          <div class="backtest-config-grid">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-strategy-select">Strategy</label>
+                <button type="button" class="bt-info-btn" data-tip="Option structure to simulate. Covered Call and Wheel model 100*Qty synthetic shares alongside short options." aria-label="Info: Strategy">i</button>
+              </div>
+              <select id="backtest-strategy-select" class="select-control" aria-label="Backtest Strategy">
+                <option value="BULL_PUT_SPREAD" selected>Bull Put Spread</option>
+                <option value="BULL_CALL_SPREAD">Bull Call Spread</option>
+                <option value="DIAGONAL_SPREAD">Diagonal Spread</option>
+                <option value="IRON_CONDOR">Iron Condor</option>
+                <option value="COVERED_CALL">Covered Call (Synthetic Stock)</option>
+                <option value="WHEEL">Wheel (CSP &rarr; Assigned CC)</option>
+                <option value="CUSTOM">Custom Legs</option>
+              </select>
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-dte-min">DTE Min</label>
+                <button type="button" class="bt-info-btn" data-tip="Minimum Days to Expiration allowed when selecting entry option contracts (0-120)." aria-label="Info: DTE Min">i</button>
+              </div>
+              <input id="backtest-dte-min" class="input-control" type="number" min="0" max="120" step="1" value="30" inputmode="numeric" title="Target entry DTE lower bound (0–120; use 0–29 for short-DTE/weekly backtests)" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-dte-max">DTE Max</label>
+                <button type="button" class="bt-info-btn" data-tip="Maximum Days to Expiration allowed at entry (0-120; must be at least DTE Min)." aria-label="Info: DTE Max">i</button>
+              </div>
+              <input id="backtest-dte-max" class="input-control" type="number" min="0" max="120" step="1" value="60" inputmode="numeric" title="Target entry DTE upper bound (0–120; >= DTE Min, e.g. 29 for 0–29d)" />
+            </div>
+            <div class="backtest-field" data-bt-systematic data-bt-systematic-only>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-cadence-select">Entry Cadence</label>
+                <button type="button" class="bt-info-btn" data-tip="Controls when new systematic positions open: When Flat opens only when under Max Open Trades; Every N Bars spaces entries by trading days." aria-label="Info: Entry Cadence">i</button>
+              </div>
+              <select id="backtest-cadence-select" class="select-control" aria-label="Entry Cadence" aria-describedby="backtest-cadence-legacy-hint">
+                <option value="WHEN_FLAT" selected>When Flat</option>
+                <option value="EVERY_N_DAYS">Every N Trading Days</option>
+                <option value="WEEKLY_DAY">Specific Weekday (Legacy)</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-bt-systematic data-bt-systematic-only data-bt-weekday hidden>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-weekday-select">Entry Weekday</label>
+                <button type="button" class="bt-info-btn" data-tip="Specific day of week to enter under Specific Weekday (Legacy) cadence." aria-label="Info: Entry Weekday">i</button>
+              </div>
+              <select id="backtest-weekday-select" class="select-control" aria-label="Entry Weekday">
+                <option value="0">Monday</option>
+                <option value="1">Tuesday</option>
+                <option value="2">Wednesday</option>
+                <option value="3">Thursday</option>
+                <option value="4" selected>Friday</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-bt-systematic data-bt-systematic-only data-bt-every-n hidden>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-every-n-days">Every N Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Trading-day interval between systematic entry attempts (1-60)." aria-label="Info: Every N Bars">i</button>
+              </div>
+              <input id="backtest-every-n-days" class="input-control" type="number" min="1" max="60" step="1" value="5" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-start-date">Start Date</label>
+                <button type="button" class="bt-info-btn" data-tip="Optional earliest market date (YYYY-MM-DD) to include from the local snapshot archive." aria-label="Info: Start Date">i</button>
+              </div>
+              <input id="backtest-start-date" class="input-control" type="date" aria-label="Backtest Start Date" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-end-date">End Date</label>
+                <button type="button" class="bt-info-btn" data-tip="Optional latest market date (YYYY-MM-DD) to include from the local snapshot archive." aria-label="Info: End Date">i</button>
+              </div>
+              <input id="backtest-end-date" class="input-control" type="date" aria-label="Backtest End Date" />
+            </div>
+          </div>
+          <div id="backtest-cadence-legacy-hint" class="backtest-cadence-hint" role="note" hidden>Weekly fixed day may reflect timing luck &mdash; see <strong>Robustness Suite &rarr; All-Days &amp; Weekday</strong>.</div>
         </div>
 
-        <div class="backtest-switches-row">
-          <div class="backtest-switch-group">
-            <span class="field-label">Price Basis</span>
-            <div id="backtest-price-basis-group" class="backtest-seg-group" role="group" aria-label="Option Price Basis">
-              <button type="button" class="backtest-seg-btn is-active" data-bt-price-basis="AUTO_MID_LAST_CLOSE" aria-pressed="true">Auto (Mid &rarr; Last &rarr; Close)</button>
-              <button type="button" class="backtest-seg-btn" data-bt-price-basis="LAST_CLOSE_ONLY" aria-pressed="false">Last / Close Only</button>
+        <div class="bt-form-section">
+          <div class="bt-form-section-title">2. Capital &amp; Sizing</div>
+          <div class="backtest-config-grid">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-initial-capital">Initial Capital ($)</label>
+                <button type="button" class="bt-info-btn" data-tip="Starting account equity used for Return %, Drawdown %, and Risk of Ruin calculations." aria-label="Info: Initial Capital">i</button>
+              </div>
+              <input id="backtest-initial-capital" class="input-control" type="number" min="100" step="100" value="10000" inputmode="decimal" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-qty">Qty</label>
+                <button type="button" class="bt-info-btn" data-tip="Number of option spreads or contracts per trade (and 100*Qty shares for Covered Call / Wheel)." aria-label="Info: Qty">i</button>
+              </div>
+              <input id="backtest-qty" class="input-control" type="number" min="1" max="100" step="1" value="1" inputmode="numeric" />
+            </div>
+            <div class="backtest-field" data-bt-systematic data-bt-systematic-only>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-max-open">Max Open Trades</label>
+                <button type="button" class="bt-info-btn" data-tip="Maximum concurrent open positions allowed in Systematic Study." aria-label="Info: Max Open Trades">i</button>
+              </div>
+              <input id="backtest-max-open" class="input-control" type="number" min="1" max="20" step="1" value="1" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-commission">Comm ($/contract)</label>
+                <button type="button" class="bt-info-btn" data-tip="Per-contract commission charged on both entry and exit option legs." aria-label="Info: Commission">i</button>
+              </div>
+              <input id="backtest-commission" class="input-control" type="number" min="0" max="50" step="0.05" value="0.65" inputmode="decimal" />
             </div>
           </div>
+          <div id="backtest-capital-adequacy" class="bt-cap-adequacy" role="status" hidden>
+            <span id="backtest-capital-adequacy-text"></span>
+            <button type="button" id="backtest-match-capital-btn" class="btn btn-xs">Size to 100&times;Qty Shares</button>
+          </div>
+        </div>
 
-          <div class="backtest-switch-group">
-            <span class="field-label">Close Fill</span>
-            <div id="backtest-close-mode-group" class="backtest-seg-group" role="group" aria-label="Close Fill Assumption">
-              <button type="button" class="backtest-seg-btn is-active" data-bt-close-mode="MID" aria-pressed="true">Mid</button>
-              <button type="button" class="backtest-seg-btn" data-bt-close-mode="NATURAL_SPREAD" aria-pressed="false">Natural Spread</button>
+        <div class="bt-form-section">
+          <div class="bt-form-section-title">3. Pricing, Exits &amp; Filters</div>
+          <div class="backtest-switches-row">
+            <div class="backtest-switch-group">
+              <div class="backtest-field-head">
+                <span class="field-label">Price Basis</span>
+                <button type="button" class="bt-info-btn" data-tip="Quote fallback hierarchy for option marks: Auto uses Bid/Ask Mid first, falling back to Last/Close when quotes are absent." aria-label="Info: Price Basis">i</button>
+              </div>
+              <div id="backtest-price-basis-group" class="backtest-seg-group" role="group" aria-label="Option Price Basis">
+                <button type="button" class="backtest-seg-btn is-active" data-bt-price-basis="AUTO_MID_LAST_CLOSE" aria-pressed="true">Auto (Mid &rarr; Last &rarr; Close)</button>
+                <button type="button" class="backtest-seg-btn" data-bt-price-basis="LAST_CLOSE_ONLY" aria-pressed="false">Last / Close Only</button>
+              </div>
             </div>
-          </div>
 
-          <div class="backtest-switch-group">
-            <span class="field-label">TP / SL Basis</span>
-            <div id="backtest-tpsl-basis-group" class="backtest-seg-group" role="group" aria-label="TP and SL Basis">
-              <button type="button" class="backtest-seg-btn is-active" data-bt-tpsl-basis="CREDIT_DEBIT_PCT" aria-pressed="true">% of Entry Credit / Debit</button>
-              <button type="button" class="backtest-seg-btn" data-bt-tpsl-basis="MAX_RISK_PCT" aria-pressed="false">% of Max Risk</button>
+            <div class="backtest-switch-group">
+              <div class="backtest-field-head">
+                <span class="field-label">Close Fill</span>
+                <button type="button" class="bt-info-btn" data-tip="Mid exits at Bid/Ask midpoint; Natural Spread crosses the full spread (Ask to buy back, Bid to sell) for realistic slippage." aria-label="Info: Close Fill">i</button>
+              </div>
+              <div id="backtest-close-mode-group" class="backtest-seg-group" role="group" aria-label="Close Fill Assumption">
+                <button type="button" class="backtest-seg-btn is-active" data-bt-close-mode="MID" aria-pressed="true">Mid</button>
+                <button type="button" class="backtest-seg-btn" data-bt-close-mode="NATURAL_SPREAD" aria-pressed="false">Natural Spread</button>
+              </div>
             </div>
-          </div>
 
-          <div class="backtest-tpsl-inputs">
-            <label class="backtest-field">
-              <span class="field-label">Profit Target %</span>
-              <input id="backtest-tp-pct" class="input-control" type="number" min="1" max="1000" step="5" value="50" placeholder="Off" inputmode="decimal" />
-            </label>
-            <label class="backtest-field">
-              <span class="field-label">Stop Loss %</span>
-              <input id="backtest-sl-pct" class="input-control" type="number" min="1" max="2000" step="5" value="100" placeholder="Off" inputmode="decimal" />
-            </label>
-            <label class="backtest-field">
-              <span class="field-label">Exit DTE</span>
-              <input id="backtest-exit-dte" class="input-control" type="number" min="0" max="120" step="1" value="" placeholder="Off" inputmode="numeric" />
-            </label>
-          </div>
+            <div class="backtest-switch-group">
+              <div class="backtest-field-head">
+                <span class="field-label">TP / SL Basis</span>
+                <button type="button" class="bt-info-btn" data-tip="Defines whether Profit Target % and Stop Loss % scale against entry credit/debit or defined max risk." aria-label="Info: TP / SL Basis">i</button>
+              </div>
+              <div id="backtest-tpsl-basis-group" class="backtest-seg-group" role="group" aria-label="TP and SL Basis">
+                <button type="button" class="backtest-seg-btn is-active" data-bt-tpsl-basis="CREDIT_DEBIT_PCT" aria-pressed="true">% of Entry Credit / Debit</button>
+                <button type="button" class="backtest-seg-btn" data-bt-tpsl-basis="MAX_RISK_PCT" aria-pressed="false">% of Max Risk</button>
+              </div>
+            </div>
 
-          <div class="backtest-switch-group" data-bt-systematic data-bt-entry-filters>
-            <span id="backtest-entry-filters-label" class="field-label">BPS Entry Filters</span>
             <div class="backtest-tpsl-inputs">
-              <label class="backtest-field">
-                <span class="field-label">Min Credit ($)</span>
-                <input id="backtest-min-credit" class="input-control" type="number" min="0" step="10" value="100" placeholder="Off" inputmode="decimal" title="Minimum net credit in dollars per 1-spread/contract baseline (0 or blank disables)" />
-              </label>
-              <label class="backtest-field" data-bt-min-ror-wrap>
-                <span class="field-label">Min RoR (%)</span>
-                <input id="backtest-min-ror" class="input-control" type="number" min="0" max="1000" step="1" value="" placeholder="Off" inputmode="decimal" title="Minimum Return on Risk % (credit / max loss * 100; 0 or blank disables)" />
-              </label>
+              <div class="backtest-field">
+                <div class="backtest-field-head">
+                  <label class="field-label" for="backtest-tp-pct">Profit Target %</label>
+                  <button type="button" class="bt-info-btn" data-tip="Close trade early when unrealized gain reaches this % of the selected TP/SL Basis (blank = Off)." aria-label="Info: Profit Target %">i</button>
+                </div>
+                <input id="backtest-tp-pct" class="input-control" type="number" min="1" max="1000" step="5" value="50" placeholder="Off" inputmode="decimal" />
+              </div>
+              <div class="backtest-field">
+                <div class="backtest-field-head">
+                  <label class="field-label" for="backtest-sl-pct">Stop Loss %</label>
+                  <button type="button" class="bt-info-btn" data-tip="Close trade when loss reaches this % of the selected TP/SL Basis (e.g. 100% = 1x credit loss; blank = Off)." aria-label="Info: Stop Loss %">i</button>
+                </div>
+                <input id="backtest-sl-pct" class="input-control" type="number" min="1" max="2000" step="5" value="100" placeholder="Off" inputmode="decimal" />
+              </div>
+              <div class="backtest-field">
+                <div class="backtest-field-head">
+                  <label class="field-label" for="backtest-exit-dte">Exit DTE</label>
+                  <button type="button" class="bt-info-btn" data-tip="Force-close open option positions when remaining DTE drops to or below this threshold (blank = hold to expiry)." aria-label="Info: Exit DTE">i</button>
+                </div>
+                <input id="backtest-exit-dte" class="input-control" type="number" min="0" max="120" step="1" value="" placeholder="Off" inputmode="numeric" />
+              </div>
+            </div>
+
+            <div class="backtest-switch-group" data-bt-systematic data-bt-entry-filters>
+              <div class="backtest-field-head">
+                <span id="backtest-entry-filters-label" class="field-label">BPS Entry Filters</span>
+                <button type="button" class="bt-info-btn" data-tip="Minimum premium and Return on Risk thresholds required before entering a credit trade." aria-label="Info: Entry Filters">i</button>
+              </div>
+              <div class="backtest-tpsl-inputs">
+                <div class="backtest-field">
+                  <div class="backtest-field-head">
+                    <label class="field-label" for="backtest-min-credit">Min Credit ($)</label>
+                    <button type="button" class="bt-info-btn" data-tip="Minimum net credit in dollars per 1-spread/contract baseline (0 or blank disables)." aria-label="Info: Min Credit">i</button>
+                  </div>
+                  <input id="backtest-min-credit" class="input-control" type="number" min="0" step="10" value="100" placeholder="Off" inputmode="decimal" title="Minimum net credit in dollars per 1-spread/contract baseline (0 or blank disables)" />
+                </div>
+                <div class="backtest-field" data-bt-min-ror-wrap>
+                  <div class="backtest-field-head">
+                    <label class="field-label" for="backtest-min-ror">Min RoR (%)</label>
+                    <button type="button" class="bt-info-btn" data-tip="Minimum Return on Risk % (credit / max loss * 100) for Bull Put Spread entries (0 or blank disables)." aria-label="Info: Min RoR">i</button>
+                  </div>
+                  <input id="backtest-min-ror" class="input-control" type="number" min="0" max="1000" step="1" value="" placeholder="Off" inputmode="decimal" title="Minimum Return on Risk % (credit / max loss * 100; 0 or blank disables)" />
+                </div>
+              </div>
             </div>
           </div>
         </div>
 
-        <div id="backtest-wheel-controls" class="backtest-wheel-controls" hidden>
-          <label class="backtest-field">
-            <span class="field-label">Strike Selection</span>
-            <select id="backtest-strike-mode-select" class="select-control" aria-label="Covered Call and Wheel Strike Selection">
-              <option value="TARGET_DELTA" selected>Target Delta (&Delta;)</option>
-              <option value="WALL_ANCHORED">Primary Call / Put Wall</option>
-            </select>
-          </label>
-          <label class="backtest-field" data-bt-target-delta-wrap>
-            <span class="field-label">Target &Delta;</span>
-            <input id="backtest-target-delta" class="input-control" type="number" min="0.05" max="0.50" step="0.05" value="0.30" inputmode="decimal" title="Target absolute delta (0.05-0.50) for short Calls and short Puts" />
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">CC Strike Floor</span>
-            <select id="backtest-cc-floor-select" class="select-control" aria-label="Covered Call Strike Floor">
-              <option value="COST_BASIS" selected>&ge; Cost Basis</option>
-              <option value="NET_BREAKEVEN">&ge; Net Breakeven</option>
-              <option value="NONE">No Floor</option>
-            </select>
-          </label>
-          <label class="backtest-field">
-            <span class="field-label">Stop-Loss Scope</span>
-            <select id="backtest-stock-stop-select" class="select-control" aria-label="Stock Stop-Loss Scope">
-              <option value="OPTION_ONLY" selected>Option Only (Keep Shares)</option>
-              <option value="LIQUIDATE_STOCK_ON_SL">Liquidate Option + Shares</option>
-            </select>
-          </label>
-          <label class="backtest-field" data-bt-cc-itm-wrap>
-            <span class="field-label">ITM Call Expiry</span>
-            <select id="backtest-cc-itm-select" class="select-control" aria-label="Covered Call ITM Expiry Behavior">
-              <option value="CALL_AWAY_AND_REBUY" selected>Call Away &amp; Re-Buy</option>
-              <option value="KEEP_SHARES_CASH_SETTLE">Keep Shares (Cash-Settle)</option>
-            </select>
-          </label>
-          <div class="backtest-switch-group backtest-wheel-roll-group">
-            <label class="backtest-roll-check">
-              <input id="backtest-roll-toggle" type="checkbox" />
-              <span class="field-label">Defensive Roll ITM</span>
-            </label>
-            <select id="backtest-roll-credit-select" class="select-control" aria-label="Defensive Roll Net Credit Rule" disabled>
-              <option value="CREDIT_ONLY" selected>Net Credit &gt; $0</option>
-              <option value="ZERO_OR_CREDIT">Even or Credit (&ge; $0)</option>
-            </select>
+        <div id="backtest-wheel-controls" class="bt-form-section backtest-wheel-section" hidden>
+          <div class="bt-form-section-title">4. Covered Call &amp; Wheel Mechanics</div>
+          <div class="backtest-wheel-controls">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-strike-mode-select">Strike Selection</label>
+                <button type="button" class="bt-info-btn" data-tip="Target Delta picks the strike closest to Target Delta; Primary Call / Put Wall anchors strikes to OI walls." aria-label="Info: Strike Selection">i</button>
+              </div>
+              <select id="backtest-strike-mode-select" class="select-control" aria-label="Covered Call and Wheel Strike Selection">
+                <option value="TARGET_DELTA" selected>Target Delta (&Delta;)</option>
+                <option value="WALL_ANCHORED">Primary Call / Put Wall</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-bt-target-delta-wrap>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-target-delta">Target &Delta;</label>
+                <button type="button" class="bt-info-btn" data-tip="Target absolute delta (0.05-0.50) for short Calls and short Puts (0.30 ~ 30-delta)." aria-label="Info: Target Delta">i</button>
+              </div>
+              <input id="backtest-target-delta" class="input-control" type="number" min="0.05" max="0.50" step="0.05" value="0.30" inputmode="decimal" title="Target absolute delta (0.05-0.50) for short Calls and short Puts" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-cc-floor-select">CC Strike Floor</label>
+                <button type="button" class="bt-info-btn" data-tip="Prevents writing Covered Calls below your share Cost Basis or Net Breakeven (Cost Basis minus collected premiums)." aria-label="Info: CC Strike Floor">i</button>
+              </div>
+              <select id="backtest-cc-floor-select" class="select-control" aria-label="Covered Call Strike Floor">
+                <option value="COST_BASIS" selected>&ge; Cost Basis</option>
+                <option value="NET_BREAKEVEN">&ge; Net Breakeven</option>
+                <option value="NONE">No Floor</option>
+              </select>
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-stock-stop-select">Stop-Loss Scope</label>
+                <button type="button" class="bt-info-btn" data-tip="Option Only closes the short option on SL while holding shares; Liquidate Option + Shares exits the entire position." aria-label="Info: Stop-Loss Scope">i</button>
+              </div>
+              <select id="backtest-stock-stop-select" class="select-control" aria-label="Stock Stop-Loss Scope">
+                <option value="OPTION_ONLY" selected>Option Only (Keep Shares)</option>
+                <option value="LIQUIDATE_STOCK_ON_SL">Liquidate Option + Shares</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-bt-cc-itm-wrap>
+              <div class="backtest-field-head">
+                <label class="field-label" for="backtest-cc-itm-select">ITM Call Expiry</label>
+                <button type="button" class="bt-info-btn" data-tip="Choose whether an ITM short call at expiration calls shares away and re-buys at spot, or cash-settles to keep shares." aria-label="Info: ITM Call Expiry">i</button>
+              </div>
+              <select id="backtest-cc-itm-select" class="select-control" aria-label="Covered Call ITM Expiry Behavior">
+                <option value="CALL_AWAY_AND_REBUY" selected>Call Away &amp; Re-Buy</option>
+                <option value="KEEP_SHARES_CASH_SETTLE">Keep Shares (Cash-Settle)</option>
+              </select>
+            </div>
+            <div class="backtest-switch-group backtest-wheel-roll-group">
+              <div class="backtest-field-head">
+                <label class="backtest-roll-check" for="backtest-roll-toggle">
+                  <input id="backtest-roll-toggle" type="checkbox" />
+                  <span class="field-label">Defensive Roll ITM</span>
+                </label>
+                <button type="button" class="bt-info-btn" data-tip="When enabled, attempts to roll an ITM short option forward before expiry if the net roll credit rule is satisfied." aria-label="Info: Defensive Roll ITM">i</button>
+              </div>
+              <select id="backtest-roll-credit-select" class="select-control" aria-label="Defensive Roll Net Credit Rule" disabled>
+                <option value="CREDIT_ONLY" selected>Net Credit &gt; $0</option>
+                <option value="ZERO_OR_CREDIT">Even or Credit (&ge; $0)</option>
+              </select>
+            </div>
           </div>
         </div>
 
@@ -1382,6 +1496,375 @@
       </section>
 
       <div id="backtest-warnings" class="backtest-warnings" role="status" aria-live="polite"></div>
+
+      <section id="backtest-robustness-panel" class="bt-rob-panel" aria-label="Backtest Robustness Suite" hidden>
+        <div class="bt-rob-header-strip">
+          <div class="bt-rob-header-meta">
+            <span id="bt-rob-depth-badge" class="badge badge--muted">READY</span>
+            <span id="bt-rob-timing" class="bt-rob-timing">Zero-IBKR cached daily-bar audit</span>
+          </div>
+          <div class="bt-rob-header-actions">
+            <button type="button" id="bt-rob-run-all-btn" class="btn btn-primary">Run Full Audit</button>
+          </div>
+        </div>
+
+        <div class="bt-rob-flow-guide"><strong>Workflow:</strong> 1. Check All-Days Entry Invariance &rarr; 2. Inspect 2D Plateau (avoid isolated peaks) &rarr; 3. Verify Out-of-Sample Walk-Forward &rarr; 4. Stress-Test P95 MaxDD &amp; Slippage</div>
+
+        <div id="bt-rob-verdicts" class="bt-rob-verdicts" aria-label="4-Signal Robustness Verdicts">
+          <button type="button" class="bt-rob-verdict-card" data-rob-verdict="COHORTS">
+            <span class="bt-rob-verdict-head">
+              <span class="bt-rob-verdict-name">All-Days &amp; Weekday</span>
+              <span class="bt-rob-verdict-pill bt-rob-verdict--skipped">PENDING</span>
+            </span>
+            <span class="bt-rob-verdict-headline">Run audit to evaluate</span>
+            <span class="bt-rob-verdict-detail">Entry-day invariance &amp; Mon&ndash;Fri cohorts.</span>
+          </button>
+          <button type="button" class="bt-rob-verdict-card" data-rob-verdict="SENSITIVITY">
+            <span class="bt-rob-verdict-head">
+              <span class="bt-rob-verdict-name">Sensitivity Surface</span>
+              <span class="bt-rob-verdict-pill bt-rob-verdict--skipped">PENDING</span>
+            </span>
+            <span class="bt-rob-verdict-headline">Run audit to evaluate</span>
+            <span class="bt-rob-verdict-detail">2D plateau stability &amp; Deflated Sharpe Ratio.</span>
+          </button>
+          <button type="button" class="bt-rob-verdict-card" data-rob-verdict="WALK_FORWARD">
+            <span class="bt-rob-verdict-head">
+              <span class="bt-rob-verdict-name">Walk-Forward</span>
+              <span class="bt-rob-verdict-pill bt-rob-verdict--skipped">PENDING</span>
+            </span>
+            <span class="bt-rob-verdict-headline">Run audit to evaluate</span>
+            <span class="bt-rob-verdict-detail">Out-of-sample WFE &amp; parameter drift.</span>
+          </button>
+          <button type="button" class="bt-rob-verdict-card" data-rob-verdict="MONTE_CARLO">
+            <span class="bt-rob-verdict-head">
+              <span class="bt-rob-verdict-name">Monte Carlo &amp; Slippage</span>
+              <span class="bt-rob-verdict-pill bt-rob-verdict--skipped">PENDING</span>
+            </span>
+            <span class="bt-rob-verdict-headline">Run audit to evaluate</span>
+            <span class="bt-rob-verdict-detail">Block bootstrap ruin risk &amp; Mid&rarr;Natural stress.</span>
+          </button>
+        </div>
+
+        <div id="bt-rob-tabs" class="backtest-seg-group bt-rob-tabs" role="tablist" aria-label="Robustness Analysis Sections">
+          <button type="button" id="bt-rob-tab-cohorts" class="backtest-seg-btn is-active" role="tab" data-rob-tab="COHORTS" aria-selected="true" aria-controls="bt-rob-pane-cohorts">1. All-Days &amp; Weekday</button>
+          <button type="button" id="bt-rob-tab-sensitivity" class="backtest-seg-btn" role="tab" data-rob-tab="SENSITIVITY" aria-selected="false" aria-controls="bt-rob-pane-sensitivity">2. Sensitivity Heatmap</button>
+          <button type="button" id="bt-rob-tab-walkforward" class="backtest-seg-btn" role="tab" data-rob-tab="WALK_FORWARD" aria-selected="false" aria-controls="bt-rob-pane-walkforward">3. Walk-Forward</button>
+          <button type="button" id="bt-rob-tab-montecarlo" class="backtest-seg-btn" role="tab" data-rob-tab="MONTE_CARLO" aria-selected="false" aria-controls="bt-rob-pane-montecarlo">4. Monte Carlo &amp; Slippage</button>
+        </div>
+
+        <div id="bt-rob-pane-cohorts" class="bt-rob-pane" role="tabpanel" aria-labelledby="bt-rob-tab-cohorts">
+          <div class="bt-rob-pane-controls">
+            <div class="backtest-field" data-rob-rolling-wrap>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-rolling-horizon">Rolling Horizon (Bars)</label>
+                <button type="button" class="bt-info-btn" data-tip="Rolling start-date window length in trading bars (20-252) used for stateful Covered Call and Wheel cohorts." aria-label="Info: Rolling Horizon">i</button>
+              </div>
+              <input id="bt-rob-rolling-horizon" class="input-control" type="number" min="20" max="252" step="5" value="" placeholder="Auto" inputmode="numeric" title="Rolling start-date horizon in bars (20-252; used for Covered Call / Wheel)" />
+            </div>
+            <button type="button" id="bt-rob-rerun-cohorts-btn" class="btn btn-sm">Re-run Cohorts</button>
+          </div>
+          <div id="bt-rob-cohorts-kpis" class="backtest-kpis" aria-label="Cohort Robustness KPIs"></div>
+          <div class="bt-rob-chart-head">
+            <span id="bt-rob-cohorts-chart-title" class="bt-rob-chart-title">All-Days Entry-Date Invariant Equity &amp; Drawdown</span>
+            <button type="button" class="bt-info-btn" data-tip="Simulates entering on every trading day (or rolling horizons for CC/Wheel) to verify results do not depend on a single lucky weekday." aria-label="Info: Cohort Chart">i</button>
+          </div>
+          <div id="bt-rob-cohorts-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="All-Days Cohort Equity Chart">
+            <div class="strategy-empty-state">Click <strong>Run Full Audit</strong> or <strong>Re-run Cohorts</strong> to evaluate daily cohort equity &amp; weekday invariance.</div>
+          </div>
+          <div class="bt-rob-table-wrap">
+            <table id="bt-rob-cohorts-table" class="backtest-table">
+              <thead>
+                <tr>
+                  <th class="text-left">Cohort / Weekday</th>
+                  <th>Entries</th>
+                  <th>Closed</th>
+                  <th>Win Rate</th>
+                  <th>Expectancy</th>
+                  <th>Avg RoR</th>
+                  <th>Profit Factor</th>
+                  <th>Total Net P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td colspan="8" class="text-left">Run audit to inspect Mon&ndash;Fri weekday stability and rolling start cohorts.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="bt-rob-pane-sensitivity" class="bt-rob-pane" role="tabpanel" aria-labelledby="bt-rob-tab-sensitivity" hidden>
+          <div class="bt-rob-pane-controls">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-sens-x">X Axis Parameter</label>
+                <button type="button" class="bt-info-btn" data-tip="First parameter varied across heatmap columns. Inapplicable parameters for the current strategy are marked (N/A)." aria-label="Info: X Axis Parameter">i</button>
+              </div>
+              <select id="bt-rob-sens-x" class="select-control" aria-label="Sensitivity X Axis">
+                <option value="profit_target_pct" selected>Profit Target %</option>
+                <option value="stop_loss_pct">Stop Loss %</option>
+                <option value="exit_dte">Exit DTE</option>
+                <option value="dte_bucket">DTE Window</option>
+                <option value="target_delta">Target Delta</option>
+                <option value="min_entry_credit_dollars">Min Credit ($)</option>
+                <option value="min_entry_ror_pct">Min RoR (%)</option>
+              </select>
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-sens-y">Y Axis Parameter</label>
+                <button type="button" class="bt-info-btn" data-tip="Second parameter varied across heatmap rows; automatically kept distinct from X Axis." aria-label="Info: Y Axis Parameter">i</button>
+              </div>
+              <select id="bt-rob-sens-y" class="select-control" aria-label="Sensitivity Y Axis">
+                <option value="profit_target_pct">Profit Target %</option>
+                <option value="stop_loss_pct" selected>Stop Loss %</option>
+                <option value="exit_dte">Exit DTE</option>
+                <option value="dte_bucket">DTE Window</option>
+                <option value="target_delta">Target Delta</option>
+                <option value="min_entry_credit_dollars">Min Credit ($)</option>
+                <option value="min_entry_ror_pct">Min RoR (%)</option>
+              </select>
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-sens-obj">Objective</label>
+                <button type="button" class="bt-info-btn" data-tip="Metric colored in heatmap cells and used to rank the optimal plateau cell." aria-label="Info: Sensitivity Objective">i</button>
+              </div>
+              <select id="bt-rob-sens-obj" class="select-control" aria-label="Sensitivity Objective">
+                <option value="expectancy_dollars" selected>Expectancy ($/trade)</option>
+                <option value="return_on_risk_pct">Return on Risk (%)</option>
+                <option value="total_return_pct">Total Return (%)</option>
+                <option value="profit_factor">Profit Factor</option>
+                <option value="sharpe">Sharpe Ratio</option>
+                <option value="calmar">Calmar Ratio</option>
+                <option value="win_rate_pct">Win Rate (%)</option>
+              </select>
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-sens-density">Grid Density</label>
+                <button type="button" class="bt-info-btn" data-tip="Grid resolution (5x5 = 25 trials or 7x7 = 49 trials). Higher density increases DSR multiple-testing haircut." aria-label="Info: Grid Density">i</button>
+              </div>
+              <select id="bt-rob-sens-density" class="select-control" aria-label="Sensitivity Grid Density">
+                <option value="5" selected>5&times;5 (25 trials)</option>
+                <option value="7">7&times;7 (49 trials)</option>
+              </select>
+            </div>
+            <button type="button" id="bt-rob-rerun-sens-btn" class="btn btn-sm">Re-run Surface</button>
+          </div>
+          <div id="bt-rob-sens-kpis" class="backtest-kpis" aria-label="Sensitivity KPIs"></div>
+          <div class="bt-rob-chart-head">
+            <span id="bt-rob-sens-chart-title" class="bt-rob-chart-title">2D Sensitivity Heatmap</span>
+            <button type="button" class="bt-info-btn" data-tip="2D parameter plateau surface. Click any cell to inspect metrics and apply its parameters to Systematic Study." aria-label="Info: Sensitivity Heatmap">i</button>
+          </div>
+          <div id="bt-rob-sens-chart" class="chart-canvas chart-canvas--backtest chart-canvas--heatmap is-idle" aria-label="2D Sensitivity Heatmap">
+            <div class="strategy-empty-state">Click <strong>Run Full Audit</strong> or <strong>Re-run Surface</strong> to render the 2D parameter plateau heatmap.</div>
+          </div>
+          <div id="bt-rob-sens-inspector" class="bt-rob-sens-inspector">
+            <span id="bt-rob-sens-cell-info" class="bt-rob-sens-cell-info">Click any heatmap cell to inspect metrics and apply parameters to Systematic Study.</span>
+            <button type="button" id="bt-rob-apply-cell-btn" class="btn btn-sm" disabled>Apply Cell to Systematic</button>
+          </div>
+        </div>
+
+        <div id="bt-rob-pane-walkforward" class="bt-rob-pane" role="tabpanel" aria-labelledby="bt-rob-tab-walkforward" hidden>
+          <div class="bt-rob-pane-controls">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-mode">WFO Mode</label>
+                <button type="button" class="bt-info-btn" data-tip="Purged Walk-Forward optimizes parameters on IS bars then tests on unseen OOS bars; Fixed Windows splits baseline returns across fixed chunks." aria-label="Info: WFO Mode">i</button>
+              </div>
+              <select id="bt-rob-wfo-mode" class="select-control" aria-label="Walk-Forward Mode">
+                <option value="PURGED_WFO" selected>Purged Walk-Forward</option>
+                <option value="FIXED_WINDOWS">Fixed Windows</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-rob-wfo-purged>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-window-type">Window Type</label>
+                <button type="button" class="bt-info-btn" data-tip="Rolling IS uses a fixed-length lookback; Anchored IS expands from the start of the archive." aria-label="Info: Window Type">i</button>
+              </div>
+              <select id="bt-rob-wfo-window-type" class="select-control" aria-label="Walk-Forward Window Type">
+                <option value="ROLLING" selected>Rolling IS</option>
+                <option value="ANCHORED">Anchored IS</option>
+              </select>
+            </div>
+            <div class="backtest-field" data-rob-wfo-purged>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-is-bars">IS Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Number of In-Sample trading bars used to optimize parameters per fold (40-360)." aria-label="Info: IS Bars">i</button>
+              </div>
+              <input id="bt-rob-wfo-is-bars" class="input-control" type="number" min="40" max="360" step="5" value="120" inputmode="numeric" />
+            </div>
+            <div class="backtest-field" data-rob-wfo-purged>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-oos-bars">OOS Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Number of Out-of-Sample trading bars evaluated per fold (15-120)." aria-label="Info: OOS Bars">i</button>
+              </div>
+              <input id="bt-rob-wfo-oos-bars" class="input-control" type="number" min="15" max="120" step="5" value="40" inputmode="numeric" />
+            </div>
+            <div class="backtest-field" data-rob-wfo-purged>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-embargo">Embargo Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Purge/embargo gap bars between IS and OOS windows to prevent overlapping-trade leakage (0-30)." aria-label="Info: Embargo Bars">i</button>
+              </div>
+              <input id="bt-rob-wfo-embargo" class="input-control" type="number" min="0" max="30" step="1" value="0" inputmode="numeric" />
+            </div>
+            <div class="backtest-field" data-rob-wfo-fixed hidden>
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-fixed-bars">Fixed Window Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Bar length of each sequential Fixed Window evaluation block (20-120)." aria-label="Info: Fixed Window Bars">i</button>
+              </div>
+              <input id="bt-rob-wfo-fixed-bars" class="input-control" type="number" min="20" max="120" step="5" value="40" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-wfo-obj">Objective</label>
+                <button type="button" class="bt-info-btn" data-tip="Objective maximized during each fold's In-Sample parameter selection." aria-label="Info: Walk-Forward Objective">i</button>
+              </div>
+              <select id="bt-rob-wfo-obj" class="select-control" aria-label="Walk-Forward Objective">
+                <option value="expectancy_dollars" selected>Expectancy ($/trade)</option>
+                <option value="return_on_risk_pct">Return on Risk (%)</option>
+                <option value="total_return_pct">Total Return (%)</option>
+                <option value="profit_factor">Profit Factor</option>
+                <option value="sharpe">Sharpe Ratio</option>
+                <option value="calmar">Calmar Ratio</option>
+                <option value="win_rate_pct">Win Rate (%)</option>
+              </select>
+            </div>
+            <button type="button" id="bt-rob-rerun-wfo-btn" class="btn btn-sm">Re-run WFO</button>
+          </div>
+          <div id="bt-rob-wfo-kpis" class="backtest-kpis" aria-label="Walk-Forward KPIs"></div>
+          <div id="bt-rob-wfo-warn" class="bt-rob-warn-slot" hidden></div>
+          <div class="bt-rob-chart-head">
+            <span id="bt-rob-wfo-chart-title" class="bt-rob-chart-title">Stitched Out-of-Sample vs Baseline Equity</span>
+            <button type="button" class="bt-info-btn" data-tip="Compares stitched Out-of-Sample fold equity against fixed baseline parameters across regime folds." aria-label="Info: Walk-Forward Chart">i</button>
+          </div>
+          <div id="bt-rob-wfo-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Walk-Forward Stitched OOS Equity Chart">
+            <div class="strategy-empty-state">Click <strong>Run Full Audit</strong> or <strong>Re-run WFO</strong> to plot stitched out-of-sample vs baseline equity.</div>
+          </div>
+          <div class="bt-rob-table-wrap">
+            <table id="bt-rob-wfo-table" class="backtest-table">
+              <thead>
+                <tr>
+                  <th>Fold</th>
+                  <th class="text-left">IS Window</th>
+                  <th class="text-left">OOS Window</th>
+                  <th class="text-left">Regime</th>
+                  <th class="text-left">Selected Params</th>
+                  <th>IS Ret %</th>
+                  <th>OOS Ret %</th>
+                  <th>Base OOS %</th>
+                  <th>OOS MaxDD %</th>
+                  <th>OOS Trades</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td colspan="10" class="text-left">Run audit to inspect walk-forward folds and parameter drift.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div id="bt-rob-pane-montecarlo" class="bt-rob-pane" role="tabpanel" aria-labelledby="bt-rob-tab-montecarlo" hidden>
+          <div class="bt-rob-pane-controls">
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-mc-paths">MC Paths</label>
+                <button type="button" class="bt-info-btn" data-tip="Number of synthetic equity paths generated via stationary block bootstrap (200-5000)." aria-label="Info: MC Paths">i</button>
+              </div>
+              <input id="bt-rob-mc-paths" class="input-control" type="number" min="200" max="5000" step="100" value="2000" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-mc-block">Block Size</label>
+                <button type="button" class="bt-info-btn" data-tip="Expected block length in trading bars (1-20) to preserve volatility clustering and return autocorrelation." aria-label="Info: Block Size">i</button>
+              </div>
+              <input id="bt-rob-mc-block" class="input-control" type="number" min="1" max="20" step="1" value="5" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-mc-horizon">Horizon Bars</label>
+                <button type="button" class="bt-info-btn" data-tip="Forward simulation length in bars (blank = match historical archive length)." aria-label="Info: Horizon Bars">i</button>
+              </div>
+              <input id="bt-rob-mc-horizon" class="input-control" type="number" min="20" max="504" step="5" value="" placeholder="Auto" inputmode="numeric" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-mc-ruin">Ruin MaxDD %</label>
+                <button type="button" class="bt-info-btn" data-tip="Drawdown percentage threshold (1-95%) defining Risk of Ruin across simulated paths." aria-label="Info: Ruin MaxDD %">i</button>
+              </div>
+              <input id="bt-rob-mc-ruin" class="input-control" type="number" min="1" max="95" step="1" value="25" inputmode="decimal" />
+            </div>
+            <div class="backtest-field">
+              <div class="backtest-field-head">
+                <label class="field-label" for="bt-rob-mc-seed">Seed</label>
+                <button type="button" class="bt-info-btn" data-tip="Deterministic RNG seed for reproducible Monte Carlo percentiles and drawdown bins." aria-label="Info: Seed">i</button>
+              </div>
+              <input id="bt-rob-mc-seed" class="input-control" type="number" min="0" max="2147483647" step="1" value="42" inputmode="numeric" />
+            </div>
+            <div class="backtest-field-head">
+              <label class="bt-rob-check" for="bt-rob-mc-slippage">
+                <input id="bt-rob-mc-slippage" type="checkbox" checked />
+                <span class="field-label">Slippage Stress</span>
+              </label>
+              <button type="button" class="bt-info-btn" data-tip="Re-prices closed option trades across 0% (Mid) to 100% (Natural Spread) execution slippage." aria-label="Info: Slippage Stress">i</button>
+            </div>
+            <div class="backtest-field-head">
+              <label class="bt-rob-check" for="bt-rob-mc-trade-boot">
+                <input id="bt-rob-mc-trade-boot" type="checkbox" checked />
+                <span class="field-label">Trade Bootstrap</span>
+              </label>
+              <button type="button" class="bt-info-btn" data-tip="Computes 95% bootstrap confidence interval on per-trade net expectancy." aria-label="Info: Trade Bootstrap">i</button>
+            </div>
+            <button type="button" id="bt-rob-rerun-mc-btn" class="btn btn-sm">Re-run MC</button>
+          </div>
+          <div id="bt-rob-mc-kpis" class="backtest-kpis" aria-label="Monte Carlo KPIs"></div>
+          <div class="bt-rob-mc-charts">
+            <div class="bt-rob-chart-col">
+              <div class="bt-rob-chart-head">
+                <span id="bt-rob-mc-fan-chart-title" class="bt-rob-chart-title">Stationary Block Bootstrap Fan (P5 / P25 / P50 / P75 / P95)</span>
+                <button type="button" class="bt-info-btn" data-tip="Resamples historical daily bar blocks with replacement to project forward equity quantile bands (P5 to P95)." aria-label="Info: Monte Carlo Fan Chart">i</button>
+              </div>
+              <div id="bt-rob-mc-fan-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Monte Carlo Percentile Fan Chart">
+                <div class="strategy-empty-state">Click <strong>Run Full Audit</strong> or <strong>Re-run MC</strong> to plot P5/P25/P50/P75/P95 equity fan.</div>
+              </div>
+            </div>
+            <div class="bt-rob-chart-col">
+              <div class="bt-rob-chart-head">
+                <span id="bt-rob-mc-dd-chart-title" class="bt-rob-chart-title">Simulated Max Drawdown Distribution</span>
+                <button type="button" class="bt-info-btn" data-tip="Distribution of peak-to-trough max drawdowns across simulated paths. Red bars exceed your Ruin MaxDD % threshold." aria-label="Info: Monte Carlo Drawdown Histogram">i</button>
+              </div>
+              <div id="bt-rob-mc-dd-chart" class="chart-canvas chart-canvas--backtest is-idle" aria-label="Monte Carlo Max Drawdown Histogram">
+                <div class="strategy-empty-state">Simulated max drawdown distribution will appear here.</div>
+              </div>
+            </div>
+          </div>
+          <div class="bt-rob-table-wrap">
+            <table id="bt-rob-mc-slippage-table" class="backtest-table">
+              <thead>
+                <tr>
+                  <th class="text-left">Slippage Scenario</th>
+                  <th>Natural Fraction</th>
+                  <th>Closed Trades</th>
+                  <th>Win Rate</th>
+                  <th>Expectancy</th>
+                  <th>Profit Factor</th>
+                  <th>Total Return %</th>
+                  <th>Total Net P&amp;L</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td colspan="8" class="text-left">Run audit to evaluate Mid &harr; Natural spread fill stress.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
 
       <div id="backtest-kpis" class="backtest-kpis" aria-label="Backtest Summary KPIs"></div>
 
@@ -1747,5 +2230,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script type="module" src="/static/js/dashboard/main.js?v=20261120g"></script>
+<script type="module" src="/static/js/dashboard/main.js?v=20261124a"></script>
 {% endblock %}
