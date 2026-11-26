@@ -335,6 +335,7 @@ export function renderBacktestKpis(sim) {
       value: fmtPlainMoney(s.final_equity),
       sub: "Return " + fmtPct(s.total_return_pct, true) + " (Start " + fmtPlainMoney(s.initial_capital) + ")",
       cls: pnlClass(s.net_pnl_dollars),
+      tip: "Ending account equity = Initial Capital + Realized + Open MTM P&L after commissions.",
     },
     {
       label: "Net P&L",
@@ -351,6 +352,7 @@ export function renderBacktestKpis(sim) {
       value: realizedOpenValue,
       sub: closedCount + " closed \u2022 " + openCount + " open",
       cls: realizedOpenCls,
+      tip: "Net P&L split between closed trades and still-open mark-to-market positions.",
     },
     {
       label: "Trades / Win Rate",
@@ -371,12 +373,14 @@ export function renderBacktestKpis(sim) {
       value: pfStr,
       sub: "Expectancy " + expStr,
       cls: "",
+      tip: "Gross winning dollars divided by gross losing dollars across closed trades. Above 1.50 indicates solid payoff asymmetry; Expectancy is average net P&L per closed trade.",
     },
     {
       label: "Max Drawdown",
       value: "-$" + Math.abs(Number(s.max_drawdown_dollars || 0)).toFixed(2),
       sub: fmtPct(-Math.abs(Number(s.max_drawdown_pct || 0)), false),
       cls: Number(s.max_drawdown_dollars || 0) > 0 ? "is-neg" : "",
+      tip: "Worst peak-to-trough equity decline observed on daily closing marks over the test window.",
     },
     {
       label: "Skipped Entries",
@@ -384,24 +388,36 @@ export function renderBacktestKpis(sim) {
       sub: skippedCount > 0 ? skippedInfo.sub : "No entries skipped",
       title: skippedInfo.title,
       cls: skippedCount > 0 ? "is-warn" : "",
+      tip: "Entry signals bypassed due to Min Credit, Min RoR, missing chain quotes, or cost-basis floor rules.",
     },
     {
       label: "Bar Quality",
       value: s.ok_bars + " OK / " + s.flagged_bars + " flagged",
       sub: sim.config.price_basis + " \u2022 " + sim.config.close_price_mode,
       cls: "",
+      tip: "Counts daily bars with clean bid/ask marks vs. bars with missing quotes or stale snapshots.",
     },
   ];
   dom.backtestKpis.innerHTML = tiles
     .map(function (k) {
       var titleAttr = k.title ? ' title="' + escapeHtml(k.title) + '"' : "";
+      var headHtml = k.tip
+        ? '<div class="backtest-kpi__head">' +
+          '<span class="backtest-kpi__label">' +
+          escapeHtml(k.label) +
+          "</span>" +
+          '<button type="button" class="bt-info-btn" data-tip="' +
+          escapeHtml(k.tip) +
+          '" aria-label="Info: ' +
+          escapeHtml(k.label) +
+          '">i</button>' +
+          "</div>"
+        : '<span class="backtest-kpi__label">' + escapeHtml(k.label) + "</span>";
       return (
         '<div class="backtest-kpi"' +
         titleAttr +
         ">" +
-        '<span class="backtest-kpi__label">' +
-        escapeHtml(k.label) +
-        "</span>" +
+        headHtml +
         '<strong class="backtest-kpi__value ' +
         k.cls +
         '">' +

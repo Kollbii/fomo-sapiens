@@ -53,6 +53,13 @@ html[data-theme="print"] {
   --plotly-bg: #FFFFFF;
   --plotly-grid: #E8E4DA;
   --plotly-ink: #111111;
+  --bt-fan-outer-fill: rgba(29, 78, 216, 0.10);
+  --bt-fan-inner-fill: rgba(29, 78, 216, 0.20);
+  --bt-heat-low: #A82020;
+  --bt-heat-mid: #F3EFE6;
+  --bt-heat-high: #0F6E4F;
+  --bt-heat-zero-line: rgba(74, 74, 74, 0.35);
+  --bt-transparent: rgba(0, 0, 0, 0);
   --shadow-card: none;
   --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.25);
   --alert-pulse-ring: rgba(217, 119, 6, 0.35);
@@ -100,6 +107,13 @@ html[data-theme="terminal"] {
   --plotly-bg: #11161F;
   --plotly-grid: #1E2636;
   --plotly-ink: #EAECEF;
+  --bt-fan-outer-fill: rgba(56, 189, 248, 0.12);
+  --bt-fan-inner-fill: rgba(56, 189, 248, 0.22);
+  --bt-heat-low: #EF4444;
+  --bt-heat-mid: #1E2636;
+  --bt-heat-high: #10B981;
+  --bt-heat-zero-line: rgba(160, 170, 184, 0.35);
+  --bt-transparent: rgba(0, 0, 0, 0);
   --shadow-card: 0 1px 3px rgba(0, 0, 0, 0.45);
   --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45);
   --alert-pulse-ring: rgba(245, 158, 11, 0.35);

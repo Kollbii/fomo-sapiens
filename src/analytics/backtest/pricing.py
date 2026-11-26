@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Any, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from src.analytics.backtest.fast_cache import FastBarCache
 
 from src.analytics.backtest.context import (
     BarContext,
@@ -256,27 +259,37 @@ def _mk_leg(leg: StrategyLegInput | EvaluatedLeg, **kwargs: Any) -> BacktestLegM
 
 
 def _settled_leg_mark(
-    leg: StrategyLegInput | EvaluatedLeg, bar_ctx: BarContext, bar_et: date, flags: list[str]
-) -> tuple[BacktestLegMark, float | None, bool]:
+    leg: StrategyLegInput | EvaluatedLeg,
+    bar_ctx: BarContext,
+    bar_et: date,
+    flags: list[str],
+    *,
+    collect_leg_marks: bool = True,
+) -> tuple[BacktestLegMark | None, float | None, bool]:
     if bar_et > date.fromisoformat(leg.expiry):
         flags.append(FLAG_LATE_EXPIRY_SETTLEMENT)
     spot = bar_ctx.spot
     if spot is None or spot <= 0.0 or bar_ctx.spot_source not in USABLE_SPOT_SOURCES:
         flags.append(FLAG_UNRESOLVED_EXPIRY_SPOT)
-        return (
-            _mk_leg(leg, price_source="NO_PRICE", quote_source="SETTLEMENT", status="UNRESOLVED"),
-            None,
-            True,
+        mark = (
+            _mk_leg(leg, price_source="NO_PRICE", quote_source="SETTLEMENT", status="UNRESOLVED")
+            if collect_leg_marks
+            else None
         )
+        return mark, None, True
     intr = max(0.0, spot - leg.strike) if leg.right == "C" else max(0.0, leg.strike - spot)
     px = round(intr, 6)
-    mark = _mk_leg(
-        leg,
-        price_used=px,
-        natural_price=px,
-        price_source="INTRINSIC",
-        quote_source="SETTLEMENT",
-        status="SETTLED",
+    mark = (
+        _mk_leg(
+            leg,
+            price_used=px,
+            natural_price=px,
+            price_source="INTRINSIC",
+            quote_source="SETTLEMENT",
+            status="SETTLED",
+        )
+        if collect_leg_marks
+        else None
     )
     return mark, px, False
 
@@ -287,19 +300,19 @@ def _market_leg_mark(
     config: BacktestConfig,
     any_settled: bool,
     flags: list[str],
-) -> tuple[BacktestLegMark, float | None, float | None, float | None, bool, bool]:
+    *,
+    collect_leg_marks: bool = True,
+) -> tuple[BacktestLegMark | None, float | None, float | None, float | None, bool, bool]:
+    mark: BacktestLegMark | None = None
     if entry is None:
         flags.append(FLAG_MISSING_CONTRACT)
         if any_settled:
             flags.append(FLAG_UNRESOLVED_EXPIRY_LEG)
-        return (
-            _mk_leg(leg, price_source="NO_PRICE", quote_source="NONE", status="MISSING_CONTRACT"),
-            None,
-            None,
-            None,
-            any_settled,
-            False,
-        )
+        if collect_leg_marks:
+            mark = _mk_leg(
+                leg, price_source="NO_PRICE", quote_source="NONE", status="MISSING_CONTRACT"
+            )
+        return mark, None, None, None, any_settled, False
 
     raw, q_src = entry
     used_tracked = q_src == "TRACKED"
@@ -324,20 +337,21 @@ def _market_leg_mark(
     else:
         leg_status = "FALLBACK_PRICE" if (res.used_fallback or res.natural_close_fallback) else "OK"
 
-    nat = round(res.natural_close_price, 4) if res.natural_close_price is not None else None
-    mark = _mk_leg(
-        leg,
-        price_used=round(res.price_used, 4) if res.price_used is not None else None,
-        natural_price=nat,
-        price_source=res.price_source,
-        quote_source=q_src,
-        status=leg_status,
-        iv=opt_float(raw.get("iv")),
-        delta=opt_float(raw.get("delta")),
-        gamma=opt_float(raw.get("gamma")),
-        theta=opt_float(raw.get("theta")),
-        vega=opt_float(raw.get("vega")),
-    )
+    if collect_leg_marks:
+        nat = round(res.natural_close_price, 4) if res.natural_close_price is not None else None
+        mark = _mk_leg(
+            leg,
+            price_used=round(res.price_used, 4) if res.price_used is not None else None,
+            natural_price=nat,
+            price_source=res.price_source,
+            quote_source=q_src,
+            status=leg_status,
+            iv=opt_float(raw.get("iv")),
+            delta=opt_float(raw.get("delta")),
+            gamma=opt_float(raw.get("gamma")),
+            theta=opt_float(raw.get("theta")),
+            vega=opt_float(raw.get("vega")),
+        )
     return mark, res.price_used, res.natural_close_price, active_px, blocked, used_tracked
 
 
@@ -351,25 +365,43 @@ def evaluate_trade_step_on_bar(
     config: BacktestConfig,
     *,
     ctx: BarContext | None = None,
+    fast_cache: FastBarCache | None = None,
+    bar_idx: int | None = None,
+    need_greeks: bool = True,
+    collect_leg_marks: bool = True,
 ) -> EvaluatedStepData:
     """Mark every leg of an open trade on `bar` (settling expired legs when cutoff reached)."""
-    bar_ctx = ctx if ctx is not None else extract_bar_context(bar)
-    bar_et = et_date(bar.ts_utc)
+    if fast_cache is not None and bar_idx is not None:
+        entry = fast_cache.entries[bar_idx]
+        bar_ctx = ctx if ctx is not None else entry.ctx
+        bar_et = entry.bar_et
+    else:
+        bar_ctx = ctx if ctx is not None else extract_bar_context(bar)
+        bar_et = et_date(bar.ts_utc)
     settled_flags = [is_leg_settled(leg.expiry, bar.ts_utc) for leg in legs]
     any_settled, all_settled = any(settled_flags), all(settled_flags)
 
     unsettled = [leg for leg, is_set in zip(legs, settled_flags, strict=True) if not is_set]
-    matched_map, matched_tracked_sids = (
-        lookup_legs_on_bar(
-            bar,
-            unsettled,
-            price_basis=config.price_basis,
-            close_price_mode=config.close_price_mode,
-            risk_free_rate=config.risk_free_rate,
-        )
-        if unsettled
-        else ({}, [])
-    )
+    if unsettled:
+        if fast_cache is not None and bar_idx is not None:
+            matched_map, matched_tracked_sids = fast_cache.lookup_legs_fast(
+                bar_idx,
+                unsettled,
+                price_basis=config.price_basis,
+                close_price_mode=config.close_price_mode,
+                risk_free_rate=config.risk_free_rate,
+                need_greeks=need_greeks,
+            )
+        else:
+            matched_map, matched_tracked_sids = lookup_legs_on_bar(
+                bar,
+                unsettled,
+                price_basis=config.price_basis,
+                close_price_mode=config.close_price_mode,
+                risk_free_rate=config.risk_free_rate,
+            )
+    else:
+        matched_map, matched_tracked_sids = {}, []
     unsettled_pos = {
         idx: pos for pos, idx in enumerate(i for i, s in enumerate(settled_flags) if not s)
     }
@@ -384,8 +416,11 @@ def evaluate_trade_step_on_bar(
     for idx, leg in enumerate(legs):
         mult = (1.0 if leg.side == "BUY" else -1.0) * float(leg.qty) * 100.0
         if settled_flags[idx]:
-            l_mark, intr, blocked = _settled_leg_mark(leg, bar_ctx, bar_et, flags)
-            leg_marks.append(l_mark)
+            l_mark, intr, blocked = _settled_leg_mark(
+                leg, bar_ctx, bar_et, flags, collect_leg_marks=collect_leg_marks
+            )
+            if l_mark is not None:
+                leg_marks.append(l_mark)
             if blocked or intr is None:
                 mark_ok = nat_ok = active_ok = False
                 settlement_blocked = True
@@ -398,9 +433,15 @@ def evaluate_trade_step_on_bar(
             continue
         unexpired_close_contracts += leg.qty
         l_mark, px_u, px_n, px_a, blk, trk = _market_leg_mark(
-            leg, matched_map.get(unsettled_pos[idx]), config, any_settled, flags
+            leg,
+            matched_map.get(unsettled_pos[idx]),
+            config,
+            any_settled,
+            flags,
+            collect_leg_marks=collect_leg_marks,
         )
-        leg_marks.append(l_mark)
+        if l_mark is not None:
+            leg_marks.append(l_mark)
         settlement_blocked, used_tracked = settlement_blocked or blk, used_tracked or trk
         mark_val, mark_ok = _acc(mark_val, mark_ok, mult, px_u)
         nat_val, nat_ok = _acc(nat_val, nat_ok, mult, px_n)

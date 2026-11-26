@@ -9,7 +9,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from src.analytics.backtest import FLAG_BROKER_FILL_ENTRY, BacktestConfig
+from src.analytics.backtest import FLAG_BROKER_FILL_ENTRY, BacktestConfig, RobustnessConfig
 from src.analytics.ledger import (
     LedgerAnalyticsReport,
     LedgerCampaignRow,
@@ -24,9 +24,16 @@ from src.core.exceptions import (
     InvalidTickerError,
     SnapshotNotFoundError,
 )
+from src.services import backtest as backtest_svc
 from src.services.analyzer import AnalyzerService
-from src.services.backtest import list_backtest_entries, run_backtest
+from src.services.backtest import (
+    clear_daily_bar_cache,
+    list_backtest_entries,
+    run_backtest,
+    run_backtest_robustness,
+)
 from src.services.schemas import (
+    BacktestRobustnessRequest,
     BacktestRunRequest,
     StrategyEvaluateRequest,
     StrategySuggestRequest,
@@ -1139,3 +1146,313 @@ def test_run_backtest_paper_trade_rejects_end_date_before_entry_date(tmp_path: P
                 end_date=date(2026, 11, 11),
             ),
         )
+
+
+def test_daily_bar_cache_hit_and_invalidation_on_snapshot_or_tracked_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_daily_bar_cache()
+    svc = _make_svc(tmp_path)
+    _seed_multiday_history(svc)
+
+    load_calls = 0
+    real_loader = backtest_svc.load_daily_chain_bars
+
+    def _counting_loader(*args: Any, **kwargs: Any) -> Any:
+        nonlocal load_calls
+        load_calls += 1
+        return real_loader(*args, **kwargs)
+
+    monkeypatch.setattr(backtest_svc, "load_daily_chain_bars", _counting_loader)
+
+    sys_req = BacktestRunRequest(
+        mode="SYSTEMATIC",
+        ticker="NVDA",
+        start_date=date(2026, 11, 5),
+        end_date=date(2026, 11, 12),
+        config=BacktestConfig(
+            strategy_kind="BULL_PUT_SPREAD",
+            entry_every_n_days=1,
+            target_dte_min=20,
+            target_dte_max=60,
+            profit_target_pct=40.0,
+        ),
+    )
+    first_sys = run_backtest(svc, sys_req)
+    assert load_calls == 1
+
+    # Second systematic run hits the stat-keyed cache and produces identical simulation.
+    second_sys = run_backtest(svc, sys_req)
+    assert load_calls == 1
+    assert second_sys.simulation == first_sys.simulation
+
+    # Robustness run over the same window also hits the shared daily-bar cache.
+    rob_req = BacktestRobustnessRequest(
+        ticker="NVDA",
+        start_date=date(2026, 11, 5),
+        end_date=date(2026, 11, 12),
+        config=sys_req.config,
+        sections=["COHORTS"],
+    )
+    rob_hit = run_backtest_robustness(svc, rob_req)
+    assert rob_hit.cache_hit is True
+    assert load_calls == 1
+
+    # Adding a new snapshot CSV immediately invalidates the cache.
+    svc.repo.save_snapshot(
+        "NVDA",
+        _chain_for_day(
+            snapshot_id="NVDA_20261113_190000",
+            ts_utc="2026-11-13T19:00:00Z",
+            market_date="2026-11-13",
+            spot=151.0,
+            short_put_mid=0.95,
+            long_put_mid=0.60,
+            include_quotes=True,
+        ),
+        spot_source="MID",
+    )
+    rob_after_snap = run_backtest_robustness(
+        svc,
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            start_date=date(2026, 11, 5),
+            end_date=date(2026, 11, 13),
+            config=sys_req.config,
+            sections=["COHORTS"],
+        ),
+    )
+    assert rob_after_snap.cache_hit is False
+    assert rob_after_snap.daily_bar_count == 6
+    assert load_calls == 2
+
+    # Same window without changes hits again.
+    rob_repeat = run_backtest_robustness(
+        svc,
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            start_date=date(2026, 11, 5),
+            end_date=date(2026, 11, 13),
+            config=sys_req.config,
+            sections=["COHORTS"],
+        ),
+    )
+    assert rob_repeat.cache_hit is True
+    assert load_calls == 2
+
+    # Adding a tracked quote CSV also invalidates the cache.
+    svc.paper_trades.store.save_quotes(
+        "NVDA",
+        _chain_for_day(
+            snapshot_id="NVDA_20261109_180000",
+            ts_utc="2026-11-09T18:00:00Z",
+            market_date="2026-11-09",
+            spot=147.0,
+            short_put_mid=2.30,
+            long_put_mid=1.50,
+            include_quotes=True,
+        ),
+    )
+    rob_after_tracked = run_backtest_robustness(
+        svc,
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            start_date=date(2026, 11, 5),
+            end_date=date(2026, 11, 13),
+            config=sys_req.config,
+            sections=["COHORTS"],
+        ),
+    )
+    assert rob_after_tracked.cache_hit is False
+    assert load_calls == 3
+
+    # Clear helper resets cache state.
+    clear_daily_bar_cache()
+    rob_after_clear = run_backtest_robustness(
+        svc,
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            start_date=date(2026, 11, 5),
+            end_date=date(2026, 11, 13),
+            config=sys_req.config,
+            sections=["COHORTS"],
+        ),
+    )
+    assert rob_after_clear.cache_hit is False
+    assert load_calls == 4
+
+
+def test_daily_bar_cache_isolates_memo_dicts_across_put_and_get(tmp_path: Path) -> None:
+    svc = _make_svc(tmp_path)
+    _seed_multiday_history(svc)
+    bars, warnings = backtest_svc.load_daily_chain_bars(
+        svc.repo, "NVDA", start_date=date(2026, 11, 5), end_date=date(2026, 11, 12)
+    )
+    cache = backtest_svc._DailyBarCache(max_entries=4)
+    key: tuple[object, ...] = ("NVDA",)
+    initial = backtest_svc.FastBarCache.from_bars(bars)
+    cache.put(key, bars, warnings, initial)
+
+    # Mutating caller's FastBarCache after put() must not leak into the cached entry.
+    initial._entry_scope_cache[("after_put",)] = None
+    initial._enriched_quote_cache[("after_put",)] = {"sentinel": 1}
+    initial._entry_candidate_cache[("after_put",)] = (None, "err")
+
+    hit1 = cache.get(key)
+    hit2 = cache.get(key)
+    assert hit1 is not None and hit2 is not None
+    _, _, c1 = hit1
+    _, _, c2 = hit2
+
+    assert c1 is not initial
+    assert c1 is not c2
+    assert c1.entries is initial.entries
+    assert c1.entries is c2.entries
+    assert c1._entry_scope_cache == {}
+    assert c1._enriched_quote_cache == {}
+    assert c1._entry_candidate_cache == {}
+
+    # Mutating c1's memo dicts must not leak into c2 or future cache hits.
+    c1._entry_scope_cache[("from_c1",)] = None
+    c1._enriched_quote_cache[("from_c1",)] = {"sentinel": 2}
+    c1._entry_candidate_cache[("from_c1",)] = (None, "err")
+
+    assert c2._entry_scope_cache == {}
+    assert c2._enriched_quote_cache == {}
+    assert c2._entry_candidate_cache == {}
+
+    hit3 = cache.get(key)
+    assert hit3 is not None
+    _, _, c3 = hit3
+    assert c3 is not c1
+    assert c3.entries is c1.entries
+    assert c3._entry_scope_cache == {}
+    assert c3._enriched_quote_cache == {}
+    assert c3._entry_candidate_cache == {}
+
+
+def test_run_backtest_robustness_full_and_selective_sections(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_daily_bar_cache()
+    svc = _make_svc(tmp_path)
+    _seed_multiday_history(svc)
+
+    # Zero IBKR calls allowed.
+    def _no_ibkr(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("IBKR must never be called by run_backtest_robustness")
+
+    monkeypatch.setattr(svc.broker_client, "ensure_connected", _no_ibkr)
+
+    cfg = BacktestConfig(
+        strategy_kind="BULL_PUT_SPREAD",
+        target_dte_min=20,
+        target_dte_max=60,
+        profit_target_pct=40.0,
+    )
+    r_cfg = RobustnessConfig.model_validate({"monte_carlo": {"num_paths": 200, "seed": 7}})
+    full_req = BacktestRobustnessRequest(
+        ticker="nvda",
+        start_date=date(2026, 11, 5),
+        end_date=date(2026, 11, 12),
+        config=cfg,
+        robustness_config=r_cfg,
+    )
+    full_res = run_backtest_robustness(svc, full_req)
+    assert full_res.cache_hit is False
+    assert full_res.history_snapshot_count == 5
+    assert full_res.daily_bar_count == 5
+    assert full_res.result.ticker == "NVDA"
+    assert full_res.result.data_sufficiency_tier == "LIMITED"
+    assert full_res.result.requested_sections == [
+        "COHORTS",
+        "SENSITIVITY",
+        "WALK_FORWARD",
+        "MONTE_CARLO",
+    ]
+    assert full_res.result.cohorts is not None
+    assert full_res.result.sensitivity is not None
+    assert full_res.result.walk_forward is not None
+    assert full_res.result.monte_carlo is not None
+    assert len(full_res.result.verdicts) == 4
+
+    # Selective section with duplicates deduplicated cleanly while preserving order.
+    sel_req = BacktestRobustnessRequest(
+        ticker="NVDA",
+        start_date=date(2026, 11, 5),
+        end_date=date(2026, 11, 12),
+        config=cfg,
+        sections=["COHORTS", "COHORTS"],
+        robustness_config=r_cfg,
+    )
+    assert sel_req.sections == ["COHORTS"]
+    sel_res = run_backtest_robustness(svc, sel_req)
+    assert sel_res.cache_hit is True
+    assert sel_res.result.requested_sections == ["COHORTS"]
+    assert sel_res.result.cohorts is not None
+    assert sel_res.result.sensitivity is None
+    assert sel_res.result.walk_forward is None
+    assert sel_res.result.monte_carlo is None
+    verdict_by_sec = {v.section: v.status for v in sel_res.result.verdicts}
+    assert verdict_by_sec["SENSITIVITY"] == "SKIPPED"
+    assert verdict_by_sec["WALK_FORWARD"] == "SKIPPED"
+    assert verdict_by_sec["MONTE_CARLO"] == "SKIPPED"
+
+
+def test_run_backtest_robustness_validation_and_empty_archive(tmp_path: Path) -> None:
+    clear_daily_bar_cache()
+    svc = _make_svc(tmp_path)
+
+    # Empty archive handled gracefully as LIMITED tier.
+    empty_res = run_backtest_robustness(
+        svc,
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            config=BacktestConfig(strategy_kind="BULL_PUT_SPREAD"),
+            sections=["COHORTS"],
+        ),
+    )
+    assert empty_res.history_snapshot_count == 0
+    assert empty_res.daily_bar_count == 0
+    assert empty_res.result.total_bars == 0
+    assert empty_res.result.data_sufficiency_tier == "LIMITED"
+
+    # CUSTOM strategy rejected with BacktestValidationError.
+    with pytest.raises(BacktestValidationError, match="CUSTOM"):
+        run_backtest_robustness(
+            svc,
+            BacktestRobustnessRequest(
+                ticker="NVDA",
+                config=BacktestConfig(strategy_kind="CUSTOM"),
+            ),
+        )
+
+    # Invalid ticker rejected with InvalidTickerError.
+    with pytest.raises(InvalidTickerError):
+        run_backtest_robustness(
+            svc,
+            BacktestRobustnessRequest(
+                ticker="BAD!",
+                config=BacktestConfig(strategy_kind="BULL_PUT_SPREAD"),
+            ),
+        )
+
+    # Inverted date bounds rejected at schema validation and service boundary.
+    with pytest.raises(ValidationError, match="start_date"):
+        BacktestRobustnessRequest(
+            ticker="NVDA",
+            start_date=date(2026, 11, 12),
+            end_date=date(2026, 11, 5),
+        )
+    inverted = BacktestRobustnessRequest.model_construct(
+        ticker="NVDA",
+        start_date=date(2026, 11, 12),
+        end_date=date(2026, 11, 5),
+        config=BacktestConfig(strategy_kind="BULL_PUT_SPREAD"),
+        sections=["COHORTS"],
+        robustness_config=RobustnessConfig(),
+    )
+    with pytest.raises(BacktestValidationError, match="start_date"):
+        run_backtest_robustness(svc, inverted)

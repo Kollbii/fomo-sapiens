@@ -17,6 +17,7 @@ from src.analytics.backtest import (
     BacktestConfig,
     BacktestLegMark,
     BacktestMode,
+    BacktestRobustnessResult,
     BacktestSimulationResult,
     BacktestStrategyKind,
     BacktestTradeRecord,
@@ -31,6 +32,8 @@ from src.analytics.backtest import (
     LegQuoteSource,
     PortfolioSummary,
     PriceBasis,
+    RobustnessConfig,
+    RobustnessSection,
     RollCreditMode,
     StepStatus,
     StockStopMode,
@@ -90,6 +93,9 @@ __all__ = [
     "BacktestEntry",
     "BacktestLegMark",
     "BacktestMode",
+    "BacktestRobustnessRequest",
+    "BacktestRobustnessResponse",
+    "BacktestRobustnessResult",
     "BacktestRunRequest",
     "BacktestRunResponse",
     "BacktestSimulationResult",
@@ -151,6 +157,8 @@ __all__ = [
     "RefreshRequest",
     "RegisterPaperTradeRequest",
     "RepickKeepReason",
+    "RobustnessConfig",
+    "RobustnessSection",
     "RollCreditMode",
     "RollStep",
     "SCREENER_LIVE_MAX_ROWS",
@@ -191,6 +199,10 @@ __all__ = [
     "WatchlistTickerRequest",
     "WheelPhase",
 ]
+
+MAX_TICKER_INPUT_CHARS = 32  # generous bound on raw input; `TickerValidator` is the authority
+
+TickerInput = Annotated[str, Field(min_length=1, max_length=MAX_TICKER_INPUT_CHARS)]
 
 
 class GatewayStatusResponse(BaseModel):
@@ -630,10 +642,57 @@ class BacktestRunResponse(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-# ------------------------------------------------------------------ watchlist & batch refresh
-MAX_TICKER_INPUT_CHARS = 32  # generous bound on raw input; `TickerValidator` is the authority
+def _default_robustness_sections() -> list[RobustnessSection]:
+    return ["COHORTS", "SENSITIVITY", "WALK_FORWARD", "MONTE_CARLO"]
 
-TickerInput = Annotated[str, Field(min_length=1, max_length=MAX_TICKER_INPUT_CHARS)]
+
+class BacktestRobustnessRequest(BaseModel):
+    """Request body for `POST /api/backtest/robustness`."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, allow_inf_nan=False)
+
+    ticker: TickerInput
+    start_date: date | None = None
+    end_date: date | None = None
+    config: BacktestConfig = Field(default_factory=BacktestConfig)
+    sections: list[RobustnessSection] = Field(
+        default_factory=_default_robustness_sections,
+        min_length=1,
+        max_length=4,
+    )
+    robustness_config: RobustnessConfig = Field(default_factory=RobustnessConfig)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> BacktestRobustnessRequest:
+        if (
+            self.start_date is not None
+            and self.end_date is not None
+            and self.start_date > self.end_date
+        ):
+            raise ValueError(
+                f"start_date ({self.start_date.isoformat()}) must be <= "
+                f"end_date ({self.end_date.isoformat()})"
+            )
+        deduped = list(dict.fromkeys(self.sections))
+        if not deduped:
+            raise ValueError("sections must contain at least one section.")
+        self.sections = deduped
+        return self
+
+
+class BacktestRobustnessResponse(BaseModel):
+    """Response body for `POST /api/backtest/robustness`."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    result: BacktestRobustnessResult
+    history_snapshot_count: int
+    daily_bar_count: int
+    cache_hit: bool
+    warnings: list[str] = Field(default_factory=list)
+
+
+# ------------------------------------------------------------------ watchlist & batch refresh
 # `aborted`: stopped by IBKR Gateway trouble (connection lost / request or per-ticker time-out).
 BatchState = Literal["running", "cancelling", "completed", "cancelled", "aborted"]
 # `not_started`: left over when the batch was aborted (Retry re-runs every non-`done` ticker).

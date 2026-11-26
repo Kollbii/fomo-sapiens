@@ -6,9 +6,12 @@ import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import polars as pl
+
+if TYPE_CHECKING:
+    from src.analytics.backtest.fast_cache import FastBarCache
 
 from src.analytics.backtest.context import (
     BarContext,
@@ -453,6 +456,8 @@ def _build_single_leg_entry_result(
     stock_cost_basis: float | None,
     selection_notes: Sequence[str],
     extra_flags: Sequence[str] = (),
+    fast_cache: FastBarCache | None = None,
+    bar_idx: int | None = None,
 ) -> tuple[EntryBuildResult | None, list[str], str | None]:
     spot_val = float(bar_ctx.spot or 0.0)
     if spot_val <= 0.0:
@@ -461,13 +466,23 @@ def _build_single_leg_entry_result(
     ref_iv = chain_reference_iv(list(all_rows), spot_val, chosen_row.expiry)
     leg_states = build_leg_states([(spec, chosen_row)], spot_val, config.risk_free_rate, ref_iv)
     eval_legs = evaluated_legs(leg_states, config.qty)
-    entry_rows, _ = lookup_legs_on_bar(
-        bar,
-        eval_legs,
-        price_basis=config.price_basis,
-        close_price_mode=config.close_price_mode,
-        risk_free_rate=config.risk_free_rate,
-    )
+    if fast_cache is not None and bar_idx is not None:
+        entry_rows, _ = fast_cache.lookup_legs_fast(
+            bar_idx,
+            eval_legs,
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+            risk_free_rate=config.risk_free_rate,
+            need_greeks=False,
+        )
+    else:
+        entry_rows, _ = lookup_legs_on_bar(
+            bar,
+            eval_legs,
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+            risk_free_rate=config.risk_free_rate,
+        )
     found_entry = entry_rows.get(0)
     if found_entry is None:
         return (
@@ -532,7 +547,14 @@ def _build_single_leg_entry_result(
     if res.used_fallback:
         entry_flags.append(FLAG_LEG_FALLBACK_PRICE)
 
-    initial_step = evaluate_trade_step_on_bar(bar, updated_legs, config, ctx=bar_ctx)
+    initial_step = evaluate_trade_step_on_bar(
+        bar,
+        updated_legs,
+        config,
+        ctx=bar_ctx,
+        fast_cache=fast_cache,
+        bar_idx=bar_idx,
+    )
     all_flags = deduplicate_flags([*entry_flags, *initial_step.flags])
     return (
         EntryBuildResult(
@@ -588,6 +610,27 @@ def _rank_short_candidates_for_mode(
     return sorted(candidates, key=_delta_key)
 
 
+def _resolve_empty_scope_outcome(
+    bar: DailyChainBar,
+    config: BacktestConfig,
+    *,
+    raise_on_error: bool,
+) -> tuple[None, list[str], str]:
+    front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
+    if front_df.height == 0:
+        return _fail_or_skip(
+            f"Skipped entry on {bar.market_date}: no contracts in "
+            f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
+            raise_on_error=raise_on_error,
+            skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+        )
+    return _fail_or_skip(
+        f"Skipped entry on {bar.market_date}: selected expiry already reached settlement cutoff.",
+        raise_on_error=raise_on_error,
+        skip_reason="ALREADY_SETTLED",
+    )
+
+
 def select_short_option_candidate(
     bar: DailyChainBar,
     bar_ctx: BarContext,
@@ -598,6 +641,8 @@ def select_short_option_candidate(
     min_call_strike: float | None = None,
     eff_min_credit: float | None = None,
     raise_on_error: bool = False,
+    fast_cache: FastBarCache | None = None,
+    bar_idx: int | None = None,
 ) -> tuple[EntryBuildResult | None, list[str], str | None]:
     """Select an OTM Short Call (Covered Call / Wheel CC) or Short Put (Wheel CSP) on `bar`."""
     if bar.df.height == 0:
@@ -606,42 +651,57 @@ def select_short_option_candidate(
             raise_on_error=raise_on_error,
             skip_reason="EMPTY_CHAIN",
         )
-    front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
-    if front_df.height == 0:
-        return _fail_or_skip(
-            f"Skipped entry on {bar.market_date}: no contracts in "
-            f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
-            raise_on_error=raise_on_error,
-            skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+    if fast_cache is not None and bar_idx is not None:
+        scope = fast_cache.get_entry_scope(
+            bar_idx,
+            dte_min=config.target_dte_min,
+            dte_max=config.target_dte_max,
+            risk_free_rate=config.risk_free_rate,
+            walls_top_n=config.walls_top_n,
+            is_diagonal=False,
         )
-    unsettled_front = [
-        str(exp)
-        for exp in front_df["expiry"].unique().to_list()
-        if not is_leg_settled(str(exp), bar.ts_utc)
-    ]
-    if not unsettled_front:
-        return _fail_or_skip(
-            f"Skipped entry on {bar.market_date}: "
-            "selected expiry already reached settlement cutoff.",
-            raise_on_error=raise_on_error,
-            skip_reason="ALREADY_SETTLED",
-        )
+        if scope is None:
+            return _resolve_empty_scope_outcome(bar, config, raise_on_error=raise_on_error)
+        front_expiry, enriched_df, walls, _und, df_spot, all_rows = scope
+        if not all_rows and df_spot <= 0.0:
+            _und, _df_spot, all_rows = prepare_rows(enriched_df)
+    else:
+        front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
+        if front_df.height == 0:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: no contracts in "
+                f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
+                raise_on_error=raise_on_error,
+                skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+            )
+        unsettled_front = [
+            str(exp)
+            for exp in front_df["expiry"].unique().to_list()
+            if not is_leg_settled(str(exp), bar.ts_utc)
+        ]
+        if not unsettled_front:
+            return _fail_or_skip(
+                f"Skipped entry on {bar.market_date}: "
+                "selected expiry already reached settlement cutoff.",
+                raise_on_error=raise_on_error,
+                skip_reason="ALREADY_SETTLED",
+            )
 
-    front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
-    front_expiry = _pick_front_expiry(
-        front_df,
-        target_dte_min=config.target_dte_min,
-        target_dte_max=config.target_dte_max,
-    )
-    enriched_df = enrich_filtered_greeks(
-        front_df.filter(pl.col("expiry") == front_expiry),
-        risk_free_rate=config.risk_free_rate,
-    )
-    walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+        front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
+        front_expiry = _pick_front_expiry(
+            front_df,
+            target_dte_min=config.target_dte_min,
+            target_dte_max=config.target_dte_max,
+        )
+        enriched_df = enrich_filtered_greeks(
+            front_df,
+            risk_free_rate=config.risk_free_rate,
+        )
+        walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+        _und, _df_spot, all_rows = prepare_rows(enriched_df)
+
     _, call_wall, put_wall = find_wall_for_expiry(walls, front_expiry)
     wall = call_wall if right == "C" else put_wall
-
-    _und, _df_spot, all_rows = prepare_rows(enriched_df)
     side_rows = [r for r in all_rows if r.expiry == front_expiry and r.right == right]
     right_label = "Call" if right == "C" else "Put"
     if not side_rows:
@@ -752,6 +812,8 @@ def select_short_option_candidate(
         all_rows=all_rows,
         stock_cost_basis=stock_cost_basis,
         selection_notes=notes,
+        fast_cache=fast_cache,
+        bar_idx=bar_idx,
     )
     if entry_res is None:
         return _fail_or_skip(
@@ -913,9 +975,16 @@ def build_entry_candidate_outcome(
     wheel_phase: WheelPhase | None = None,
     stock_cost_basis: float | None = None,
     cycle_credits_per_share: float = 0.0,
+    fast_cache: FastBarCache | None = None,
+    bar_idx: int | None = None,
 ) -> tuple[EntryBuildResult | None, list[str], str | None]:
     """Construct and validate a new trade candidate, returning `(entry, notes, skip_reason)`."""
-    bar_ctx = ctx if ctx is not None else extract_bar_context(bar)
+    if ctx is not None:
+        bar_ctx = ctx
+    elif fast_cache is not None and bar_idx is not None:
+        bar_ctx = fast_cache.entries[bar_idx].ctx
+    else:
+        bar_ctx = extract_bar_context(bar)
     if bar_ctx.spot is None or bar_ctx.spot <= 0.0:
         return _fail_or_skip(
             f"Skipped entry on {bar.market_date}: invalid underlying spot price.",
@@ -924,11 +993,112 @@ def build_entry_candidate_outcome(
         )
 
     is_wheel_or_cc = config.strategy_kind in ("COVERED_CALL", "WHEEL")
-    if legs is None and is_wheel_or_cc:
-        right: OptionRight = (
-            "C" if (config.strategy_kind == "COVERED_CALL" or wheel_phase == "CC") else "P"
+    right_is_call = is_wheel_or_cc and (
+        config.strategy_kind == "COVERED_CALL" or wheel_phase == "CC"
+    )
+    eff_basis = (
+        (stock_cost_basis if stock_cost_basis is not None else float(bar_ctx.spot))
+        if right_is_call
+        else None
+    )
+    if fast_cache is not None and bar_idx is not None and legs is None and not raise_on_error:
+        cache_key = _entry_candidate_cache_key(
+            bar.snapshot_id,
+            config,
+            is_wheel_or_cc=is_wheel_or_cc,
+            right_is_call=right_is_call,
+            eff_basis=eff_basis,
+            cycle_credits_per_share=cycle_credits_per_share,
         )
-        eff_basis = stock_cost_basis if stock_cost_basis is not None else float(bar_ctx.spot)
+        cached = fast_cache.entry_candidate_cache.get(cache_key)
+        if cached is not None:
+            cached_entry, cached_skip = cached
+            if cached_entry is not None:
+                return cached_entry, [], None
+            return (
+                None,
+                [f"Skipped entry on {bar.market_date}: {cached_skip or 'ENTRY_SKIPPED'}."],
+                cached_skip,
+            )
+        entry_res, entry_notes, skip_reason = _build_entry_candidate_uncached(
+            bar,
+            bar_ctx,
+            config,
+            legs=legs,
+            raise_on_error=raise_on_error,
+            is_wheel_or_cc=is_wheel_or_cc,
+            right_is_call=right_is_call,
+            eff_basis=eff_basis,
+            cycle_credits_per_share=cycle_credits_per_share,
+            fast_cache=fast_cache,
+            bar_idx=bar_idx,
+        )
+        fast_cache.entry_candidate_cache[cache_key] = (entry_res, skip_reason)
+        return entry_res, entry_notes, skip_reason
+
+    return _build_entry_candidate_uncached(
+        bar,
+        bar_ctx,
+        config,
+        legs=legs,
+        raise_on_error=raise_on_error,
+        is_wheel_or_cc=is_wheel_or_cc,
+        right_is_call=right_is_call,
+        eff_basis=eff_basis,
+        cycle_credits_per_share=cycle_credits_per_share,
+        fast_cache=fast_cache,
+        bar_idx=bar_idx,
+    )
+
+
+def _entry_candidate_cache_key(
+    snapshot_id: str,
+    config: BacktestConfig,
+    *,
+    is_wheel_or_cc: bool,
+    right_is_call: bool,
+    eff_basis: float | None,
+    cycle_credits_per_share: float,
+) -> tuple[object, ...]:
+    eff_phase: WheelPhase | None = ("CC" if right_is_call else "CSP") if is_wheel_or_cc else None
+    return (
+        snapshot_id,
+        config.strategy_kind,
+        config.target_dte_min,
+        config.target_dte_max,
+        config.qty,
+        config.price_basis,
+        config.close_price_mode,
+        config.risk_free_rate,
+        config.walls_top_n,
+        config.min_entry_credit_dollars,
+        config.min_entry_ror_pct,
+        config.strike_selection_mode,
+        config.target_delta,
+        config.cc_strike_floor,
+        eff_phase,
+        float(eff_basis) if (right_is_call and eff_basis is not None) else None,
+        round(float(cycle_credits_per_share), 4) if right_is_call else None,
+    )
+
+
+def _build_entry_candidate_uncached(
+    bar: DailyChainBar,
+    bar_ctx: BarContext,
+    config: BacktestConfig,
+    *,
+    legs: Sequence[StrategyLegInput] | None,
+    raise_on_error: bool,
+    is_wheel_or_cc: bool,
+    right_is_call: bool,
+    eff_basis: float | None,
+    cycle_credits_per_share: float,
+    fast_cache: FastBarCache | None,
+    bar_idx: int | None,
+) -> tuple[EntryBuildResult | None, list[str], str | None]:
+    if legs is None and is_wheel_or_cc:
+        right: OptionRight = "C" if right_is_call else "P"
+        assert eff_basis is not None or not right_is_call
         min_call_strike = (
             resolve_min_call_strike(config, eff_basis, cycle_credits_per_share)
             if right == "C"
@@ -951,6 +1121,8 @@ def build_entry_candidate_outcome(
             min_call_strike=min_call_strike,
             eff_min_credit=cc_min_credit,
             raise_on_error=raise_on_error,
+            fast_cache=fast_cache,
+            bar_idx=bar_idx,
         )
 
     apply_bps_filters = legs is None and config.strategy_kind == "BULL_PUT_SPREAD"
@@ -983,13 +1155,22 @@ def build_entry_candidate_outcome(
                 raise_on_error=raise_on_error,
                 skip_reason="ALREADY_SETTLED",
             )
-        matched_raw, _ = lookup_legs_on_bar(
-            bar,
-            legs,
-            price_basis=config.price_basis,
-            close_price_mode=config.close_price_mode,
-            risk_free_rate=config.risk_free_rate,
-        )
+        if fast_cache is not None and bar_idx is not None:
+            matched_raw, _ = fast_cache.lookup_legs_fast(
+                bar_idx,
+                legs,
+                price_basis=config.price_basis,
+                close_price_mode=config.close_price_mode,
+                risk_free_rate=config.risk_free_rate,
+            )
+        else:
+            matched_raw, _ = lookup_legs_on_bar(
+                bar,
+                legs,
+                price_basis=config.price_basis,
+                close_price_mode=config.close_price_mode,
+                risk_free_rate=config.risk_free_rate,
+            )
         if len(matched_raw) < len(legs):
             missing_desc = ", ".join(
                 f"{leg.expiry} {leg.strike:g}{leg.right}"
@@ -1015,6 +1196,8 @@ def build_entry_candidate_outcome(
                 qty_multiplier=config.qty,
                 risk_free_rate=config.risk_free_rate,
                 walls_report=walls,
+                include_curves=False,
+                include_pop=False,
             )
         except ValueError as exc:
             return _fail_or_skip(
@@ -1031,46 +1214,64 @@ def build_entry_candidate_outcome(
                 raise_on_error=raise_on_error,
                 skip_reason="EMPTY_CHAIN",
             )
-        front_df = filter_df_for_dte_window(bar.df, config.target_dte_min, config.target_dte_max)
-        if front_df.height == 0:
-            return _fail_or_skip(
-                f"Skipped entry on {bar.market_date}: no contracts in "
-                f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
-                raise_on_error=raise_on_error,
-                skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+        prepared_chain: tuple[str, float, list[PreparedRow]] | None = None
+        if fast_cache is not None and bar_idx is not None:
+            scope = fast_cache.get_entry_scope(
+                bar_idx,
+                dte_min=config.target_dte_min,
+                dte_max=config.target_dte_max,
+                risk_free_rate=config.risk_free_rate,
+                walls_top_n=config.walls_top_n,
+                is_diagonal=(config.strategy_kind == "DIAGONAL_SPREAD"),
             )
-        unsettled_front = [
-            str(exp)
-            for exp in front_df["expiry"].unique().to_list()
-            if not is_leg_settled(str(exp), bar.ts_utc)
-        ]
-        if not unsettled_front:
-            return _fail_or_skip(
-                f"Skipped entry on {bar.market_date}: "
-                "selected expiry already reached settlement cutoff.",
-                raise_on_error=raise_on_error,
-                skip_reason="ALREADY_SETTLED",
+            if scope is None:
+                return _resolve_empty_scope_outcome(bar, config, raise_on_error=raise_on_error)
+            front_expiry, enriched_df, walls, underlying, spot, prepared = scope
+            if spot > 0.0:
+                prepared_chain = (underlying, spot, prepared)
+        else:
+            front_df = filter_df_for_dte_window(
+                bar.df, config.target_dte_min, config.target_dte_max
             )
-        front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
-        front_expiry = _pick_front_expiry(
-            front_df,
-            target_dte_min=config.target_dte_min,
-            target_dte_max=config.target_dte_max,
-        )
-        if config.strategy_kind == "DIAGONAL_SPREAD":
-            raw_scope = filter_df_for_dte_window(
-                bar.df, config.target_dte_min, max(config.target_dte_max, 120)
-            )
-            unsettled_scope = [
+            if front_df.height == 0:
+                return _fail_or_skip(
+                    f"Skipped entry on {bar.market_date}: no contracts in "
+                    f"[{config.target_dte_min}, {config.target_dte_max}] DTE.",
+                    raise_on_error=raise_on_error,
+                    skip_reason="NO_EXPIRY_IN_DTE_WINDOW",
+                )
+            unsettled_front = [
                 str(exp)
-                for exp in raw_scope["expiry"].unique().to_list()
+                for exp in front_df["expiry"].unique().to_list()
                 if not is_leg_settled(str(exp), bar.ts_utc)
             ]
-            scope_df = raw_scope.filter(pl.col("expiry").is_in(unsettled_scope))
-        else:
-            scope_df = front_df
-        enriched_df = enrich_filtered_greeks(scope_df, risk_free_rate=config.risk_free_rate)
-        walls = compute_walls(enriched_df, top_n=config.walls_top_n)
+            if not unsettled_front:
+                return _fail_or_skip(
+                    f"Skipped entry on {bar.market_date}: "
+                    "selected expiry already reached settlement cutoff.",
+                    raise_on_error=raise_on_error,
+                    skip_reason="ALREADY_SETTLED",
+                )
+            front_df = front_df.filter(pl.col("expiry").is_in(unsettled_front))
+            front_expiry = _pick_front_expiry(
+                front_df,
+                target_dte_min=config.target_dte_min,
+                target_dte_max=config.target_dte_max,
+            )
+            if config.strategy_kind == "DIAGONAL_SPREAD":
+                raw_scope = filter_df_for_dte_window(
+                    bar.df, config.target_dte_min, max(config.target_dte_max, 120)
+                )
+                unsettled_scope = [
+                    str(exp)
+                    for exp in raw_scope["expiry"].unique().to_list()
+                    if not is_leg_settled(str(exp), bar.ts_utc)
+                ]
+                scope_df = raw_scope.filter(pl.col("expiry").is_in(unsettled_scope))
+            else:
+                scope_df = front_df
+            enriched_df = enrich_filtered_greeks(scope_df, risk_free_rate=config.risk_free_rate)
+            walls = compute_walls(enriched_df, top_n=config.walls_top_n)
         ev_strategy_kind = _to_strategy_kind(config.strategy_kind)
         try:
             ev = evaluate_strategy(
@@ -1083,6 +1284,9 @@ def build_entry_candidate_outcome(
                 min_net_credit_dollars=eff_min_credit,
                 min_ror_pct=eff_min_ror,
                 entry_price_basis=config.price_basis,
+                include_curves=False,
+                include_pop=False,
+                prepared_chain=prepared_chain,
             )
         except StrategyFilterError as exc:
             return _fail_or_skip(
@@ -1112,13 +1316,23 @@ def build_entry_candidate_outcome(
             skip_reason="ALREADY_SETTLED",
         )
 
-    entry_rows, _ = lookup_legs_on_bar(
-        bar,
-        ev.legs,
-        price_basis=config.price_basis,
-        close_price_mode=config.close_price_mode,
-        risk_free_rate=config.risk_free_rate,
-    )
+    if fast_cache is not None and bar_idx is not None:
+        entry_rows, _ = fast_cache.lookup_legs_fast(
+            bar_idx,
+            ev.legs,
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+            risk_free_rate=config.risk_free_rate,
+            need_greeks=False,
+        )
+    else:
+        entry_rows, _ = lookup_legs_on_bar(
+            bar,
+            ev.legs,
+            price_basis=config.price_basis,
+            close_price_mode=config.close_price_mode,
+            risk_free_rate=config.risk_free_rate,
+        )
     entry_cash_mid = 0.0
     entry_cash_nat = 0.0
     updated_legs: list[EvaluatedLeg] = []
@@ -1202,7 +1416,14 @@ def build_entry_candidate_outcome(
                 skip_reason=skip_code,
             )
 
-    initial_step = evaluate_trade_step_on_bar(bar, updated_legs, config, ctx=bar_ctx)
+    initial_step = evaluate_trade_step_on_bar(
+        bar,
+        updated_legs,
+        config,
+        ctx=bar_ctx,
+        fast_cache=fast_cache,
+        bar_idx=bar_idx,
+    )
     all_flags = deduplicate_flags([*entry_flags, *initial_step.flags])
     return (
         EntryBuildResult(

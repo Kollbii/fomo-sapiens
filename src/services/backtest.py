@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import math
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import polars as pl
@@ -14,7 +18,9 @@ from src.analytics.backtest import (
     BacktestConfig,
     BacktestSimulationResult,
     BrokerFillAnchor,
+    FastBarCache,
     resolve_broker_leg_prices,
+    run_robustness_suite,
     run_single_trade_replay,
     run_systematic_backtest,
 )
@@ -33,10 +39,13 @@ from src.services.paper_trades import PAPER_TRADE_ID_RE
 from src.services.schemas import (
     BacktestEntriesResponse,
     BacktestEntry,
+    BacktestRobustnessRequest,
+    BacktestRobustnessResponse,
     BacktestRunRequest,
     BacktestRunResponse,
     BacktestSingleTradeSource,
 )
+from src.storage._atomic import path_stat_sig
 from src.storage.backtest_store import (
     DailyChainBar,
     load_daily_chain_bars,
@@ -55,6 +64,138 @@ from src.storage.schema import (
 _POLAND_TZ = ZoneInfo("Europe/Warsaw")
 
 LegKey = tuple[tuple[str, str, float, str], ...]
+
+
+@dataclass(frozen=True)
+class _DailyBarCacheEntry:
+    bars: tuple[DailyChainBar, ...]
+    warnings: tuple[str, ...]
+    fast_cache: FastBarCache
+
+
+class _DailyBarCache:
+    """Thread-safe bounded LRU cache of loaded daily bars and their `FastBarCache`."""
+
+    def __init__(self, max_entries: int = 8) -> None:
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+        self._entries: OrderedDict[tuple[object, ...], _DailyBarCacheEntry] = OrderedDict()
+
+    def get(
+        self, key: tuple[object, ...]
+    ) -> tuple[list[DailyChainBar], list[str], FastBarCache] | None:
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None:
+                return None
+            self._entries.move_to_end(key)
+            return list(entry.bars), list(entry.warnings), entry.fast_cache.with_fresh_memo()
+
+    def put(
+        self,
+        key: tuple[object, ...],
+        bars: Sequence[DailyChainBar],
+        warnings: Sequence[str],
+        fast_cache: FastBarCache,
+    ) -> None:
+        entry = _DailyBarCacheEntry(
+            bars=tuple(bars),
+            warnings=tuple(warnings),
+            fast_cache=fast_cache.with_fresh_memo(),
+        )
+        with self._lock:
+            self._entries[key] = entry
+            self._entries.move_to_end(key)
+            while len(self._entries) > self._max_entries:
+                self._entries.popitem(last=False)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._entries.clear()
+
+
+_DAILY_BAR_CACHE = _DailyBarCache(max_entries=8)
+
+
+def clear_daily_bar_cache() -> None:
+    """Clear the module-level daily-bar LRU cache (intended for tests)."""
+    _DAILY_BAR_CACHE.clear()
+
+
+def _dir_csv_sig(directory: Path) -> tuple[object, ...] | None:
+    """Return `(dir_mtime_ns, ((name, mtime_ns, size, ino), ...))` for CSVs in `directory`."""
+    if not directory.is_dir():
+        return None
+    try:
+        dir_st = directory.stat()
+    except OSError:
+        return None
+    file_sigs: list[tuple[str, int, int, int]] = []
+    for path in sorted(directory.glob("*.csv")):
+        if path.name.startswith("."):
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        file_sigs.append((path.name, st.st_mtime_ns, st.st_size, st.st_ino))
+    return (dir_st.st_mtime_ns, tuple(file_sigs))
+
+
+def _build_daily_bar_cache_key(
+    svc: AnalyzerService,
+    symbol: str,
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[object, ...]:
+    tracked_dir = svc.tracked_dir
+    snapshot_sig = _dir_csv_sig(svc.repo.snapshots_dir / symbol)
+    tracked_sig = _dir_csv_sig(tracked_dir / symbol) if tracked_dir is not None else None
+    sig: tuple[object, ...] = (
+        path_stat_sig(svc.repo.index_path),
+        snapshot_sig,
+        tracked_sig,
+    )
+    return (
+        str(svc.repo.root),
+        symbol,
+        start_date.isoformat() if start_date is not None else None,
+        end_date.isoformat() if end_date is not None else None,
+        str(tracked_dir) if tracked_dir is not None else None,
+        sig,
+    )
+
+
+def _load_cached_daily_bars(
+    svc: AnalyzerService,
+    symbol: str,
+    *,
+    start_date: date | None,
+    end_date: date | None,
+) -> tuple[list[DailyChainBar], list[str], FastBarCache, bool]:
+    """Load daily bars + `FastBarCache` from the stat-keyed LRU cache or disk."""
+    cache_key = _build_daily_bar_cache_key(
+        svc,
+        symbol,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    cached = _DAILY_BAR_CACHE.get(cache_key)
+    if cached is not None:
+        bars, warnings, fast_cache = cached
+        return bars, warnings, fast_cache, True
+
+    bars, warnings = load_daily_chain_bars(
+        svc.repo,
+        symbol,
+        start_date=start_date,
+        end_date=end_date,
+        tracked_dir=svc.tracked_dir,
+    )
+    fast_cache = FastBarCache.from_bars(bars)
+    _DAILY_BAR_CACHE.put(cache_key, bars, warnings, fast_cache)
+    return bars, warnings, fast_cache, False
 
 
 def fmt_poland(ts: datetime) -> str:
@@ -290,12 +431,11 @@ def _run_systematic(svc: AnalyzerService, payload: BacktestRunRequest) -> Backte
     history_count = sum(
         1 for m in metas if _snapshot_in_window(m, payload.start_date, payload.end_date)
     )
-    bars, warnings = load_daily_chain_bars(
-        svc.repo,
+    bars, warnings, fast_cache, _cache_hit = _load_cached_daily_bars(
+        svc,
         symbol,
         start_date=payload.start_date,
         end_date=payload.end_date,
-        tracked_dir=svc.tracked_dir,
     )
     try:
         simulation = run_systematic_backtest(
@@ -303,6 +443,7 @@ def _run_systematic(svc: AnalyzerService, payload: BacktestRunRequest) -> Backte
             payload.config,
             ticker=symbol,
             legs=payload.legs,
+            fast_cache=fast_cache,
         )
     except AnalyzerError:
         raise
@@ -317,6 +458,58 @@ def _run_systematic(svc: AnalyzerService, payload: BacktestRunRequest) -> Backte
         matching_paper_trade=None,
         history_snapshot_count=history_count,
         daily_bar_count=len(bars),
+        warnings=warnings,
+    )
+
+
+def run_backtest_robustness(
+    svc: AnalyzerService,
+    payload: BacktestRobustnessRequest,
+) -> BacktestRobustnessResponse:
+    """Run the Backtester Robustness Suite over cached daily bars (zero IBKR calls)."""
+    symbol = svc.validate_ticker(payload.ticker)
+    if (
+        payload.start_date is not None
+        and payload.end_date is not None
+        and payload.start_date > payload.end_date
+    ):
+        raise BacktestValidationError(
+            f"start_date ({payload.start_date.isoformat()}) must be <= "
+            f"end_date ({payload.end_date.isoformat()})."
+        )
+    _validate_backtest_config(payload.config)
+    if payload.config.strategy_kind == "CUSTOM":
+        raise BacktestValidationError("CUSTOM strategy is not supported in Robustness Suite.")
+
+    metas = svc.repo.list_snapshots(symbol)
+    history_count = sum(
+        1 for m in metas if _snapshot_in_window(m, payload.start_date, payload.end_date)
+    )
+    bars, warnings, fast_cache, cache_hit = _load_cached_daily_bars(
+        svc,
+        symbol,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+    )
+    try:
+        result = run_robustness_suite(
+            bars,
+            payload.config,
+            ticker=symbol,
+            sections=payload.sections,
+            robustness_config=payload.robustness_config,
+            fast_cache=fast_cache,
+        )
+    except AnalyzerError:
+        raise
+    except ValueError as exc:
+        raise BacktestValidationError(str(exc)) from exc
+
+    return BacktestRobustnessResponse(
+        result=result,
+        history_snapshot_count=history_count,
+        daily_bar_count=len(bars),
+        cache_hit=cache_hit,
         warnings=warnings,
     )
 

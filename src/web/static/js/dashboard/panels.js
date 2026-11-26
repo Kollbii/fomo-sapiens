@@ -41,6 +41,9 @@ import {
 import {
   renderBacktestChart,
 } from "./backtest_charts.js";
+import {
+  rerenderRobustnessChartsOnTheme,
+} from "./backtest_robustness.js";
 
 // ------------------------------------------------------------------ Panel Visibility
 export function readPanelVisibility() {
@@ -233,15 +236,26 @@ function scheduleRevealedPanelRenders(revealed) {
           renderLedgerChart(state.ledgerData.report, t);
         }
       } else if (pid === "backtest") {
-        if (state.backtestResult && state.backtestResult.simulation) {
+        if (
+          state.backtestMode !== "ROBUSTNESS" &&
+          state.backtestResult &&
+          state.backtestResult.simulation
+        ) {
           renderBacktestChart(state.backtestResult, t);
+        }
+        if (state.backtestMode === "ROBUSTNESS" && state.backtestRobustnessResult) {
+          rerenderRobustnessChartsOnTheme();
         }
       } else if (state.chainData) {
         renderPanelChartById(pid, state.chainData, t);
       }
-      var canvasEl = card ? card.querySelector(".chart-canvas") : null;
-      if (canvasEl && window.Plotly && window.Plotly.Plots && canvasEl.data) {
-        window.Plotly.Plots.resize(canvasEl);
+      var canvasEls = card ? card.querySelectorAll(".chart-canvas") : [];
+      if (window.Plotly && window.Plotly.Plots) {
+        for (var c = 0; c < canvasEls.length; c++) {
+          if (canvasEls[c] && canvasEls[c].data && !canvasEls[c].hidden) {
+            window.Plotly.Plots.resize(canvasEls[c]);
+          }
+        }
       }
     }
   });

@@ -12,6 +12,7 @@ import {
 } from "./helpers.js";
 import {
   ensurePanelVisible,
+  isPanelVisible,
 } from "./panels.js";
 import {
   apiJson,
@@ -42,6 +43,14 @@ import {
   renderTradeLog,
   toggleBacktestTradeExpand,
 } from "./backtest_tables.js";
+import {
+  bindRobustnessEvents,
+  markRobustnessStaleForTicker,
+  rerenderRobustnessChartsOnTheme,
+  resizeVisibleRobustnessCharts,
+  runRobustnessAudit,
+  syncRobustnessControlState,
+} from "./backtest_robustness.js";
 
 function setSegActive(groupEl, attrName, value) {
   if (!groupEl) return;
@@ -56,8 +65,9 @@ function setSegActive(groupEl, attrName, value) {
 
 export function syncBacktestControlVisibility() {
   var isSingle = state.backtestMode === "SINGLE_TRADE";
+  var isRobustness = state.backtestMode === "ROBUSTNESS";
   var source = state.backtestSource;
-  var cadence = dom.backtestCadenceSelect ? dom.backtestCadenceSelect.value : "WEEKLY_DAY";
+  var cadence = dom.backtestCadenceSelect ? dom.backtestCadenceSelect.value : "WHEN_FLAT";
   var strat = dom.backtestStrategySelect ? dom.backtestStrategySelect.value : "BULL_PUT_SPREAD";
 
   if (dom.backtestSingleControls) dom.backtestSingleControls.hidden = !isSingle;
@@ -67,11 +77,20 @@ export function syncBacktestControlVisibility() {
     sysEls[i].hidden = isSingle;
   }
 
+  var sysOnlyEls = document.querySelectorAll("[data-bt-systematic-only]");
+  for (var k = 0; k < sysOnlyEls.length; k++) {
+    sysOnlyEls[k].hidden = isSingle || isRobustness;
+  }
+
   var weekdayEl = document.querySelector("[data-bt-weekday]");
-  if (weekdayEl) weekdayEl.hidden = isSingle || cadence !== "WEEKLY_DAY";
+  if (weekdayEl) weekdayEl.hidden = isSingle || isRobustness || cadence !== "WEEKLY_DAY";
 
   var everyNEl = document.querySelector("[data-bt-every-n]");
-  if (everyNEl) everyNEl.hidden = isSingle || cadence !== "EVERY_N_DAYS";
+  if (everyNEl) everyNEl.hidden = isSingle || isRobustness || cadence !== "EVERY_N_DAYS";
+
+  if (dom.backtestCadenceLegacyHint) {
+    dom.backtestCadenceLegacyHint.hidden = isSingle || isRobustness || cadence !== "WEEKLY_DAY";
+  }
 
   var entryFiltersEl = document.querySelector("[data-bt-entry-filters]");
   var isWheelOrCc = strat === "COVERED_CALL" || strat === "WHEEL";
@@ -110,7 +129,23 @@ export function syncBacktestControlVisibility() {
   if (paperWrap) paperWrap.hidden = !isSingle || source !== "PAPER_TRADE";
 
   if (dom.backtestLegsBox) {
-    dom.backtestLegsBox.hidden = !(strat === "CUSTOM" || (isSingle && source === "LEGS"));
+    dom.backtestLegsBox.hidden =
+      isRobustness || !(strat === "CUSTOM" || (isSingle && source === "LEGS"));
+  }
+
+  if (dom.backtestKpis) dom.backtestKpis.hidden = isRobustness;
+  if (dom.backtestChartToolbar) dom.backtestChartToolbar.hidden = isRobustness;
+  if (dom.backtestChartEl) dom.backtestChartEl.hidden = isRobustness;
+  if (dom.backtestTablesGrid) dom.backtestTablesGrid.hidden = isRobustness;
+  if (dom.backtestAssumptions) dom.backtestAssumptions.hidden = isRobustness;
+  if (dom.backtestRobustnessPanel) dom.backtestRobustnessPanel.hidden = !isRobustness;
+
+  if (dom.backtestSavePaperBtn) {
+    dom.backtestSavePaperBtn.hidden = isRobustness;
+    dom.backtestSavePaperBtn.disabled = isRobustness;
+  }
+  if (dom.backtestRunBtn) {
+    dom.backtestRunBtn.textContent = isRobustness ? "RUN FULL AUDIT" : "RUN BACKTEST";
   }
 
   var simMode =
@@ -119,7 +154,7 @@ export function syncBacktestControlVisibility() {
       : null;
   var showChartViewToggle = simMode ? simMode === "SYSTEMATIC" : !isSingle;
   if (dom.backtestChartViewGroup) {
-    dom.backtestChartViewGroup.hidden = !showChartViewToggle;
+    dom.backtestChartViewGroup.hidden = isRobustness || !showChartViewToggle;
   }
 
   setSegActive(dom.backtestModeGroup, "data-bt-mode", state.backtestMode);
@@ -128,6 +163,53 @@ export function syncBacktestControlVisibility() {
   setSegActive(dom.backtestCloseModeGroup, "data-bt-close-mode", state.backtestCloseMode);
   setSegActive(dom.backtestTpSlBasisGroup, "data-bt-tpsl-basis", state.backtestTpSlBasis);
   setSegActive(dom.backtestChartViewGroup, "data-bt-chart-view", state.backtestChartView);
+
+  syncRobustnessControlState();
+  syncCapitalAdequacyHint();
+  if (isRobustness) {
+    resizeVisibleRobustnessCharts();
+  }
+}
+
+export function syncCapitalAdequacyHint() {
+  if (!dom.backtestCapitalAdequacy) return;
+  var strat = dom.backtestStrategySelect ? dom.backtestStrategySelect.value : "BULL_PUT_SPREAD";
+  var isSingleNonAuto = state.backtestMode === "SINGLE_TRADE" && state.backtestSource !== "AUTO_BUILD";
+  var isWheelOrCc = (strat === "COVERED_CALL" || strat === "WHEEL") && !isSingleNonAuto;
+  var spot =
+    state.chainData && state.chainData.underlying_price
+      ? Number(state.chainData.underlying_price)
+      : 0;
+  var qty = Math.max(1, parseInt(dom.backtestQty ? dom.backtestQty.value : "1", 10) || 1);
+  var initialCap = Number(dom.backtestInitialCapital ? dom.backtestInitialCapital.value : "10000") || 0;
+  var requiredNotional = 100 * qty * spot;
+
+  if (!isWheelOrCc || !(spot > 0) || !(initialCap < requiredNotional)) {
+    dom.backtestCapitalAdequacy.hidden = true;
+    return;
+  }
+
+  var suggestedCap = Math.max(100, Math.ceil(requiredNotional / 100) * 100);
+  var shareCount = 100 * qty;
+  dom.backtestCapitalAdequacy.hidden = false;
+  if (dom.backtestCapitalAdequacyText) {
+    dom.backtestCapitalAdequacyText.textContent =
+      (strat === "WHEEL" ? "Wheel" : "Covered Call") +
+      " requires " +
+      shareCount +
+      " shares @ $" +
+      spot.toFixed(2) +
+      " (~$" +
+      Math.round(requiredNotional).toLocaleString("en-US") +
+      " notional), exceeding Initial Capital ($" +
+      Math.round(initialCap).toLocaleString("en-US") +
+      ").";
+  }
+  if (dom.backtestMatchCapitalBtn) {
+    dom.backtestMatchCapitalBtn.textContent = "Size to $" + suggestedCap.toLocaleString("en-US");
+    if (!dom.backtestMatchCapitalBtn.dataset) dom.backtestMatchCapitalBtn.dataset = {};
+    dom.backtestMatchCapitalBtn.dataset.suggestedCapital = String(suggestedCap);
+  }
 }
 
 function renderEntrySelectOptions(entries) {
@@ -180,6 +262,9 @@ function renderEntrySelectOptions(entries) {
 export async function backtestOnSnapshotsLoaded(ticker) {
   var sym = String(ticker || state.ticker || "").trim().toUpperCase();
   if (!sym) return;
+  if (state.backtestRobustnessResult && state.backtestRobustnessResult.ticker !== sym) {
+    markRobustnessStaleForTicker(sym);
+  }
   var res = await apiJson("/api/backtest/entries/" + encodeURIComponent(sym));
   if (res.ok && res.body) {
     state.backtestEntries = Array.isArray(res.body.entries) ? res.body.entries : [];
@@ -187,6 +272,7 @@ export async function backtestOnSnapshotsLoaded(ticker) {
     renderEntrySelectOptions(state.backtestEntries);
   }
   renderPaperTradesList();
+  syncCapitalAdequacyHint();
 }
 
 function findPaperTradeById(tradeId) {
@@ -241,7 +327,7 @@ function serializeLegsForRequest() {
   });
 }
 
-function buildBacktestPayload() {
+export function buildSharedBacktestConfig() {
   var mode = state.backtestMode;
   var strat = dom.backtestStrategySelect ? dom.backtestStrategySelect.value : "BULL_PUT_SPREAD";
   var dteMinParsed = parseInt(dom.backtestDteMin ? dom.backtestDteMin.value : "30", 10);
@@ -250,7 +336,7 @@ function buildBacktestPayload() {
     strategy_kind: strat,
     target_dte_min: Number.isNaN(dteMinParsed) ? 30 : dteMinParsed,
     target_dte_max: Number.isNaN(dteMaxParsed) ? 60 : dteMaxParsed,
-    entry_cadence: dom.backtestCadenceSelect ? dom.backtestCadenceSelect.value : "WEEKLY_DAY",
+    entry_cadence: dom.backtestCadenceSelect ? dom.backtestCadenceSelect.value : "WHEN_FLAT",
     entry_weekday: parseInt(dom.backtestWeekdaySelect ? dom.backtestWeekdaySelect.value : "4", 10),
     entry_every_n_days: parseInt(dom.backtestEveryNDays ? dom.backtestEveryNDays.value : "5", 10) || 5,
     initial_capital: Number(dom.backtestInitialCapital ? dom.backtestInitialCapital.value : "10000") || 10000,
@@ -264,9 +350,9 @@ function buildBacktestPayload() {
     stop_loss_pct: optionalNumberInput(dom.backtestSlPct, false),
     exit_dte: optionalNumberInput(dom.backtestExitDte, true),
     min_entry_credit_dollars:
-      mode === "SYSTEMATIC" ? optionalFilterNumberInput(dom.backtestMinCredit) : null,
+      mode !== "SINGLE_TRADE" ? optionalFilterNumberInput(dom.backtestMinCredit) : null,
     min_entry_ror_pct:
-      mode === "SYSTEMATIC" && strat === "BULL_PUT_SPREAD"
+      mode !== "SINGLE_TRADE" && strat === "BULL_PUT_SPREAD"
         ? optionalFilterNumberInput(dom.backtestMinRor)
         : null,
     strike_selection_mode: dom.backtestStrikeModeSelect
@@ -285,6 +371,13 @@ function buildBacktestPayload() {
   };
   if (Number.isNaN(cfg.entry_weekday)) cfg.entry_weekday = 4;
   if (Number.isNaN(cfg.commission_per_contract)) cfg.commission_per_contract = 0.65;
+  return cfg;
+}
+
+function buildBacktestPayload() {
+  var mode = state.backtestMode;
+  var cfg = buildSharedBacktestConfig();
+  var strat = cfg.strategy_kind;
 
   var payload = {
     mode: mode,
@@ -323,7 +416,68 @@ function buildBacktestPayload() {
   return payload;
 }
 
+function applySingleSensitivityParam(paramName, rawValue) {
+  if (!paramName) return;
+  if (paramName === "profit_target_pct" && dom.backtestTpPct) {
+    dom.backtestTpPct.value = Number(rawValue) <= 0 ? "" : String(rawValue);
+  } else if (paramName === "stop_loss_pct" && dom.backtestSlPct) {
+    dom.backtestSlPct.value = Number(rawValue) <= 0 ? "" : String(rawValue);
+  } else if (paramName === "exit_dte" && dom.backtestExitDte) {
+    dom.backtestExitDte.value = String(Math.round(Number(rawValue)));
+  } else if (paramName === "dte_bucket") {
+    var parts = String(rawValue || "").replace(":", "-").split("-");
+    if (parts.length === 2) {
+      if (dom.backtestDteMin) dom.backtestDteMin.value = String(parseInt(parts[0], 10));
+      if (dom.backtestDteMax) dom.backtestDteMax.value = String(parseInt(parts[1], 10));
+    }
+  } else if (paramName === "target_delta" && dom.backtestTargetDelta) {
+    dom.backtestTargetDelta.value = String(rawValue);
+    if (dom.backtestStrikeModeSelect) {
+      dom.backtestStrikeModeSelect.value = "TARGET_DELTA";
+    }
+  } else if (paramName === "min_entry_credit_dollars" && dom.backtestMinCredit) {
+    dom.backtestMinCredit.value = Number(rawValue) <= 0 ? "" : String(rawValue);
+  } else if (paramName === "min_entry_ror_pct" && dom.backtestMinRor) {
+    dom.backtestMinRor.value = Number(rawValue) <= 0 ? "" : String(rawValue);
+  }
+}
+
+export var SENSITIVITY_PARAM_LABELS = {
+  profit_target_pct: "Profit Target %",
+  stop_loss_pct: "Stop Loss %",
+  exit_dte: "Exit DTE",
+  dte_bucket: "DTE Window",
+  target_delta: "Target Delta",
+  min_entry_credit_dollars: "Min Credit ($)",
+  min_entry_ror_pct: "Min RoR (%)",
+};
+
+export function applySensitivityCellToSystematic(cell) {
+  if (!cell) return;
+  applySingleSensitivityParam(cell.x_param, cell.x_value);
+  applySingleSensitivityParam(cell.y_param, cell.y_value);
+  state.backtestMode = "SYSTEMATIC";
+  syncBacktestControlVisibility();
+  var xLabelName = SENSITIVITY_PARAM_LABELS[cell.x_param] || cell.x_param;
+  var yLabelName = SENSITIVITY_PARAM_LABELS[cell.y_param] || cell.y_param;
+  setBacktestNotice(
+    "info",
+    "Applied cell (" +
+      xLabelName +
+      " = " +
+      cell.x_label +
+      ", " +
+      yLabelName +
+      " = " +
+      cell.y_label +
+      ") to Systematic Study controls. Click RUN BACKTEST to inspect trades."
+  );
+}
+
 export async function runBacktestStudy() {
+  if (state.backtestMode === "ROBUSTNESS") {
+    return runRobustnessAudit(null);
+  }
   if (state.backtestBusy) return;
   state.backtestBusy = true;
   if (dom.backtestRunBtn) dom.backtestRunBtn.disabled = true;
@@ -357,9 +511,11 @@ export async function runBacktestStudy() {
 }
 
 export function rerenderBacktestChartOnTheme() {
-  if (state.backtestResult && isPanelVisible("backtest")) {
+  if (!isPanelVisible("backtest")) return;
+  if (state.backtestResult) {
     renderBacktestChart(state.backtestResult, themeVars());
   }
+  rerenderRobustnessChartsOnTheme();
 }
 
 function findMatchedLedgerPaperTrade(trades, campaignId, positionKey, ticker) {
@@ -563,15 +719,89 @@ function wireSegGroup(groupEl, attrName, stateKey, fallback) {
   });
 }
 
+function positionInfoTooltip(btn) {
+  if (!btn || !btn.classList || !btn.classList.contains("bt-info-btn")) return;
+  btn.classList.remove("is-tip-left", "is-tip-right", "is-tip-below");
+  if (typeof btn.getBoundingClientRect !== "function") return;
+  var rect = btn.getBoundingClientRect();
+  var cardRect =
+    dom.backtestCard && typeof dom.backtestCard.getBoundingClientRect === "function"
+      ? dom.backtestCard.getBoundingClientRect()
+      : null;
+  var vw = typeof window !== "undefined" && window.innerWidth ? window.innerWidth : 1280;
+  var minLeft = cardRect ? Math.max(8, cardRect.left + 8) : 8;
+  var maxRight = cardRect && cardRect.right ? Math.min(vw - 8, cardRect.right - 8) : vw - 8;
+  var minTop = cardRect ? Math.max(8, cardRect.top + 8) : 8;
+  var tipHalfW = 145;
+  var tipH = 95;
+  if (rect.left - tipHalfW < minLeft) {
+    btn.classList.add("is-tip-left");
+  } else if (rect.right + tipHalfW > maxRight) {
+    btn.classList.add("is-tip-right");
+  }
+  if (rect.top - tipH < minTop) {
+    btn.classList.add("is-tip-below");
+  }
+}
+
 export function bindBacktestEvents() {
+  if (dom.backtestCard) {
+    dom.backtestCard.addEventListener("mouseover", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest(".bt-info-btn") : null;
+      if (btn) positionInfoTooltip(btn);
+    });
+    dom.backtestCard.addEventListener("focusin", function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest(".bt-info-btn") : null;
+      if (btn) positionInfoTooltip(btn);
+    });
+  }
+
   wireSegGroup(dom.backtestModeGroup, "data-bt-mode", "backtestMode", "SYSTEMATIC");
   wireSegGroup(dom.backtestSourceGroup, "data-bt-source", "backtestSource", "AUTO_BUILD");
   wireSegGroup(dom.backtestPriceBasisGroup, "data-bt-price-basis", "backtestPriceBasis", "AUTO_MID_LAST_CLOSE");
   wireSegGroup(dom.backtestCloseModeGroup, "data-bt-close-mode", "backtestCloseMode", "MID");
   wireSegGroup(dom.backtestTpSlBasisGroup, "data-bt-tpsl-basis", "backtestTpSlBasis", "CREDIT_DEBIT_PCT");
 
+  if (dom.backtestInitialCapital) {
+    dom.backtestInitialCapital.addEventListener("input", syncCapitalAdequacyHint);
+    dom.backtestInitialCapital.addEventListener("change", syncCapitalAdequacyHint);
+  }
+  if (dom.backtestQty) {
+    dom.backtestQty.addEventListener("input", syncCapitalAdequacyHint);
+    dom.backtestQty.addEventListener("change", syncCapitalAdequacyHint);
+  }
+  if (dom.backtestMatchCapitalBtn) {
+    dom.backtestMatchCapitalBtn.addEventListener("click", function () {
+      var spot =
+        state.chainData && state.chainData.underlying_price
+          ? Number(state.chainData.underlying_price)
+          : 0;
+      var qty = Math.max(1, parseInt(dom.backtestQty ? dom.backtestQty.value : "1", 10) || 1);
+      var target =
+        spot > 0
+          ? Math.max(100, Math.ceil((100 * qty * spot) / 100) * 100)
+          : Number(
+              (dom.backtestMatchCapitalBtn.dataset &&
+                dom.backtestMatchCapitalBtn.dataset.suggestedCapital) ||
+                10000
+            );
+      if (dom.backtestInitialCapital && target >= 100) {
+        dom.backtestInitialCapital.value = String(target);
+      }
+      syncCapitalAdequacyHint();
+    });
+  }
+
   if (dom.backtestCadenceSelect) dom.backtestCadenceSelect.addEventListener("change", syncBacktestControlVisibility);
-  if (dom.backtestStrategySelect) dom.backtestStrategySelect.addEventListener("change", syncBacktestControlVisibility);
+  if (dom.backtestStrategySelect) {
+    dom.backtestStrategySelect.addEventListener("change", function () {
+      var strat = dom.backtestStrategySelect.value;
+      if ((strat === "COVERED_CALL" || strat === "WHEEL") && dom.backtestCadenceSelect) {
+        dom.backtestCadenceSelect.value = "WHEN_FLAT";
+      }
+      syncBacktestControlVisibility();
+    });
+  }
   if (dom.backtestStrikeModeSelect) {
     dom.backtestStrikeModeSelect.addEventListener("change", syncBacktestControlVisibility);
   }
@@ -668,6 +898,7 @@ export function bindBacktestEvents() {
     });
   }
   initBacktestTablesSplitter();
+  bindRobustnessEvents();
 }
 
 export function initBacktestPanel() {
